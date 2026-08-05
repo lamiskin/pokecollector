@@ -21,7 +21,7 @@ export default function CardImage({ src, alt, className, showName = false, style
   const showOverlay = !src || failed || showName
 
   return (
-    <div className="relative w-full h-full">
+    <div className="relative h-full">
       <img
         src={src || CARD_BACK}
         alt={alt}

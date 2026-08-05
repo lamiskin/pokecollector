@@ -979,7 +979,7 @@ export default function BinderDetail() {
               </div>
 
               {(isWishlist || isCollection) && (
-                <div className="rounded-xl bg-bg-card/60 p-3 space-y-3">
+                <div className="w-full rounded-xl bg-bg-card/60 p-3 space-y-3">
                   <div className="flex items-center justify-between gap-3">
                     <div>
                       <p className="text-sm font-semibold text-text-primary">{t('binderTypes.equivalentPrints')}</p>
@@ -993,7 +993,7 @@ export default function BinderDetail() {
                   )}
 
                   {(equivalentPrintsData?.equivalents || []).length > 0 && (
-                    <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
+                    <div className="w-full space-y-2 max-h-56 overflow-y-auto pr-1">
                       {equivalentPrintsData.equivalents.map((print) => {
                         const imageUrl = resolveCardImageUrl(print)
                         return (
@@ -1006,14 +1006,14 @@ export default function BinderDetail() {
                             <div className="min-w-0 flex-1">
                               <p className="text-xs font-semibold text-text-primary truncate">{print.set_name || print.set_id} #{print.number}</p>
                               <div className="flex items-center gap-2 flex-wrap text-[11px] text-text-muted">
-                                {print.lang && <span>{tcgdexLanguageLabel(print.lang)}</span>}
-                                {print.rarity && <span>{print.rarity}</span>}
-                                <span>{print.price_market > 0 ? formatPrice(print.price_market) : t('binderTypes.noPriceDataShort')}</span>
-                                {print.variant && <span>{print.variant}</span>}
-                                {print.condition && <span>{print.condition}</span>}
-                                {print.owned && <span className="text-green font-semibold">{t('binderTypes.owned')} {print.owned_quantity}x</span>}
-                                {isCollection && !print.is_current && print.available_quantity === 0 && <span className="text-yellow font-semibold">{t('binderTypes.alreadyUsed')}</span>}
-                                {print.is_current && <span className="text-yellow font-semibold">{t('binderTypes.currentPrint')}</span>}
+                                {print.lang && <span className="flex-shrink-0 whitespace-nowrap">{tcgdexLanguageLabel(print.lang)}</span>}
+                                {print.rarity && <span className="flex-shrink-0 whitespace-nowrap">{print.rarity}</span>}
+                                <span className="flex-shrink-0 whitespace-nowrap">{print.price_market > 0 ? formatPrice(print.price_market) : t('binderTypes.noPriceDataShort')}</span>
+                                {print.variant && <span className="flex-shrink-0 whitespace-nowrap">{print.variant}</span>}
+                                {print.condition && <span className="flex-shrink-0 whitespace-nowrap">{print.condition}</span>}
+                                {print.owned && <span className="flex-shrink-0 whitespace-nowrap text-green font-semibold">{t('binderTypes.owned')} {print.owned_quantity}x</span>}
+                                {isCollection && !print.is_current && print.available_quantity === 0 && <span className="flex-shrink-0 whitespace-nowrap text-yellow font-semibold">{t('binderTypes.alreadyUsed')}</span>}
+                                {print.is_current && <span className="flex-shrink-0 whitespace-nowrap text-yellow font-semibold">{t('binderTypes.currentPrint')}</span>}
                               </div>
                             </div>
                             <button
