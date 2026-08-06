@@ -1,7 +1,7 @@
 import { useState, useMemo, useRef, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, Plus, Trash2, Package, Star, Download, Upload, X, Heart, Minus, HelpCircle } from 'lucide-react'
+import { ArrowLeft, Plus, Trash2, Package, Star, Download, Upload, X, Heart, Minus, HelpCircle, Check } from 'lucide-react'
 import { getBinderCards, removeCardFromBinder, removeBinderEntry, addCardToBinder, addCollectionItemToBinder, searchCards, getCollection, updateBinderEntry, getBinderEntryEquivalentPrints, getBinderPrintOptimization, applyBinderPrintOptimization, switchBinderEntryCard, addBinderEntryToWishlist, addBinderCardsToWishlist, importBinderCsv, exportBinderCsv, getApiErrorMessage } from '../api/client'
 import { useSettings } from '../contexts/SettingsContext'
 import toast from 'react-hot-toast'
@@ -152,6 +152,7 @@ export default function BinderDetail() {
   const [showCsvImportModal, setShowCsvImportModal] = useState(false)
   const [showPrintOptimizer, setShowPrintOptimizer] = useState(false)
   const [selectedPrintOptimizationIds, setSelectedPrintOptimizationIds] = useState([])
+  const [selectedCardIds, setSelectedCardIds] = useState(new Set())
   const fileInputRef = useRef(null)
   const selectedCardCloseRef = useRef(null)
 
@@ -173,7 +174,7 @@ export default function BinderDetail() {
 
   const { data: searchResults, isLoading: searching } = useQuery({
     queryKey: ['card-search-binder', searchQuery],
-    queryFn: () => searchCards({ name: searchQuery, page_size: 12 }).then(r => r.data),
+    queryFn: () => searchCards({ name: searchQuery, page_size: 500 }).then(r => r.data),
     enabled: isWishlist && searchQuery.length > 2,
   })
 
@@ -199,7 +200,7 @@ export default function BinderDetail() {
           .some(value => normalizeSearchText(value) === setCode) && cardNumberMatches(card.number, normalizedNum)
       }
       return nameMatch || setMatch || numberMatch || shortcodeMatch
-    }).slice(0, 24)
+    })
   }, [collectionData, searchQuery, isWishlist, filterSet, filterVariant, filterCondition])
 
   const collectionSets = useMemo(() => {
@@ -232,6 +233,30 @@ export default function BinderDetail() {
     mutationFn: (collectionItemId) => addCollectionItemToBinder(parseInt(binderId), collectionItemId),
     onSuccess: () => {
       toast.success(t('common.add') + ' ✓')
+      queryClient.invalidateQueries({ queryKey: ['binder-cards', binderId] })
+      invalidateTcgdexFilterLanguages(queryClient)
+      queryClient.invalidateQueries({ queryKey: ['binders'] })
+    },
+    onError: (e) => toast.error(e.response?.data?.detail || t('card.addFailed')),
+  })
+
+  const bulkAddWishlistMutation = useMutation({
+    mutationFn: (cardIds) => Promise.all(cardIds.map(cardId => addCardToBinder(parseInt(binderId), cardId, 1))),
+    onSuccess: () => {
+      toast.success(`${t('common.add')} ✓`)
+      setSelectedCardIds(new Set())
+      queryClient.invalidateQueries({ queryKey: ['binder-cards', binderId] })
+      invalidateTcgdexFilterLanguages(queryClient)
+      queryClient.invalidateQueries({ queryKey: ['binders'] })
+    },
+    onError: (e) => toast.error(e.response?.data?.detail || t('card.addFailed')),
+  })
+
+  const bulkAddCollectionMutation = useMutation({
+    mutationFn: (collectionItemIds) => Promise.all(collectionItemIds.map(id => addCollectionItemToBinder(parseInt(binderId), id))),
+    onSuccess: () => {
+      toast.success(`${t('common.add')} ✓`)
+      setSelectedCardIds(new Set())
       queryClient.invalidateQueries({ queryKey: ['binder-cards', binderId] })
       invalidateTcgdexFilterLanguages(queryClient)
       queryClient.invalidateQueries({ queryKey: ['binders'] })
@@ -584,36 +609,71 @@ export default function BinderDetail() {
           {isWishlist && (
             <>
               {searching && <p className="text-text-muted text-sm text-center py-4">{t('common.loading')}</p>}
-              {searchResults?.data && (
-                <div className="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-8 gap-2 max-h-64 overflow-y-auto">
-                  {searchResults.data.map((card) => {
-                    const alreadyAdded = cards.some(c => c.id === card.id)
-                    return (
-                      <div key={card.id}
-                        className={`relative rounded-lg overflow-hidden cursor-pointer group ${alreadyAdded ? 'opacity-40' : ''}`}
-                        onClick={() => {
-                          if (alreadyAdded) return
-                          const requiredQuantity = askQuantity(t, 1)
-                          if (requiredQuantity) addMutation.mutate({ cardId: card.id, requiredQuantity })
-                        }}>
-                        {(card.images?.small || resolveCardImageUrl(card) || card.image) ? (
-                          <img src={resolveCardImageUrl(card)}
-                            alt={card.name} className="w-full aspect-[2.5/3.5] object-cover" loading="lazy" />
-                        ) : (
-                          <div className="w-full aspect-[2.5/3.5] bg-bg-card flex items-center justify-center text-xs text-text-muted p-1 text-center">
-                            {card.name}
-                          </div>
-                        )}
-                        {!alreadyAdded && (
-                          <div className="absolute inset-0 bg-black/0 group-hover:bg-black/50 transition-all flex items-center justify-center opacity-0 group-hover:opacity-100">
-                            <Plus size={20} className="text-white" />
-                          </div>
-                        )}
+              {searchResults?.data && (() => {
+                const availableCards = searchResults.data.filter(card => !cards.some(c => c.id === card.id))
+                const visibleCardIds = new Set(availableCards.map(c => c.id))
+                const selectedCount = Array.from(selectedCardIds).filter(id => visibleCardIds.has(id)).length
+                const allSelected = availableCards.length > 0 && selectedCount === availableCards.length
+                return (
+                  <>
+                    {availableCards.length > 0 && (
+                      <div className="mb-3 flex items-center gap-3 pb-3 border-b border-border">
+                        <label className="flex items-center gap-2 text-sm">
+                          <input type="checkbox" checked={allSelected} onChange={() => {
+                            if (allSelected) {
+                              setSelectedCardIds(prev => {
+                                const next = new Set(prev)
+                                availableCards.forEach(c => next.delete(c.id))
+                                return next
+                              })
+                            } else {
+                              setSelectedCardIds(prev => new Set([...prev, ...availableCards.map(c => c.id)]))
+                            }
+                          }} className="accent-brand-red" />
+                          <span className="text-text-primary font-medium">Select All</span>
+                        </label>
+                        <button
+                          disabled={selectedCount === 0 || bulkAddWishlistMutation.isPending}
+                          onClick={() => bulkAddWishlistMutation.mutate(Array.from(selectedCardIds).filter(id => visibleCardIds.has(id)))}
+                          className="btn-primary text-xs py-1.5"
+                        >
+                          {t('common.add')} ({selectedCount})
+                        </button>
                       </div>
-                    )
-                  })}
-                </div>
-              )}
+                    )}
+                    <div className="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-8 gap-2 max-h-64 overflow-y-auto">
+                      {availableCards.map((card) => {
+                        const isSelected = selectedCardIds.has(card.id)
+                        return (
+                          <div key={card.id}
+                            className={`relative rounded-lg overflow-hidden cursor-pointer group ${isSelected ? 'ring-2 ring-brand-red' : ''}`}
+                            onClick={() => setSelectedCardIds(prev => {
+                              const next = new Set(prev)
+                              if (next.has(card.id)) {
+                                next.delete(card.id)
+                              } else {
+                                next.add(card.id)
+                              }
+                              return next
+                            })}>
+                            {(card.images?.small || resolveCardImageUrl(card) || card.image) ? (
+                              <img src={resolveCardImageUrl(card)}
+                                alt={card.name} className="w-full aspect-[2.5/3.5] object-cover" loading="lazy" />
+                            ) : (
+                              <div className="w-full aspect-[2.5/3.5] bg-bg-card flex items-center justify-center text-xs text-text-muted p-1 text-center">
+                                {card.name}
+                              </div>
+                            )}
+                            <div className="absolute inset-0 bg-black/0 group-hover:bg-black/50 transition-all flex items-center justify-center opacity-0 group-hover:opacity-100">
+                              {isSelected ? <Check size={20} className="text-white" /> : <Plus size={20} className="text-white" />}
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </>
+                )
+              })()}
             </>
           )}
 
@@ -622,49 +682,87 @@ export default function BinderDetail() {
               {searchQuery.length > 0 && searchQuery.length < 2 && (
                 <p className="text-text-muted text-xs text-center">{t('common.search')}...</p>
               )}
-              {collectionSearchResults.length > 0 && (
-                <div className="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-8 gap-2 max-h-64 overflow-y-auto">
-                  {collectionSearchResults.map((item) => {
-                    const card = item.card
-                    if (!card) return null
-                    const alreadyAdded = cards.some(c => c.collection_item_id === item.id)
-                    const unavailable = unavailableCollectionItemIds.has(item.id)
-                    return (
-                      <div key={`${card.id}-${item.id}`}
-                        className={`relative rounded-lg overflow-hidden cursor-pointer group ${getCardVariantEffectClass(item.variant)} ${alreadyAdded || unavailable ? 'opacity-40' : ''}`}
-                        onClick={() => !alreadyAdded && !unavailable && addCollectionItemMutation.mutate(item.id)}
-                        title={`${card.name}${item.variant ? ` (${item.variant})` : ''} · ${item.quantity}x`}>
-                        {resolveCardImageUrl(card) ? (
-                          <img src={resolveCardImageUrl(card)} alt={card.name} className="w-full aspect-[2.5/3.5] object-cover" loading="lazy" />
-                        ) : (
-                          <div className="w-full aspect-[2.5/3.5] bg-bg-card flex items-center justify-center text-xs text-text-muted p-1 text-center">
-                            {card.name}
-                          </div>
-                        )}
-                        <div className="absolute top-0.5 left-0.5 z-10 bg-bg/80 text-text-primary text-xs rounded px-1">{item.quantity}x</div>
-                        {(item.variant || item.condition) && (
-                          <div className="absolute bottom-0 left-0 right-0 z-10 bg-black/70 text-white text-[9px] text-center truncate px-1">
-                            {[item.variant || 'Normal', item.condition].filter(Boolean).join(' · ')}
-                          </div>
-                        )}
-                        {unavailable && !alreadyAdded && (
-                          <div className="absolute inset-0 z-10 bg-black/65 flex items-center justify-center text-white text-[10px] text-center px-1">
-                            {t('binderTypes.alreadyUsed')}
-                          </div>
-                        )}
-                        {!alreadyAdded && !unavailable && (
-                          <div className="absolute inset-0 z-10 bg-black/0 group-hover:bg-black/50 transition-all flex items-center justify-center opacity-0 group-hover:opacity-100">
-                            <Plus size={20} className="text-white" />
-                          </div>
-                        )}
+              {(() => {
+                const availableItems = collectionSearchResults.filter(item => !cards.some(c => c.collection_item_id === item.id) && !unavailableCollectionItemIds.has(item.id))
+                const visibleItemIds = new Set(availableItems.map(i => i.id))
+                const selectedCount = Array.from(selectedCardIds).filter(id => visibleItemIds.has(id)).length
+                const allSelected = availableItems.length > 0 && selectedCount === availableItems.length
+                return (
+                  <>
+                    {availableItems.length > 0 && (
+                      <div className="mb-3 flex items-center gap-3 pb-3 border-b border-border">
+                        <label className="flex items-center gap-2 text-sm">
+                          <input type="checkbox" checked={allSelected} onChange={() => {
+                            if (allSelected) {
+                              setSelectedCardIds(prev => {
+                                const next = new Set(prev)
+                                availableItems.forEach(i => next.delete(i.id))
+                                return next
+                              })
+                            } else {
+                              setSelectedCardIds(prev => new Set([...prev, ...availableItems.map(i => i.id)]))
+                            }
+                          }} className="accent-brand-red" />
+                          <span className="text-text-primary font-medium">Select All</span>
+                        </label>
+                        <button
+                          disabled={selectedCount === 0 || bulkAddCollectionMutation.isPending}
+                          onClick={() => bulkAddCollectionMutation.mutate(Array.from(selectedCardIds).filter(id => visibleItemIds.has(id)))}
+                          className="btn-primary text-xs py-1.5"
+                        >
+                          {t('common.add')} ({selectedCount})
+                        </button>
                       </div>
-                    )
-                  })}
-                </div>
-              )}
-              {searchQuery.length >= 2 && collectionSearchResults.length === 0 && (
-                <p className="text-text-muted text-sm text-center py-4">{t('common.noResults')}</p>
-              )}
+                    )}
+                    {availableItems.length > 0 && (
+                      <div className="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-8 gap-2 max-h-64 overflow-y-auto">
+                        {availableItems.map((item) => {
+                          const card = item.card
+                          if (!card) return null
+                          const isSelected = selectedCardIds.has(item.id)
+                          return (
+                            <div key={`${card.id}-${item.id}`}
+                              className={`relative rounded-lg overflow-hidden cursor-pointer group ${getCardVariantEffectClass(item.variant)} ${isSelected ? 'ring-2 ring-brand-red' : ''}`}
+                              onClick={() => setSelectedCardIds(prev => {
+                                const next = new Set(prev)
+                                if (next.has(item.id)) {
+                                  next.delete(item.id)
+                                } else {
+                                  next.add(item.id)
+                                }
+                                return next
+                              })}
+                              title={`${card.name}${item.variant ? ` (${item.variant})` : ''} · ${item.quantity}x`}>
+                            {resolveCardImageUrl(card) ? (
+                              <img src={resolveCardImageUrl(card)} alt={card.name} className="w-full aspect-[2.5/3.5] object-cover" loading="lazy" />
+                            ) : (
+                              <div className="w-full aspect-[2.5/3.5] bg-bg-card flex items-center justify-center text-xs text-text-muted p-1 text-center">
+                                {card.name}
+                              </div>
+                            )}
+                            <div className="absolute top-0.5 left-0.5 z-10 bg-bg/80 text-text-primary text-xs rounded px-1">{item.quantity}x</div>
+                            {(item.variant || item.condition) && (
+                              <div className="absolute bottom-0 left-0 right-0 z-10 bg-black/70 text-white text-[9px] text-center truncate px-1">
+                                {[item.variant || 'Normal', item.condition].filter(Boolean).join(' · ')}
+                              </div>
+                            )}
+                            <div className="absolute inset-0 z-10 bg-black/0 group-hover:bg-black/50 transition-all flex items-center justify-center opacity-0 group-hover:opacity-100">
+                              {isSelected ? <Check size={20} className="text-white" /> : <Plus size={20} className="text-white" />}
+                            </div>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    )}
+                    {collectionSearchResults.length > 0 && availableItems.length === 0 && (
+                      <p className="text-text-muted text-sm text-center py-4">All matching cards are already in this binder</p>
+                    )}
+                    {searchQuery.length >= 2 && collectionSearchResults.length === 0 && (
+                      <p className="text-text-muted text-sm text-center py-4">{t('common.noResults')}</p>
+                    )}
+                  </>
+                )
+              })()}
             </>
           )}
         </div>
