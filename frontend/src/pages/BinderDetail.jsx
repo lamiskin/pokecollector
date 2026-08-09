@@ -16,6 +16,7 @@ import { formatBinderCountSummary } from '../utils/binderCounts'
 import { binderPickerItemsWithQuantities, binderPickerQuantitiesAreValid, binderPickerQuantityMaximum, canConvertWishlistBinder, clampBinderPickerQuantity } from '../utils/binderQuantity'
 import { CardDialog, CardDisplay, CardLegend, withCollectionItemState } from '../components/card-system'
 import Modal from '../components/ui/Modal'
+import DateRangePicker from '../components/DateRangePicker'
 
 const SPRITE_BASE_URL = 'https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/versions/generation-v/black-white/animated'
 const CONDITIONS = ['Mint', 'NM', 'LP', 'MP', 'HP']
@@ -225,6 +226,8 @@ export default function BinderDetail() {
   const [filterSet, setFilterSet] = useState('')
   const [filterVariant, setFilterVariant] = useState('')
   const [filterCondition, setFilterCondition] = useState('')
+  const [filterAddedFrom, setFilterAddedFrom] = useState('')
+  const [filterAddedTo, setFilterAddedTo] = useState('')
   const [binderFilterSet, setBinderFilterSet] = useState('')
   const [binderFilterStatus, setBinderFilterStatus] = useState('')
   const [binderFilterQuery, setBinderFilterQuery] = useState('')
@@ -275,6 +278,15 @@ export default function BinderDetail() {
       if (filterSet && card.set_ref?.id !== filterSet) return false
       if (filterVariant && (item.variant || '') !== filterVariant) return false
       if (filterCondition && item.condition !== filterCondition) return false
+      if (filterAddedFrom || filterAddedTo) {
+        // added_at is a full ISO datetime; compare on the calendar-date prefix
+        // so the "to" bound includes the whole selected day rather than only
+        // items added before its midnight.
+        const addedDate = item.added_at ? item.added_at.slice(0, 10) : ''
+        if (!addedDate) return false
+        if (filterAddedFrom && addedDate < filterAddedFrom) return false
+        if (filterAddedTo && addedDate > filterAddedTo) return false
+      }
       if (!q) return true
       const nameMatch = textIncludes(card.name, q)
       const setMatch = textIncludes(card.set_ref?.name, q)
@@ -289,7 +301,7 @@ export default function BinderDetail() {
       }
       return nameMatch || setMatch || numberMatch || shortcodeMatch
     }).slice(0, 24)
-  }, [collectionData, searchQuery, isWishlist, filterSet, filterVariant, filterCondition])
+  }, [collectionData, searchQuery, isWishlist, filterSet, filterVariant, filterCondition, filterAddedFrom, filterAddedTo])
 
   const collectionSets = useMemo(() => {
     const map = new Map()
@@ -833,7 +845,7 @@ export default function BinderDetail() {
             className="input mb-4" autoFocus />
 
           {!isWishlist && (
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mb-4">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-4">
               <select className="select text-sm py-1.5" value={filterSet} onChange={(e) => setFilterSet(e.target.value)}>
                 <option value="">{t('common.all')} {t('common.set')}</option>
                 {collectionSets.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
@@ -846,6 +858,11 @@ export default function BinderDetail() {
                 <option value="">{t('common.allConditions')}</option>
                 {CONDITIONS.map(c => <option key={c} value={c}>{c}</option>)}
               </select>
+              <DateRangePicker
+                from={filterAddedFrom}
+                to={filterAddedTo}
+                onChange={({ from, to }) => { setFilterAddedFrom(from); setFilterAddedTo(to) }}
+                placeholder={t('binderTypes.filterAddedDate')} />
             </div>
           )}
 

@@ -148,6 +148,19 @@ const de = {
     loss: 'Verlust',
   },
 
+  dateRange: {
+    anyDate: 'Beliebiges Datum',
+    today: 'Heute',
+    yesterday: 'Gestern',
+    last7Days: 'Letzte 7 Tage',
+    last30Days: 'Letzte 30 Tage',
+    thisMonth: 'Dieser Monat',
+    lastMonth: 'Letzter Monat',
+    thisYear: 'Dieses Jahr',
+    from: 'Von',
+    to: 'Bis',
+  },
+
   auth: {
     login: 'Anmelden',
     logout: 'Abmelden',
@@ -632,8 +645,7 @@ const de = {
     sortName: 'Name',
     sortPnl: 'Gewinn/Verlust',
     filterType: 'Produkttyp',
-    filterDateFrom: 'Von',
-    filterDateTo: 'Bis',
+    filterPurchaseDate: 'Kaufdatum',
     filterOnlyProfit: 'Nur Gewinn',
     filterOnlyLoss: 'Nur Verlust',
     filterAll: 'Alle',
@@ -1210,6 +1222,7 @@ const de = {
     filterBinderCards: 'Binderkarten filtern...',
     allSets: 'Alle Sets',
     allStatuses: 'Alle Status',
+    filterAddedDate: 'Hinzugefügt am',
     ownedComplete: 'Vollständig vorhanden',
     missingCards: 'Fehlende Karten',
     sortBy: 'Binderkarten sortieren',

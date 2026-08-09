@@ -508,8 +508,6 @@ const pt = {
     sortName: 'Nome',
     sortPnl: 'Lucro/Perda',
     filterType: 'Tipo de produto',
-    filterDateFrom: 'De',
-    filterDateTo: 'Até',
     filterOnlyProfit: 'Apenas lucro',
     filterOnlyLoss: 'Apenas perda',
     filterAll: 'Todos',

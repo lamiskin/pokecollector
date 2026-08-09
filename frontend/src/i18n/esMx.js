@@ -508,8 +508,6 @@ const esMx = {
     sortName: 'Nombre',
     sortPnl: 'P&L',
     filterType: 'Tipo de producto',
-    filterDateFrom: 'Desde',
-    filterDateTo: 'Hasta',
     filterOnlyProfit: 'Solo beneficio',
     filterOnlyLoss: 'Solo pérdida',
     filterAll: 'Todo',

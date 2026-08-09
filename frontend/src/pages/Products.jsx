@@ -11,6 +11,7 @@ import { CardRow } from '../components/card-system'
 import MoneyInput from '../components/MoneyInput'
 import PeriodSelector, { PRODUCT_PERIODS, getPeriodCutoff } from '../components/PeriodSelector'
 import AnalyticsSectionNav from '../components/AnalyticsSectionNav'
+import DateRangePicker from '../components/DateRangePicker'
 import Modal from '../components/ui/Modal'
 import toast from 'react-hot-toast'
 import clsx from 'clsx'
@@ -1061,7 +1062,7 @@ export default function Products() {
           </div>
 
           {showFilters && (
-            <div className="pt-3 border-t border-border grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <div className="pt-3 border-t border-border grid grid-cols-2 sm:grid-cols-3 gap-3">
               <div>
                 <label className="text-xs text-text-muted mb-1 block">{t('products.filterType')}</label>
                 <select className="select text-sm py-1.5" value={filterType} onChange={(e) => setFilterType(e.target.value)}>
@@ -1070,12 +1071,11 @@ export default function Products() {
                 </select>
               </div>
               <div>
-                <label className="text-xs text-text-muted mb-1 block">{t('products.filterDateFrom')}</label>
-                <input type="date" value={filterDateFrom} onChange={(e) => setFilterDateFrom(e.target.value)} className="input text-sm py-1.5" />
-              </div>
-              <div>
-                <label className="text-xs text-text-muted mb-1 block">{t('products.filterDateTo')}</label>
-                <input type="date" value={filterDateTo} onChange={(e) => setFilterDateTo(e.target.value)} className="input text-sm py-1.5" />
+                <label className="text-xs text-text-muted mb-1 block">{t('products.filterPurchaseDate')}</label>
+                <DateRangePicker
+                  from={filterDateFrom}
+                  to={filterDateTo}
+                  onChange={({ from, to }) => { setFilterDateFrom(from); setFilterDateTo(to) }} />
               </div>
               <div className="flex items-end">
                 <span className="text-xs text-text-muted">{filteredAndSorted.length} / {products.length} {t('products.items')}</span>

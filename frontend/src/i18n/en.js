@@ -149,6 +149,19 @@ const en = {
     loss: 'Loss',
   },
 
+  dateRange: {
+    anyDate: 'Any date',
+    today: 'Today',
+    yesterday: 'Yesterday',
+    last7Days: 'Last 7 Days',
+    last30Days: 'Last 30 Days',
+    thisMonth: 'This Month',
+    lastMonth: 'Last Month',
+    thisYear: 'This Year',
+    from: 'From',
+    to: 'To',
+  },
+
   auth: {
     login: 'Login',
     logout: 'Logout',
@@ -633,8 +646,7 @@ const en = {
     sortName: 'Name',
     sortPnl: 'P&L',
     filterType: 'Product Type',
-    filterDateFrom: 'From',
-    filterDateTo: 'To',
+    filterPurchaseDate: 'Purchase date',
     filterOnlyProfit: 'Profit only',
     filterOnlyLoss: 'Loss only',
     filterAll: 'All',
@@ -1220,6 +1232,7 @@ const en = {
     filterBinderCards: 'Filter binder cards...',
     allSets: 'All sets',
     allStatuses: 'All statuses',
+    filterAddedDate: 'Added date',
     ownedComplete: 'Owned complete',
     missingCards: 'Missing cards',
     sortBy: 'Sort binder cards',

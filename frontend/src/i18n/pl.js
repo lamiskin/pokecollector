@@ -508,8 +508,6 @@ const pl = {
     sortName: 'Nazwa',
     sortPnl: 'Zysk/strata',
     filterType: 'Typ produktu',
-    filterDateFrom: 'Od',
-    filterDateTo: 'Do',
     filterOnlyProfit: 'Tylko zysk',
     filterOnlyLoss: 'Tylko strata',
     filterAll: 'Wszystkie',

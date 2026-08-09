@@ -506,8 +506,6 @@ const fr = {
     sortName: 'Nom',
     sortPnl: 'P&L',
     filterType: 'Type de produit',
-    filterDateFrom: 'De',
-    filterDateTo: 'À',
     filterOnlyProfit: 'Bénéfice uniquement',
     filterOnlyLoss: 'Perte uniquement',
     filterAll: 'Tout',
