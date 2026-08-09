@@ -274,7 +274,11 @@ export default function CardScanner({ isOpen, onClose, onCardSelected }) {
                 <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4">
                   <p className="mb-2 text-[10px] font-black uppercase tracking-[0.2em] text-text-muted">{t('scanner.detected')}</p>
                   <p className="text-lg font-bold text-white">{results.recognized?.name || '—'}</p>
-                  {results.recognized?.number && <p className="text-sm text-text-muted">Nr. {results.recognized.number}</p>}
+                  {results.recognized?.number_local && (
+                    <p className="text-sm text-text-muted">
+                      Nr. {results.recognized.number_local}{results.recognized.number_total ? `/${results.recognized.number_total}` : ''}
+                    </p>
+                  )}
                   {results.recognized?.language && (
                     <p className="mt-0.5 text-xs uppercase tracking-wider text-text-muted">
                       {t('scanner.detectedLanguage')} {results.recognized.language}

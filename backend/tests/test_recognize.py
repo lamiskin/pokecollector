@@ -1,3 +1,4 @@
+import json
 import unittest
 from unittest.mock import patch
 
@@ -5,14 +6,22 @@ try:
     import httpx
     from fastapi import HTTPException
 
+    import api.recognize as recognize_module
     from api.recognize import (
         DEFAULT_GEMINI_MODEL,
         build_gemini_generate_url,
+        card_set_id,
+        prioritize_candidates,
         get_gemini_model,
         gemini_error_message,
-        normalize_scanner_card_number,
         post_gemini_generate,
-        prioritize_cards_by_number,
+        _extract_json,
+        _normalize_number,
+        _numbers_match,
+        _printed_total_mismatch,
+        _artists_match,
+        _normalize_artist,
+        _recognize_single_image,
     )
     API_TEST_DEPS_AVAILABLE = True
 except ModuleNotFoundError:
@@ -31,67 +40,6 @@ class RecognizeConfigTests(unittest.TestCase):
         with patch.dict("os.environ", {"GEMINI_MODEL": "models/gemini-3.5-flash"}):
             self.assertEqual(get_gemini_model(), "gemini-3.5-flash")
             self.assertIn("/gemini-3.5-flash:generateContent", build_gemini_generate_url())
-
-
-@unittest.skipUnless(API_TEST_DEPS_AVAILABLE, "FastAPI/httpx are not installed in this lightweight test environment")
-class RecognizeCardNumberTests(unittest.TestCase):
-    def test_normalizes_leading_zeros_and_fractional_printed_numbers(self):
-        self.assertEqual(normalize_scanner_card_number("063"), "63")
-        self.assertEqual(normalize_scanner_card_number("136/182"), "136")
-
-    def test_rejects_missing_and_non_leading_numbers(self):
-        self.assertIsNone(normalize_scanner_card_number(None))
-        self.assertIsNone(normalize_scanner_card_number(""))
-        self.assertIsNone(normalize_scanner_card_number("No. 039"))
-        self.assertIsNone(normalize_scanner_card_number("TG01"))
-
-    def test_high_numbered_match_survives_candidate_cap(self):
-        cards = [
-            {"id": f"card-{number}", "localId": str(number)}
-            for number in range(1, 65)
-        ]
-
-        prioritized, match_count = prioritize_cards_by_number(
-            cards,
-            "63/100",
-            number_field="localId",
-        )
-
-        self.assertEqual(match_count, 1)
-        self.assertEqual(prioritized[0]["id"], "card-63")
-        self.assertIn("card-63", [card["id"] for card in prioritized[:8]])
-
-    def test_leading_zero_matches_and_preserves_stable_order(self):
-        cards = [
-            {"id": "before", "number": "5"},
-            {"id": "first-match", "number": "063"},
-            {"id": "between", "number": "9"},
-            {"id": "second-match", "number": "63/100"},
-            {"id": "after", "number": "70"},
-        ]
-
-        prioritized, match_count = prioritize_cards_by_number(cards, "063/100")
-
-        self.assertEqual(match_count, 2)
-        self.assertEqual(
-            [card["id"] for card in prioritized],
-            ["first-match", "second-match", "before", "between", "after"],
-        )
-
-    def test_missing_unusual_or_unmatched_number_keeps_original_order(self):
-        cards = [
-            {"id": "first", "number": "1"},
-            {"id": "second", "number": "2"},
-        ]
-
-        for recognized_number in (None, "No. 039", "999"):
-            with self.subTest(recognized_number=recognized_number):
-                prioritized, match_count = prioritize_cards_by_number(
-                    cards,
-                    recognized_number,
-                )
-                self.assertIs(prioritized, cards)
-                self.assertEqual(match_count, 0)
 
 
 @unittest.skipUnless(API_TEST_DEPS_AVAILABLE, "FastAPI/httpx are not installed in this lightweight test environment")
@@ -118,6 +66,445 @@ class RecognizeApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ctx.exception.status_code, 502)
         self.assertIn("GEMINI_MODEL", ctx.exception.detail)
         self.assertIn("no longer available", ctx.exception.detail)
+
+
+@unittest.skipUnless(API_TEST_DEPS_AVAILABLE, "FastAPI/httpx are not installed in this lightweight test environment")
+class NumberNormalizationTests(unittest.TestCase):
+    def test_strips_leading_zeros_and_denominator(self):
+        self.assertEqual(_normalize_number("063"), "63")
+        self.assertEqual(_normalize_number("63/88"), "63")
+        self.assertEqual(_normalize_number(63), "63")
+
+    def test_no_digits_returns_none(self):
+        self.assertIsNone(_normalize_number(None))
+        self.assertIsNone(_normalize_number(""))
+        self.assertIsNone(_normalize_number("SWSH-PROMO"))
+
+    def test_numbers_match_ignores_leading_zeros(self):
+        self.assertTrue(_numbers_match("063", "63"))
+        self.assertTrue(_numbers_match("088", 88))
+        self.assertFalse(_numbers_match("063", "64"))
+        self.assertFalse(_numbers_match(None, "63"))
+
+
+@unittest.skipUnless(API_TEST_DEPS_AVAILABLE, "FastAPI/httpx are not installed in this lightweight test environment")
+class PrintedTotalMismatchTests(unittest.TestCase):
+    def test_flags_a_real_mismatch(self):
+        # Gemini read "088" off the photo, but the matched candidate's set only has 198 cards.
+        self.assertTrue(_printed_total_mismatch("088", 198))
+
+    def test_matching_totals_are_not_flagged(self):
+        self.assertFalse(_printed_total_mismatch("088", 88))
+        self.assertFalse(_printed_total_mismatch(88, 88))
+
+    def test_missing_data_on_either_side_never_flags(self):
+        # An unread or unsynced total must never look like a false "wrong match".
+        self.assertFalse(_printed_total_mismatch(None, 88))
+        self.assertFalse(_printed_total_mismatch("088", None))
+        self.assertFalse(_printed_total_mismatch("088", 0))
+
+    def test_false_means_no_evidence_not_agreement(self):
+        # Regression guard: this returns False both for "they agree" and for
+        # "we have no total to compare". Callers that rank on it must set the
+        # flag only when a total was actually read, or every candidate in a
+        # synced set looks like a confirmed match and outranks the right card.
+        no_evidence = _printed_total_mismatch(None, 88)
+        agreement = _printed_total_mismatch("088", 88)
+        self.assertEqual(no_evidence, agreement)
+        self.assertIsNone(_normalize_number(None))
+
+
+@unittest.skipUnless(API_TEST_DEPS_AVAILABLE, "FastAPI/httpx are not installed in this lightweight test environment")
+class PhashMatchTests(unittest.IsolatedAsyncioTestCase):
+    """The pHash re-rank must only fire when the answer is unambiguous.
+
+    Benchmarking showed a wrong same-artwork reprint can score *better* than the
+    correct card, so distance alone is not trustworthy — the margin to the
+    runner-up is the guard, and anything close defers to Gemini.
+    """
+
+    @staticmethod
+    def _solid(seed):
+        """A deterministic textured image.
+
+        Deliberately not a flat colour: pHash is a DCT over frequency content,
+        so every solid image hashes identically and the fixture would prove
+        nothing.
+        """
+        import io as _io
+        import random
+        from PIL import Image
+        rng = random.Random(seed)
+        img = Image.new("RGB", (64, 64))
+        img.putdata([
+            (rng.randrange(256), rng.randrange(256), rng.randrange(256))
+            for _ in range(64 * 64)
+        ])
+        buf = _io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+
+    def _patch_downloads(self, mapping):
+        class FakeResp:
+            def __init__(self, content):
+                self.status_code = 200
+                self.content = content
+
+        class FakeClient:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def get(self, url, *a, **k): return FakeResp(mapping[url])
+
+        return patch("api.recognize.httpx.AsyncClient", return_value=FakeClient())
+
+    async def test_returns_none_without_enough_images_to_compare(self):
+        from api.recognize import _phash_best_match
+        photo = self._solid(1)
+        self.assertIsNone(await _phash_best_match([{"image": "u1"}], photo))
+        self.assertIsNone(await _phash_best_match([{"image": None}, {"image": None}], photo))
+
+    async def test_returns_none_without_a_photo(self):
+        from api.recognize import _phash_best_match
+        self.assertIsNone(await _phash_best_match([{"image": "u1"}, {"image": "u2"}], None))
+
+    async def test_picks_the_visually_identical_candidate(self):
+        from api.recognize import _phash_best_match
+        photo = self._solid(7)
+        cands = [
+            {"tcg_card_id": "far", "image": "u_far"},
+            {"tcg_card_id": "near", "image": "u_near"},
+        ]
+        mapping = {"u_far": self._solid(99), "u_near": photo}
+        with self._patch_downloads(mapping):
+            winner = await _phash_best_match(cands, photo)
+        self.assertIsNotNone(winner)
+        self.assertEqual(winner["tcg_card_id"], "near")
+
+    async def test_defers_when_two_candidates_are_too_close(self):
+        # Same-artwork reprints land within a hair of each other; picking one
+        # would be a coin flip, so it must hand back to Gemini instead.
+        from api.recognize import _phash_best_match
+        photo = self._solid(7)
+        cands = [
+            {"tcg_card_id": "reprint_a", "image": "u_a"},
+            {"tcg_card_id": "reprint_b", "image": "u_b"},
+        ]
+        mapping = {"u_a": photo, "u_b": photo}  # identical -> zero margin
+        with self._patch_downloads(mapping):
+            self.assertIsNone(await _phash_best_match(cands, photo))
+
+    async def test_download_failure_is_non_fatal(self):
+        from api.recognize import _phash_best_match
+        photo = self._solid(7)
+
+        class BoomClient:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def get(self, *a, **k): raise RuntimeError("network down")
+
+        with patch("api.recognize.httpx.AsyncClient", return_value=BoomClient()):
+            self.assertIsNone(await _phash_best_match(
+                [{"image": "u1"}, {"image": "u2"}], photo
+            ))
+
+
+@unittest.skipUnless(API_TEST_DEPS_AVAILABLE, "FastAPI/httpx are not installed in this lightweight test environment")
+class PromptConsistencyTests(unittest.TestCase):
+    """The prompt must extract every field ranking depends on."""
+
+    RANKING_FIELDS = ("number_local", "number_total", "set_code", "artist", "hp",
+                      "energy_type")
+
+    def test_prompt_requests_every_field_ranking_uses(self):
+        prompt = recognize_module.RECOGNIZE_PROMPT
+        for field in self.RANKING_FIELDS:
+            self.assertIn(field, prompt, f"prompt must ask for {field}")
+
+    def test_prompt_keeps_the_anti_hallucination_rule_for_set_code(self):
+        # Real-card testing showed Gemini filling set_code from training data for
+        # cards that print none; this wording is what stopped it.
+        self.assertIn("guessing from memory is not allowed", recognize_module.RECOGNIZE_PROMPT)
+
+
+@unittest.skipUnless(API_TEST_DEPS_AVAILABLE, "FastAPI/httpx are not installed in this lightweight test environment")
+class CandidatePrioritisationTests(unittest.TestCase):
+    """Only the first few results of each TCGdex search survive the per-search cap,
+    so anything the photo identified has to be floated above it first.
+    """
+
+    CARDS = [
+        {"id": "tk-bw-e-2", "localId": "2"},
+        {"id": "tk-xy-latio-3", "localId": "3"},
+        {"id": "mee-006", "localId": "006"},
+        {"id": "sve-006", "localId": "006"},
+    ]
+
+    def ids(self, cards):
+        return [c["id"] for c in cards]
+
+    def test_number_alone_floats_every_printing_with_that_number(self):
+        out = self.ids(prioritize_candidates(self.CARDS, "6", set()))
+        self.assertEqual(out[:2], ["mee-006", "sve-006"])
+
+    def test_set_alone_floats_the_right_printing(self):
+        # The real failure: "MEE" was read, the number was not, and mee-006 was
+        # cut from a 51-result search in favour of unrelated trainer kits.
+        out = self.ids(prioritize_candidates(self.CARDS, None, {"mee"}))
+        self.assertEqual(out[0], "mee-006")
+
+    def test_both_signals_beat_either_alone(self):
+        out = self.ids(prioritize_candidates(self.CARDS, "6", {"mee"}))
+        self.assertEqual(out[0], "mee-006")
+        self.assertEqual(out[1], "sve-006")
+
+    def test_no_signal_leaves_the_order_untouched(self):
+        self.assertEqual(self.ids(prioritize_candidates(self.CARDS, None, set())),
+                         self.ids(self.CARDS))
+
+    def test_a_signal_that_matches_nothing_leaves_the_order_untouched(self):
+        # Ranking downstream still gets to see every candidate; a misread code
+        # must not silently reshuffle them.
+        self.assertEqual(self.ids(prioritize_candidates(self.CARDS, "999", {"xyz"})),
+                         self.ids(self.CARDS))
+
+    def test_padding_differences_still_count_as_a_number_match(self):
+        self.assertEqual(
+            self.ids(prioritize_candidates(self.CARDS, "006", set()))[:2],
+            ["mee-006", "sve-006"],
+        )
+
+    def test_set_id_survives_a_dotted_set(self):
+        self.assertEqual(card_set_id({"id": "me02.5-022"}), "me02.5")
+        self.assertEqual(card_set_id({"id": "sv06.5-098"}), "sv06.5")
+        self.assertEqual(card_set_id({}), "")
+
+
+@unittest.skipUnless(API_TEST_DEPS_AVAILABLE, "FastAPI/httpx are not installed in this lightweight test environment")
+class ArtistMatchTests(unittest.TestCase):
+    def test_folds_case_and_whitespace(self):
+        self.assertEqual(_normalize_artist("  Kagemaru   Himeno "), "kagemaru himeno")
+        self.assertTrue(_artists_match("Kagemaru Himeno", "kagemaru  himeno"))
+
+    def test_strips_the_printed_illus_prefix(self):
+        # Cards print "Illus. <name>" but TCGdex stores the bare name, and Gemini
+        # includes or omits the prefix depending on how the field was described.
+        self.assertEqual(_normalize_artist("Illus. Masako Tomii"), "masako tomii")
+        self.assertEqual(_normalize_artist("Illustrator: Ken Sugimori"), "ken sugimori")
+        self.assertTrue(_artists_match("Illus. Kagemaru Himeno", "Kagemaru Himeno"))
+
+    def test_does_not_eat_a_name_that_merely_starts_similarly(self):
+        # "Illustration Studio" is a plausible studio credit — the prefix token
+        # has to end at a separator, not just share opening letters.
+        self.assertEqual(_normalize_artist("Illustration Studio"), "illustration studio")
+        self.assertEqual(_normalize_artist("Sugimori"), "sugimori")
+        self.assertEqual(_normalize_artist("Studio Bora Inc."), "studio bora inc.")
+
+    def test_different_artists_do_not_match(self):
+        self.assertFalse(_artists_match("Kagemaru Himeno", "Ken Sugimori"))
+
+    def test_missing_artist_never_matches(self):
+        # Unknown must be neutral, not a false positive that promotes a wrong card.
+        self.assertIsNone(_normalize_artist(None))
+        self.assertIsNone(_normalize_artist("   "))
+        self.assertFalse(_artists_match(None, "Ken Sugimori"))
+        self.assertFalse(_artists_match("Ken Sugimori", None))
+        self.assertFalse(_artists_match(None, None))
+
+
+@unittest.skipUnless(API_TEST_DEPS_AVAILABLE, "FastAPI/httpx are not installed in this lightweight test environment")
+class ExtractJsonTests(unittest.TestCase):
+    def test_extracts_plain_object(self):
+        self.assertEqual(_extract_json('{"name": "Gengar"}'), {"name": "Gengar"})
+
+    def test_extracts_object_wrapped_in_markdown_fence(self):
+        text = '```json\n{"name": "Gengar", "number_local": "050"}\n```'
+        self.assertEqual(_extract_json(text), {"name": "Gengar", "number_local": "050"})
+
+    def test_no_json_raises(self):
+        with self.assertRaises(ValueError):
+            _extract_json("I could not read this card.")
+
+
+def _fake_gemini_text_response(text: str):
+    return httpx.Response(200, json={
+        "candidates": [{"content": {"parts": [{"text": text}]}}]
+    })
+
+
+def _fake_jpeg_bytes() -> bytes:
+    import io
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", (300, 420), (10, 20, 30)).save(buf, format="JPEG")
+    return buf.getvalue()
+
+
+@unittest.skipUnless(API_TEST_DEPS_AVAILABLE, "FastAPI/httpx are not installed in this lightweight test environment")
+class RecognizeSingleImageTests(unittest.IsolatedAsyncioTestCase):
+    async def test_parses_card_info_from_gemini_response(self):
+        card_info = {"name": "Gengar", "name_en": "Gengar", "number_local": "050", "language": "en"}
+
+        class FakeClient:
+            async def post(self, *args, **kwargs):
+                return _fake_gemini_text_response(json.dumps(card_info))
+
+        # Real base64: recognition decodes the image so it can retry at other
+        # orientations when a read yields no name.
+        import base64 as _b64
+        image_b64 = _b64.b64encode(_fake_jpeg_bytes()).decode()
+        result, rotation = await _recognize_single_image(
+            FakeClient(), "https://example.test", "key", image_b64, "image/jpeg"
+        )
+        self.assertEqual(result, card_info)
+        self.assertEqual(rotation, 0)
+
+
+@unittest.skipUnless(API_TEST_DEPS_AVAILABLE, "FastAPI/httpx are not installed in this lightweight test environment")
+class RotationFallbackTests(unittest.IsolatedAsyncioTestCase):
+    """A card photographed upside down read as an empty name and the scan failed
+    outright — the name is the only thing the search has to go on. Observed on a
+    real card in a 72-card set.
+    """
+
+    def setUp(self):
+        import base64
+        self.image_b64 = base64.b64encode(_fake_jpeg_bytes()).decode()
+
+    async def test_retries_other_orientations_when_no_name_is_read(self):
+        attempts = []
+
+        async def fake_extract(client, url, key, image_bytes, mime):
+            attempts.append(len(image_bytes))
+            # Fail until the third orientation has been tried.
+            if len(attempts) < 3:
+                return {"name": ""}, "{}"
+            return {"name": "Energy"}, '{"name":"Energy"}'
+
+        with patch.object(recognize_module, "_extract_fields", side_effect=fake_extract):
+            result, rotation = await _recognize_single_image(
+                None, "https://example.test", "key", self.image_b64, "image/jpeg"
+            )
+
+        self.assertEqual(result["name"], "Energy")
+        self.assertEqual(len(attempts), 3, "should have rotated until a name appeared")
+        self.assertEqual(rotation, recognize_module.ROTATION_FALLBACKS[1], "the angle that rescued the read")
+
+    async def test_upright_cards_are_not_rotated_at_all(self):
+        calls = []
+
+        async def fake_extract(client, url, key, image_bytes, mime):
+            calls.append(1)
+            return {"name": "Gengar"}, '{"name":"Gengar"}'
+
+        with patch.object(recognize_module, "_extract_fields", side_effect=fake_extract):
+            _, rotation = await _recognize_single_image(
+                None, "https://example.test", "key", self.image_b64, "image/jpeg"
+            )
+
+        self.assertEqual(len(calls), 1, "a successful read must cost exactly one call")
+        self.assertEqual(rotation, 0)
+
+    async def test_gives_up_after_every_orientation(self):
+        calls = []
+
+        async def fake_extract(client, url, key, image_bytes, mime):
+            calls.append(1)
+            return {"name": None}, "{}"
+
+        with patch.object(recognize_module, "_extract_fields", side_effect=fake_extract):
+            result, rotation = await _recognize_single_image(
+                None, "https://example.test", "key", self.image_b64, "image/jpeg"
+            )
+
+        # One upright attempt plus each fallback, then stop — never unbounded.
+        self.assertEqual(len(calls), 1 + len(recognize_module.ROTATION_FALLBACKS))
+        self.assertIsNone(result.get("name"))
+        self.assertEqual(rotation, 0)
+
+
+@unittest.skipUnless(API_TEST_DEPS_AVAILABLE, "FastAPI/httpx are not installed in this lightweight test environment")
+class CandidateRankingTests(unittest.IsolatedAsyncioTestCase):
+    """Ranking behaviour for the numberless-card case.
+
+    Modelled on a real failure: a 1997 Japanese Jungle Jigglypuff prints no card
+    number and no set code, so number ranking has nothing to sort on. TCGdex also
+    has no image for it, so visual verification cannot rank it either — artist and
+    HP are the only remaining signals.
+    """
+
+    JA_CANDIDATES = [
+        {"id": "SV2D-026_ja", "tcg_card_id": "SV2D-026", "name": "プリン", "number": "026",
+         "image": "https://img/026", "_lang": "ja", "artist": "Yuu Nishida", "hp": "70"},
+        {"id": "PMCG2-035_ja", "tcg_card_id": "PMCG2-035", "name": "プリン", "number": "035",
+         "image": None, "_lang": "ja", "artist": "Kagemaru Himeno", "hp": "60"},
+        {"id": "SV2a-039_ja", "tcg_card_id": "SV2a-039", "name": "プリン", "number": "039",
+         "image": "https://img/039", "_lang": "ja", "artist": "saino misaki", "hp": "70"},
+    ]
+
+    async def test_artist_and_hp_promote_the_right_card_when_there_is_no_number(self):
+        card_info = {"artist": "Kagemaru Himeno", "hp": "60"}
+        # Same key the endpoint uses when number/set_code are absent.
+        def rank_key(card):
+            artist_ok = 0 if _artists_match(card_info["artist"], card.get("artist")) else 1
+            hp_ok = 0 if _numbers_match(card_info["hp"], card.get("hp")) else 1
+            return (artist_ok, hp_ok)
+
+        ranked = sorted(self.JA_CANDIDATES, key=rank_key)
+        self.assertEqual(ranked[0]["tcg_card_id"], "PMCG2-035")
+
+    async def test_detail_fetch_fills_artist_and_hp_from_tcgdex(self):
+        from api.recognize import _fill_candidate_details
+
+        candidates = [
+            {"id": "PMCG2-035_ja", "tcg_card_id": "PMCG2-035", "_lang": "ja"},
+        ]
+
+        class FakeResp:
+            status_code = 200
+            @staticmethod
+            def json():
+                return {"illustrator": "Kagemaru Himeno", "hp": 60}
+
+        class FakeClient:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def get(self, *a, **k): return FakeResp()
+
+        class FakeQuery:
+            def filter(self, *a, **k): return self
+            def all(self): return []
+
+        class FakeDb:
+            def query(self, *a, **k): return FakeQuery()
+
+        with patch("api.recognize.httpx.AsyncClient", return_value=FakeClient()):
+            await _fill_candidate_details(FakeDb(), candidates)
+
+        self.assertEqual(candidates[0]["artist"], "Kagemaru Himeno")
+        self.assertEqual(candidates[0]["hp"], 60)
+
+    async def test_detail_fetch_failure_is_non_fatal(self):
+        from api.recognize import _fill_candidate_details
+
+        candidates = [{"id": "X-1_ja", "tcg_card_id": "X-1", "_lang": "ja"}]
+
+        class BoomClient:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def get(self, *a, **k): raise RuntimeError("network down")
+
+        class FakeQuery:
+            def filter(self, *a, **k): return self
+            def all(self): return []
+
+        class FakeDb:
+            def query(self, *a, **k): return FakeQuery()
+
+        with patch("api.recognize.httpx.AsyncClient", return_value=BoomClient()):
+            await _fill_candidate_details(FakeDb(), candidates)
+
+        # No artist/hp added, but no exception — it is a tie-break, not a requirement.
+        self.assertIsNone(candidates[0].get("artist"))
 
 
 if __name__ == "__main__":
