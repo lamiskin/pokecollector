@@ -294,11 +294,12 @@ Environment controls:
 
 1. Uploads are bounded, sanitized, orientation-normalized JPEGs with metadata removed.
 2. Two-to-four batch-eligible photos share one indexed composite Gemini request. Any missing or uncertain position is retried from its original individual photo.
-3. Gemini extracts name, split local/total collector number, printed set code, regulation mark, type, HP, language, and artist; uncertain small text stays `null`.
-4. TCGdex candidates are ranked deterministically by local number, language, printed total, set code, regulation mark, artist, and HP. Missing evidence is neutral and contradictions are negative.
-5. If metadata is inconclusive, conservative pHash can accept a close, clearly separated visual winner without another Gemini call. It never overrides known contradictions.
-6. Individual scans may use Gemini visual comparison when pHash abstains; composite scans fall back to individual recognition instead.
-7. Queue results remain reviewable after restarts. Confirming/dismissing an item deletes its queued photo; unreviewed jobs expire after 14 days.
+3. Gemini extracts name, split local/total collector number, printed set code, regulation mark, type, energy type (for Energy cards), HP, language, and artist; uncertain small text stays `null`. A single-photo read with no name is retried at 180/90/270 degrees before giving up.
+4. Basic Energy cards print only a generic name with their type shown as a symbol, so TCGdex is searched with the catalogue-style name derived from the read symbol (e.g. "Water Energy") first. Recognized number/set-code matches are floated ahead of the per-search candidate cap so a late-sorted correct printing is not discarded. Candidates are then ranked deterministically by local number, language, printed total, set code, regulation mark, artist, and HP. Missing evidence is neutral and contradictions are negative.
+5. If metadata is inconclusive, conservative pHash can accept a close, clearly separated visual winner without another Gemini call; a second artwork-ensemble pass (phash + dhash + colour hash) runs on the same downloaded images if pHash abstains. Neither overrides known contradictions.
+6. Individual scans may use Gemini visual comparison when both artwork passes abstain; composite scans fall back to individual recognition instead.
+7. The winning candidate's catalogue scan is compared against the photo to detect rotation for display; single-photo scans prefer the orientation-retry angle from step 3 when available.
+8. Queue results remain reviewable after restarts. Confirming/dismissing an item deletes its queued photo; unreviewed jobs expire after 14 days.
 
 Gemini error handling:
 
