@@ -14,9 +14,62 @@ _EMPTY = {"", "null", "none", "n/a", "-"}
 
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
 
+# Cards print the set code and the language as one block — "POR EN", "SVI EN".
+# Models read the block faithfully; matching wants only the code.
+_LANGUAGE_BLOCK = re.compile(
+    r"[\s\-_]*(EN|JP|JA|DE|FR|ES|IT|PT|KO|ZH|CN|TW)$", re.IGNORECASE
+)
+
+# Pokemon cards print a species entry ("NO. 0094", "No. 039") under the artwork.
+# That is a Pokedex number and is never the card's collector number.
+_POKEDEX_NUMBER = re.compile(r"\bno\.?\s*\d", re.IGNORECASE)
+
+# Glyphs an OCR pass confuses. Used only to generate an extra candidate form for
+# matching — never to overwrite what was read.
+_CONFUSABLE = str.maketrans({"1": "I", "0": "O"})
+
 
 def _blank(value) -> bool:
     return value is None or (isinstance(value, str) and value.strip().casefold() in _EMPTY)
+
+
+def clean_set_code(value) -> Optional[str]:
+    """Strip the trailing language block; reject anything too short to be a code.
+
+    A single character is the regulation mark landing in the wrong field, which
+    local models did on the same card in every run.
+    """
+    if _blank(value):
+        return None
+    code = str(value).strip().upper()
+    previous = None
+    while previous != code:                     # "SVI EN" and "SV1EN" both reduce
+        previous = code
+        code = _LANGUAGE_BLOCK.sub("", code).strip()
+    return code if len(code) >= 2 else None
+
+
+def set_code_candidates(value) -> set[str]:
+    """Forms a printed code might legitimately take, for matching against
+    Set.abbreviation. Includes the original, so an exact match still wins."""
+    out = set()
+    if not _blank(value):
+        out.add(str(value).strip().upper())
+    cleaned = clean_set_code(value)
+    if cleaned:
+        out.add(cleaned)
+        out.add(cleaned.translate(_CONFUSABLE))
+    return out
+
+
+def clean_number_local(value) -> Optional[str]:
+    """Drop a Pokedex entry that was mistaken for the collector number."""
+    if _blank(value):
+        return None
+    text = str(value).strip()
+    if _POKEDEX_NUMBER.search(text):
+        return None
+    return text
 
 
 # The elemental type of a basic Energy card is printed ONLY as a symbol — the
@@ -82,6 +135,10 @@ def clean_card_info(card_info: dict) -> dict:
     if not isinstance(card_info, dict):
         return card_info
     cleaned = dict(card_info)
+    if "set_code" in cleaned:
+        cleaned["set_code"] = clean_set_code(cleaned.get("set_code"))
+    if "number_local" in cleaned:
+        cleaned["number_local"] = clean_number_local(cleaned.get("number_local"))
     if "energy_type" in cleaned:
         # Drop anything outside the eleven real types so a hallucinated value
         # cannot become a search term.
