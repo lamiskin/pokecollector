@@ -42,6 +42,8 @@ FastAPI app entry point: `backend/main.py`.
 | GET | `/api/cards/recognize/jobs` | Current user's active/actionable scan jobs |
 | GET | `/api/cards/recognize/jobs/{job_id}` | User-scoped scan job and review items |
 | GET | `/api/cards/recognize/jobs/{job_id}/items/{item_id}/image` | Private sanitized review photo |
+| GET | `/api/cards/recognize/jobs/{job_id}/items/{item_id}/candidates/{index}/image` | A candidate's full-resolution scan, served from the `ImageCache` cache |
+| POST | `/api/cards/recognize/jobs/{job_id}/items/{item_id}/rotate` | Rotate the stored photo 90°/180°/270° in place |
 | POST | `/api/cards/recognize/jobs/{job_id}/items/{item_id}/resolve` | Confirm/dismiss an item and delete its queued photo |
 | POST | `/api/cards/recognize/jobs/{job_id}/items/{item_id}/retry` | Retry one reviewable item individually |
 | DELETE | `/api/cards/recognize/jobs/{job_id}` | Delete a job and its queued photos |
@@ -298,7 +300,8 @@ Environment controls:
 4. TCGdex candidates are ranked deterministically by local number, language, printed total, set code, regulation mark, artist, and HP. Missing evidence is neutral and contradictions are negative.
 5. If metadata is inconclusive, conservative pHash can accept a close, clearly separated visual winner without another Gemini call. It never overrides known contradictions.
 6. Individual scans may use Gemini visual comparison when pHash abstains; composite scans fall back to individual recognition instead.
-7. Queue results remain reviewable after restarts. Confirming/dismissing an item deletes its queued photo; unreviewed jobs expire after 14 days.
+7. Queue results remain reviewable after restarts. Resolving (confirming or dismissing) an item deletes its queued photo but keeps the item row so the review page can render it as a collapsed, already-handled row; unreviewed jobs expire after 14 days.
+8. `backend/services/scan_candidate_images.py` pre-warms the top-ranked candidates' full-resolution artwork into the shared `ImageCache` table (see `backend/models.py`, also used by `backend/api/images.py`/`backend/services/product_images.py`) as a fire-and-forget task from `match_card_info`, so opening a candidate in the review UI usually reads a local cache hit instead of a cold TCGdex CDN fetch. `image_cache` has no purge/retention job; this is a pre-existing gap, not something new here.
 
 Gemini error handling:
 
