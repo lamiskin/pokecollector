@@ -138,6 +138,54 @@ class RotationDetectionTests(unittest.TestCase):
         self.assertIsNone(cim.detect_rotation(encoded(textured(2)), b"not-an-image"))
 
 
+def _striped_card(size=(160, 224), stripe_rows=45):
+    """A portrait card fixture: busy top strip (like printed name/HP), smooth
+    everywhere else (like artwork and fine print) — the asymmetry
+    detect_sideways_rotation reads to tell 90 from 270."""
+    img = Image.new("RGB", size, (128, 128, 128))
+    width, _ = size
+    pixels = img.load()
+    for y in range(stripe_rows):
+        for x in range(width):
+            value = 0 if x % 2 == 0 else 255
+            pixels[x, y] = (value, value, value)
+    return img
+
+
+@unittest.skipUnless(DEPS_AVAILABLE, "Pillow/imagehash not installed in this lightweight test environment")
+class SidewaysRotationTests(unittest.TestCase):
+    """Only ever consulted when there is no catalogue reference image to compare
+    against — the two-way choice between 90 and 270 for a photo already known to
+    be landscape (a portrait photo is not this heuristic's problem to solve).
+    """
+
+    def test_recovers_a_90_degree_sideways_photo(self):
+        reference = _striped_card()
+        photo = reference.rotate(-90, expand=True)
+        self.assertEqual(cim.detect_sideways_rotation(encoded(photo)), 90)
+
+    def test_recovers_a_270_degree_sideways_photo(self):
+        reference = _striped_card()
+        photo = reference.rotate(-270, expand=True)
+        self.assertEqual(cim.detect_sideways_rotation(encoded(photo)), 270)
+
+    def test_portrait_photos_are_not_this_heuristics_problem(self):
+        # An upside-down card is exactly as portrait as an upright one, so this
+        # must abstain rather than guess.
+        reference = _striped_card()
+        self.assertIsNone(cim.detect_sideways_rotation(encoded(reference)))
+
+    def test_declines_when_top_and_bottom_are_equally_busy(self):
+        flat = Image.new("RGB", (280, 200), (100, 100, 100))
+        self.assertIsNone(cim.detect_sideways_rotation(encoded(flat)))
+
+    def test_unreadable_input_is_not_fatal(self):
+        self.assertIsNone(cim.detect_sideways_rotation(b"not-an-image"))
+
+    def test_no_photo_is_not_an_error(self):
+        self.assertIsNone(cim.detect_sideways_rotation(b""))
+
+
 @unittest.skipUnless(DEPS_AVAILABLE, "Pillow/imagehash not installed in this lightweight test environment")
 class CalibrationTests(unittest.TestCase):
     """Pin the thresholds to what was measured.
