@@ -246,6 +246,7 @@ function JobDetail({ jobId, onObscuredChange }) {
           photoUrl={reviewPhoto}
           jobId={jobId}
           itemId={reviewItem.id}
+          nameEn={reviewItem.recognized?.name_en}
           matches={reviewMatches}
           index={review.matchIndex}
           onIndex={matchIndex => setReview(current => ({ ...current, matchIndex }))}

@@ -1260,6 +1260,14 @@ const de = {
     showDetails: 'Details anzeigen',
     hideDetails: 'Details ausblenden',
     printedTotalMismatch: 'Gedruckte Set-Gesamtzahl stimmt nicht mit diesem Foto überein',
+    noCatalogueImage: 'Für diesen Druck gibt es keinen Katalog-Scan.',
+    lookup_images: 'Bilder suchen',
+    lookup_ebay: 'eBay-Angebote suchen',
+    lookup_cardmarket: 'Cardmarket durchsuchen',
+    lookup_pokellector: 'Pokellector durchsuchen',
+    lookupShort: 'Bild suchen',
+    searchByPhoto: 'Google-Suche mit diesem Foto',
+    searchByPhotoSaved: 'Foto in den Downloads gespeichert — in den geöffneten Google-Lens-Tab ziehen',
   },
 
   // Language filter / card language
