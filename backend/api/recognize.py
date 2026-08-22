@@ -12,7 +12,7 @@ from email.utils import parsedate_to_datetime
 from functools import lru_cache
 from urllib.parse import urlparse
 from services.tcgdex_languages import is_supported_tcgdex_language, normalize_tcgdex_language
-from services.card_field_cleanup import clean_card_info, energy_search_name
+from services.card_field_cleanup import clean_card_info, energy_search_name, set_code_candidates
 from services import card_image_match
 from services.gemini_rate_limit import (
     GeminiKeyBlockedError,
@@ -548,6 +548,13 @@ def _identity_signal(target, candidate, matcher) -> int:
     return 0 if matcher(target, candidate) else 2
 
 
+def _set_codes_match(recognized_code, candidate_code) -> bool:
+    """Accept a confusable-glyph reading (1<->I, 0<->O) as agreement, not just an
+    exact match — see services/card_field_cleanup.set_code_candidates."""
+    forms = {code.casefold() for code in set_code_candidates(recognized_code)}
+    return bool(forms) and str(candidate_code or "").strip().casefold() in forms
+
+
 def _candidate_rank_key(card_info: dict, candidate: dict) -> tuple[int, ...]:
     return (
         _identity_signal(card_info.get("number_local"), candidate.get("number"), _numbers_match),
@@ -562,9 +569,9 @@ def _candidate_rank_key(card_info: dict, candidate: dict) -> tuple[int, ...]:
             card_info.get("number_total"), candidate.get("printed_total")
         ),
         _identity_signal(
-            str(card_info.get("set_code") or "").strip().casefold() or None,
-            str(candidate.get("set_abbreviation") or "").strip().casefold() or None,
-            lambda left, right: left == right,
+            card_info.get("set_code"),
+            candidate.get("set_abbreviation"),
+            _set_codes_match,
         ),
         _identity_signal(
             str(card_info.get("regulation_mark") or "").strip().casefold() or None,
@@ -890,11 +897,14 @@ async def _search_and_rank_candidates(
     # the true printing was cut from a large "Fighting Energy" search in favour
     # of unrelated trainer-kit printings.
     prefilter_set_ids: set[str] = set()
-    set_code = str(card_info.get("set_code") or "").strip().upper() or None
-    if set_code:
+    # Confusable-glyph forms (1<->I, 0<->O) are matched too, so a code the model
+    # misread by one character still floats its real set ahead of the cap.
+    set_code_forms = set_code_candidates(card_info.get("set_code"))
+    if set_code_forms:
+        lookup_forms = set_code_forms | {form.lower() for form in set_code_forms}
         prefilter_set_ids = {
             row[0] for row in db.query(Set.tcg_set_id)
-            .filter(Set.abbreviation.in_({set_code, set_code.lower()})).all()
+            .filter(Set.abbreviation.in_(lookup_forms)).all()
             if row[0]
         }
 
@@ -1187,6 +1197,7 @@ async def match_card_info(
     # they did not run, so a card that resolved on its printed number costs one
     # small extra request and nothing else.
     rotation = None
+    have_reference = False
     top = candidates[0] if candidates else None
     if top and top.get("image") and photo_bytes:
         top_id = str(top.get("id") or "")
@@ -1199,6 +1210,7 @@ async def match_card_info(
             except Exception:
                 reference = None
         if reference:
+            have_reference = True
             try:
                 rotation = card_image_match.detect_rotation(photo_bytes, reference)
             except Exception:
@@ -1208,6 +1220,23 @@ async def match_card_info(
                     "Photo is rotated %s degrees from upright (vs %s)",
                     rotation, top.get("tcg_card_id"),
                 )
+
+    # No catalogue scan to compare against — e.g. TCGdex has no image for the
+    # winning candidate — so fall back to the sideways-only heuristic, which
+    # needs no reference at all. It only tells 90 from 270 (a landscape photo is
+    # already known to be on its side) and abstains rather than guess upright
+    # vs. upside-down, which it cannot distinguish. See
+    # services/card_image_match.detect_sideways_rotation for the reasoning.
+    if not have_reference and photo_bytes:
+        try:
+            rotation = card_image_match.detect_sideways_rotation(photo_bytes)
+        except Exception:
+            rotation = None
+        if rotation:
+            logger.info(
+                "Photo is sideways (%s degrees); no catalogue image was available to compare against",
+                rotation,
+            )
 
     return {
         "recognized": card_info,

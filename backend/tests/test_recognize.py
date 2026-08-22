@@ -403,6 +403,73 @@ class SearchPairsTests(unittest.TestCase):
 
 
 @unittest.skipUnless(API_TEST_DEPS_AVAILABLE, "FastAPI/httpx are not installed")
+class SetCodeMatchingTests(unittest.TestCase):
+    """set_code_candidates' confusable-glyph forms (1<->I, 0<->O) must reach the
+    ranking key, so a misread code still confirms the right printing instead of
+    a contradiction with the real Set.abbreviation."""
+
+    def test_confusable_glyph_reading_counts_as_agreement(self):
+        recognized = normalize_recognized_card_info({"set_code": "SV01"})
+        candidate = {"set_abbreviation": "SVOI"}
+        self.assertEqual(_candidate_rank_key(recognized, candidate)[3], 0)
+
+    def test_a_genuinely_different_code_is_still_a_contradiction(self):
+        recognized = normalize_recognized_card_info({"set_code": "SVI"})
+        candidate = {"set_abbreviation": "PAL"}
+        self.assertEqual(_candidate_rank_key(recognized, candidate)[3], 2)
+
+    def test_missing_set_code_on_either_side_is_neutral(self):
+        recognized = normalize_recognized_card_info({"set_code": None})
+        candidate = {"set_abbreviation": "SVI"}
+        self.assertEqual(_candidate_rank_key(recognized, candidate)[3], 1)
+
+
+@unittest.skipUnless(API_TEST_DEPS_AVAILABLE, "FastAPI/httpx are not installed")
+class SetCodePrefilterTests(unittest.IsolatedAsyncioTestCase):
+    """The same confusable-glyph forms must also reach the pre-cap floating
+    filter in _search_and_rank_candidates, so a misread set code still floats
+    its real printing ahead of the per-search candidate cap."""
+
+    def setUp(self):
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from database import Base
+        from models import Set
+
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        session_factory = sessionmaker(bind=engine)
+        self.db = session_factory()
+        # Printed set code "SV01" (1<->I, 0<->O confusion); the real
+        # abbreviation on file is "SVOI".
+        self.db.add(Set(id="tst_en", tcg_set_id="tst", name="Test Set", lang="en", abbreviation="SVOI"))
+        self.db.commit()
+        self.addCleanup(self.db.close)
+
+    async def test_confusable_glyph_set_code_floats_its_real_set_ahead_of_the_cap(self):
+        card_info = normalize_recognized_card_info({"name": "Pikachu", "set_code": "SV01"})
+        # Eight unrelated cards sort ahead of the target by TCGdex's own
+        # number-ascending order; only the pre-cap float can save it.
+        unrelated = [
+            {"id": f"other-{n}", "localId": str(n), "name": "Pikachu"}
+            for n in range(1, 9)
+        ]
+        target = {"id": "tst-9", "localId": "9", "name": "Pikachu"}
+        tcgdex_cards = unrelated + [target]
+
+        async def fake_get(client_self, url, params=None, **kwargs):
+            return httpx.Response(200, json=tcgdex_cards)
+
+        with patch("httpx.AsyncClient.get", new=fake_get):
+            candidates, _ = await recognize_module._search_and_rank_candidates(
+                self.db, card_info
+            )
+
+        floated_ids = [c["tcg_card_id"] for c in candidates[:8]]
+        self.assertIn("tst-9", floated_ids)
+
+
+@unittest.skipUnless(API_TEST_DEPS_AVAILABLE, "FastAPI/httpx are not installed")
 class PhashMatchingTests(unittest.IsolatedAsyncioTestCase):
     class StreamResponse:
         def __init__(self, chunks, *, status_code=200, headers=None):
@@ -714,6 +781,50 @@ class PhashMatchingTests(unittest.IsolatedAsyncioTestCase):
 
         detect.assert_called_once()
         self.assertEqual(result["rotation"], 180)
+
+    async def test_sideways_fallback_runs_only_without_a_catalogue_reference(self):
+        # No candidate image at all — e.g. TCGdex has no scan of the winning
+        # printing — so detect_rotation has nothing to compare against and the
+        # sideways-only heuristic is consulted instead.
+        candidates = [{"id": "right", "number": "25", "image": None}]
+        with patch(
+            "api.recognize._search_and_rank_candidates",
+            new=AsyncMock(return_value=(candidates, 1)),
+        ), patch(
+            "api.recognize.card_image_match.detect_rotation",
+        ) as detect_rotation, patch(
+            "api.recognize.card_image_match.detect_sideways_rotation", return_value=270,
+        ) as detect_sideways:
+            result = await match_card_info(
+                object(),
+                {"name": "Pikachu", "number_local": "25"},
+                photo_bytes=self._image(7),
+            )
+
+        detect_rotation.assert_not_called()
+        detect_sideways.assert_called_once()
+        self.assertEqual(result["rotation"], 270)
+
+    async def test_sideways_fallback_is_skipped_when_a_reference_was_used(self):
+        candidates = [{"id": "right", "number": "25", "image": "right.webp"}]
+        with patch(
+            "api.recognize._search_and_rank_candidates",
+            new=AsyncMock(return_value=(candidates, 1)),
+        ), patch(
+            "api.recognize._download_candidate_images",
+            new=AsyncMock(return_value={"right": b"reference-bytes"}),
+        ), patch(
+            "api.recognize.card_image_match.detect_rotation", return_value=None,
+        ), patch(
+            "api.recognize.card_image_match.detect_sideways_rotation",
+        ) as detect_sideways:
+            await match_card_info(
+                object(),
+                {"name": "Pikachu", "number_local": "25"},
+                photo_bytes=self._image(7),
+            )
+
+        detect_sideways.assert_not_called()
 
 
 @unittest.skipUnless(API_TEST_DEPS_AVAILABLE, "FastAPI/httpx are not installed")
