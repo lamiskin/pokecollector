@@ -43,6 +43,8 @@ FastAPI app entry point: `backend/main.py`.
 | GET | `/api/cards/recognize/jobs` | Current user's active/actionable scan jobs |
 | GET | `/api/cards/recognize/jobs/{job_id}` | User-scoped scan job and review items |
 | GET | `/api/cards/recognize/jobs/{job_id}/items/{item_id}/image` | Private sanitized review photo |
+| GET | `/api/cards/recognize/jobs/{job_id}/items/{item_id}/candidates/{index}/image` | A candidate's full-resolution scan, served from the `ImageCache` cache |
+| POST | `/api/cards/recognize/jobs/{job_id}/items/{item_id}/rotate` | Rotate the stored photo 90°/180°/270° in place |
 | POST | `/api/cards/recognize/jobs/{job_id}/items/{item_id}/resolve` | Confirm/dismiss an item and delete its queued photo |
 | POST | `/api/cards/recognize/jobs/{job_id}/items/{item_id}/retry` | Retry one reviewable item individually |
 | DELETE | `/api/cards/recognize/jobs/{job_id}` | Delete a job and its queued photos |
@@ -306,8 +308,9 @@ Environment controls:
 4. Basic Energy cards print only a generic name with their type shown as a symbol, so TCGdex is searched with the catalogue-style name derived from the read symbol (e.g. "Water Energy") first. Recognized number/set-code matches are floated ahead of the per-search candidate cap so a late-sorted correct printing is not discarded. Candidates are then ranked deterministically by local number, language, printed total, set code, regulation mark, artist, and HP. Missing evidence is neutral and contradictions are negative.
 5. If metadata is inconclusive, conservative pHash can accept a close, clearly separated visual winner without another provider call; a second artwork-ensemble pass (phash + dhash + colour hash) runs on the same downloaded images if pHash abstains. Neither overrides known contradictions.
 6. Individual scans may use the same provider's visual comparison when both artwork passes abstain; composite scans fall back to individual recognition instead.
-7. The winning candidate's catalogue scan is compared against the photo to detect rotation for display; single-photo scans prefer the orientation-retry angle from step 3 when available.
-8. Queue results remain reviewable after restarts. Confirming/dismissing an item deletes its queued photo; unreviewed jobs expire after 14 days.
+7. The winning candidate's catalogue scan is compared against the photo to detect rotation for display; single-photo scans prefer the orientation-retry angle from step 3 when available. When there is no catalogue image to compare against, a top-vs-bottom image-detail heuristic detects a sideways (90/270) photo instead.
+8. Queue results remain reviewable after restarts. Resolving (confirming or dismissing) an item deletes its queued photo but keeps the item row so the review page can render it as a collapsed, already-handled row; unreviewed jobs expire after 14 days.
+9. `backend/services/scan_candidate_images.py` pre-warms the top-ranked candidates' full-resolution artwork into the shared `ImageCache` table (see `backend/models.py`, also used by `backend/api/images.py`/`backend/services/product_images.py`) as a fire-and-forget task from `match_card_info`, so opening a candidate in the review UI usually reads a local cache hit instead of a cold TCGdex CDN fetch. `image_cache` has no purge/retention job; this is a pre-existing gap, not something new here.
 
 Provider error handling:
 

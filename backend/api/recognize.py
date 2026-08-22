@@ -20,6 +20,7 @@ from services.gemini_rate_limit import (
     penalize_gemini_key,
     record_gemini_success,
 )
+from services.scan_candidate_images import prewarm_candidate_images
 from services.scan_storage import MAX_FILE_BYTES, ScanUploadError, read_limited_upload, sanitize_image_bytes
 from services.scan_trace import ScanTrace, create_scan_trace
 from services.scan_providers import (
@@ -950,6 +951,10 @@ async def _search_and_rank_candidates(
                     if isinstance(card.get("set"), dict) else None,
                     "number": card.get("localId"),
                     "image": f"{card.get('image')}/low.webp" if card.get("image") else None,
+                    # Used by the review zoom modal and the candidate-image cache
+                    # endpoint so expanding a candidate does not show a 245px
+                    # thumbnail blown up. See services/scan_candidate_images.py.
+                    "image_hd": f"{card.get('image')}/high.webp" if card.get("image") else None,
                     "rarity": card.get("rarity"),
                     "lang": search_language,
                     "_lang": search_language,
@@ -997,6 +1002,14 @@ async def _search_and_rank_candidates(
 
     await _fill_candidate_details(db, deduped, card_info)
     deduped.sort(key=lambda card: _candidate_rank_key(card_info, card))
+    # Surface the same printed-total contradiction the ranker already scores
+    # (see _printed_total_signal above) as a plain boolean on each candidate,
+    # so the review grid can badge a printing that disagrees with the photo
+    # instead of only silently ranking it lower.
+    for candidate in deduped:
+        candidate["printed_total_mismatch"] = (
+            _printed_total_signal(card_info.get("number_total"), candidate.get("printed_total")) == 2
+        )
     number_match_count = sum(
         1
         for card in deduped
@@ -1180,6 +1193,19 @@ async def match_card_info(
         {key: value for key, value in card.items() if key != "_number_extra"}
         for card in retain_ranked_candidates(candidates)
     ]
+
+    # Warm the review's first clicks while the reviewer is still working
+    # through the rest of the batch. Fired rather than awaited, and against
+    # its own database session (see prewarm_candidate_images), so a slow or
+    # failing CDN fetch here can never add latency to recognition itself.
+    if public_matches:
+        try:
+            asyncio.create_task(prewarm_candidate_images(public_matches))
+        except RuntimeError:
+            # No running event loop (e.g. certain sync test harnesses) — a
+            # cold cache on first review is the only consequence.
+            pass
+
     if trace:
         selected = (
             str(candidates[0].get("tcg_card_id") or "")

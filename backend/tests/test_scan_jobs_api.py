@@ -16,8 +16,9 @@ try:
     from api.scan_jobs import router
     from api.auth import get_current_user
     from database import Base, get_db
-    from models import ScanJob, ScanJobItem, User, UserSetting
+    from models import ImageCache, ScanJob, ScanJobItem, User, UserSetting
     from services.scan_providers import scanner_capability_proof
+    from services.scan_candidate_images import cache_key_for
     from services.scan_storage import resolve_scan_path
 
     DEPS_AVAILABLE = True
@@ -293,6 +294,138 @@ class ScanJobsApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIsNone(self.db.get(ScanJob, created["id"]))
         self.assertFalse(job_dir.exists())
+
+    def test_resolved_items_remain_in_detail_payload_for_the_collapsed_row(self):
+        # The review page collapses a resolved item to a compact row instead
+        # of it disappearing; that only works if the detail endpoint still
+        # returns it. The separate jobs *list* endpoint is unaffected and
+        # keeps filtering fully-resolved jobs out of the inbox.
+        created = self._enqueue()
+        item = self.db.query(ScanJobItem).filter(ScanJobItem.job_id == created["id"]).one()
+        item.status = "done"
+        item.matches = [{"id": "card-1_en", "tcg_card_id": "card-1"}]
+        self.db.commit()
+
+        self.client.post(f"/api/cards/recognize/jobs/{created['id']}/items/{item.id}/resolve")
+
+        detail = self.client.get(f"/api/cards/recognize/jobs/{created['id']}")
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual([row["id"] for row in detail.json()["items"]], [item.id])
+        self.assertTrue(detail.json()["items"][0]["resolved"])
+
+    def test_candidate_image_serves_from_cache_without_fetching(self):
+        created = self._enqueue()
+        item = self.db.query(ScanJobItem).filter(ScanJobItem.job_id == created["id"]).one()
+        item.matches = [{"id": "card-1_en", "tcg_card_id": "card-1", "image_hd": "https://assets.tcgdex.net/en/x/1/1/high.webp"}]
+        self.db.commit()
+        self.db.add(ImageCache(
+            image_key=cache_key_for("https://assets.tcgdex.net/en/x/1/1/high.webp"),
+            data=b"cached-bytes",
+            content_type="image/webp",
+        ))
+        self.db.commit()
+
+        # No network mocking here on purpose: a cache hit must resolve without
+        # ever reaching out over the network, so if this test needed an httpx
+        # mock to pass it would mean the endpoint fetched instead of reading
+        # the cache.
+        response = self.client.get(
+            f"/api/cards/recognize/jobs/{created['id']}/items/{item.id}/candidates/0/image"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"cached-bytes")
+        self.assertEqual(response.headers["content-type"], "image/webp")
+
+    def test_candidate_image_fetches_and_caches_on_a_cold_miss(self):
+        created = self._enqueue()
+        item = self.db.query(ScanJobItem).filter(ScanJobItem.job_id == created["id"]).one()
+        item.matches = [{"id": "card-1_en", "tcg_card_id": "card-1", "image": "https://assets.tcgdex.net/en/x/1/1/low.webp"}]
+        self.db.commit()
+
+        with patch(
+            "api.scan_jobs.fetch_and_cache_candidate_image",
+            new=AsyncMock(return_value=(b"fresh-bytes", "image/webp")),
+        ) as fetch:
+            response = self.client.get(
+                f"/api/cards/recognize/jobs/{created['id']}/items/{item.id}/candidates/0/image"
+            )
+            fetch.assert_awaited_once()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"fresh-bytes")
+
+    def test_candidate_image_out_of_range_index_is_404(self):
+        created = self._enqueue()
+        item = self.db.query(ScanJobItem).filter(ScanJobItem.job_id == created["id"]).one()
+        item.matches = [{"id": "card-1_en", "tcg_card_id": "card-1", "image": "https://assets.tcgdex.net/en/x/1/1/low.webp"}]
+        self.db.commit()
+
+        response = self.client.get(
+            f"/api/cards/recognize/jobs/{created['id']}/items/{item.id}/candidates/5/image"
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_other_user_cannot_fetch_candidate_image_or_rotate(self):
+        created = self._enqueue()
+        item = self.db.query(ScanJobItem).filter(ScanJobItem.job_id == created["id"]).one()
+        item.matches = [{"id": "card-1_en", "tcg_card_id": "card-1", "image": "https://assets.tcgdex.net/en/x/1/1/low.webp"}]
+        self.db.commit()
+        self.app.dependency_overrides[get_current_user] = lambda: self.other_user
+
+        self.assertEqual(
+            self.client.get(
+                f"/api/cards/recognize/jobs/{created['id']}/items/{item.id}/candidates/0/image"
+            ).status_code,
+            404,
+        )
+        self.assertEqual(
+            self.client.post(
+                f"/api/cards/recognize/jobs/{created['id']}/items/{item.id}/rotate"
+            ).status_code,
+            404,
+        )
+
+    def test_rotate_swaps_stored_photo_dimensions_and_bumps_updated_at(self):
+        created = self._enqueue()
+        item = self.db.query(ScanJobItem).filter(ScanJobItem.job_id == created["id"]).one()
+        original_updated_at = item.updated_at
+        stored = resolve_scan_path(item.image_path)
+        with Image.open(stored) as before:
+            original_size = before.size  # (80, 112): portrait
+
+        response = self.client.post(
+            f"/api/cards/recognize/jobs/{created['id']}/items/{item.id}/rotate"
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        with Image.open(stored) as after:
+            self.assertEqual(after.size, (original_size[1], original_size[0]))
+        self.db.refresh(item)
+        self.assertGreater(item.updated_at, original_updated_at)
+        self.assertEqual(response.json()["id"], item.id)
+
+    def test_rotate_rejects_degrees_not_a_multiple_of_90(self):
+        created = self._enqueue()
+        item = self.db.query(ScanJobItem).filter(ScanJobItem.job_id == created["id"]).one()
+
+        response = self.client.post(
+            f"/api/cards/recognize/jobs/{created['id']}/items/{item.id}/rotate",
+            params={"degrees": 45},
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_rotate_after_resolve_is_404_since_the_photo_is_gone(self):
+        created = self._enqueue()
+        item = self.db.query(ScanJobItem).filter(ScanJobItem.job_id == created["id"]).one()
+        item.status = "failed"
+        self.db.commit()
+        self.client.post(f"/api/cards/recognize/jobs/{created['id']}/items/{item.id}/resolve")
+
+        response = self.client.post(
+            f"/api/cards/recognize/jobs/{created['id']}/items/{item.id}/rotate"
+        )
+        self.assertEqual(response.status_code, 404)
 
 
 if __name__ == "__main__":
