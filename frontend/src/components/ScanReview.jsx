@@ -1,10 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { createPortal } from 'react-dom'
-import { Camera, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Loader2, Plus, RefreshCw, RotateCw, Trash2, X } from 'lucide-react'
+import { Camera, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Loader2, Plus, RefreshCw, RotateCw, Search, Trash2, X } from 'lucide-react'
 import toast from 'react-hot-toast'
 import { fetchScanCandidateImage, fetchScanJobItemImage, rotateScanJobItemImage } from '../api/client'
 import { tcgdexLanguageBadgeClass, tcgdexLanguageLabel } from '../utils/tcgdexLanguages'
 import { formatRetryCountdown } from '../utils/retryCountdown'
+import { cardLookupLinks, searchGoogleByPhoto } from '../utils/cardLookup'
 
 // Shared between the queue page (ScanQueue) and, previously, the capture
 // modal — the capture modal now has its own inline results grid and its own
@@ -239,7 +240,7 @@ const zoomStyle = ({ scale, x, y }) => scale === 1 ? undefined : {
 }
 
 export function CardZoomModal({
-  card, photoUrl, onClose, t, matches, index = 0, onIndex, onAccept, jobId, itemId,
+  card, photoUrl, onClose, t, matches, index = 0, onIndex, onAccept, jobId, itemId, nameEn,
 }) {
   const canNavigate = Array.isArray(matches) && matches.length > 1 && onIndex
   const step = useCallback(delta => {
@@ -405,24 +406,44 @@ export function CardZoomModal({
                   otherwise need — without it the blurred stand-in spreads
                   past the card edge into the black overlay and fades to
                   nothing. */}
-              <div ref={frameRef} onClick={onCardClick}
-                className={`${CARD_FRAME} relative overflow-hidden ${zoomed ? 'cursor-grab' : 'cursor-zoom-in'}`}>
-                <img src={full || card.image} alt={card?.name}
-                  // Transition only the blur. Animating transform would make
-                  // every pan lag a frame behind the pointer.
-                  className={`${CARD_IMAGE} transition-[filter] duration-300 ${full ? '' : 'blur-md scale-105'}`}
-                  style={zoomStyle(zoom)} draggable={false} />
-                {/* Centred over the card it belongs to: tucked in a corner
-                    it read as page furniture rather than as this image still
-                    loading. */}
-                {!full && (
-                  <span className="pointer-events-none absolute inset-0 flex items-center justify-center">
-                    <span className="rounded-full bg-black/55 p-3">
-                      <Loader2 size={28} className="animate-spin text-white/90" />
+              {/* Nothing to compare against: TCGdex has no scan of this
+                  printing. Say so and offer somewhere to go, rather than
+                  showing a broken frame — this is the case the reviewer most
+                  needs help with. */}
+              {!card.image && !full ? (
+                <div className={`${CARD_FRAME} flex-col gap-3 rounded-xl px-4 text-center`}
+                  style={{ background: 'rgba(255,255,255,0.03)', border: '1px dashed rgba(255,255,255,0.14)' }}
+                  onClick={e => e.stopPropagation()}>
+                  <p className="text-xs text-text-muted">{t('scanner.noCatalogueImage')}</p>
+                  <div className="flex flex-col gap-2">
+                    {cardLookupLinks(card, nameEn).map(link => (
+                      <a key={link.key} href={link.url} target="_blank" rel="noopener noreferrer"
+                        className="btn-ghost inline-flex items-center justify-center gap-1.5 text-xs">
+                        <Search size={13} />{t(`scanner.lookup_${link.key}`)}
+                      </a>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <div ref={frameRef} onClick={onCardClick}
+                  className={`${CARD_FRAME} relative overflow-hidden ${zoomed ? 'cursor-grab' : 'cursor-zoom-in'}`}>
+                  <img src={full || card.image} alt={card?.name}
+                    // Transition only the blur. Animating transform would make
+                    // every pan lag a frame behind the pointer.
+                    className={`${CARD_IMAGE} transition-[filter] duration-300 ${full ? '' : 'blur-md scale-105'}`}
+                    style={zoomStyle(zoom)} draggable={false} />
+                  {/* Centred over the card it belongs to: tucked in a corner
+                      it read as page furniture rather than as this image still
+                      loading. */}
+                  {!full && (
+                    <span className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                      <span className="rounded-full bg-black/55 p-3">
+                        <Loader2 size={28} className="animate-spin text-white/90" />
+                      </span>
                     </span>
-                  </span>
-                )}
-              </div>
+                  )}
+                </div>
+              )}
               <figcaption className="mt-2 space-y-0.5 text-center">
                 <p className="text-sm font-bold text-white">{card?.name}</p>
                 <p className="text-[11px] font-mono text-brand-red/80">
@@ -508,7 +529,7 @@ export function usePrefetchMatchImages(matches) {
 }
 
 // ─── The candidate grid — the "which of these DB candidates is it" picker ──
-function CandidateGrid({ jobId, itemId, matches, onSelect, onZoom, t }) {
+function CandidateGrid({ jobId, itemId, matches, onSelect, onZoom, nameEn, t }) {
   usePrefetchMatchImages(matches)
 
   if (!matches?.length) return null
@@ -544,8 +565,19 @@ function CandidateGrid({ jobId, itemId, matches, onSelect, onZoom, t }) {
                 <img src={match.image} alt={match.name}
                   className="h-full w-full object-cover shadow-lg transition-transform duration-300 group-hover:scale-[1.02]" />
               ) : (
-                <div className="flex h-full w-full items-center justify-center rounded-xl bg-bg-surface">
-                  <span className="p-1 text-center text-[9px] text-text-muted">{match.name}</span>
+                <div className="flex h-full w-full flex-col items-center justify-center gap-1 rounded-xl bg-bg-surface p-1">
+                  <span className="text-center text-[9px] leading-tight text-text-muted">{match.name}</span>
+                  {/* stopPropagation: the tile opens the comparison, which
+                      for this card has no image to show either. */}
+                  <a
+                    href={cardLookupLinks(match, nameEn)[0].url}
+                    target="_blank" rel="noopener noreferrer"
+                    onClick={e => e.stopPropagation()}
+                    title={t('scanner.lookup_images')}
+                    className="inline-flex items-center gap-0.5 text-[9px] text-brand-red/90 hover:text-brand-red"
+                  >
+                    <Search size={9} />{t('scanner.lookupShort')}
+                  </a>
                 </div>
               )}
               <span className={`absolute right-1 top-1 rounded px-1 py-0.5 text-[8px] font-black leading-none ${tcgdexLanguageBadgeClass(language)}`}>
@@ -596,7 +628,7 @@ function CandidateGrid({ jobId, itemId, matches, onSelect, onZoom, t }) {
 // ─── One queued photo in the review list ────────────────────────────────────
 // `w-24` matches the layout used elsewhere in the batch list: the thumbnail
 // and status sit in a row, with the (much wider) candidate grid below.
-function PhotoThumb({ url, onZoom, onRotate, rotating, t }) {
+function PhotoThumb({ url, onZoom, onRotate, rotating, onSearchPhoto, t }) {
   return (
     <div className="w-24 flex-shrink-0 self-start space-y-1.5">
       <button type="button" onClick={onZoom} disabled={!url}
@@ -606,6 +638,20 @@ function PhotoThumb({ url, onZoom, onRotate, rotating, t }) {
           ? <img src={url} alt={t('scanner.yourPhoto')} className="h-full w-full object-contain" />
           : <Camera size={28} className="text-text-muted opacity-50" />}
       </button>
+      {/* Reverse image search on the photo itself — the most direct way to
+          identify a card no catalogue has a scan of, since it is the one
+          image we definitely have. */}
+      {onSearchPhoto && (
+        <button
+          type="button"
+          onClick={onSearchPhoto}
+          title={t('scanner.searchByPhoto')}
+          aria-label={t('scanner.searchByPhoto')}
+          className="flex w-full items-center justify-center rounded-lg border border-white/10 bg-white/5 py-1 text-text-muted transition-colors hover:border-white/20 hover:text-white"
+        >
+          <Search size={13} />
+        </button>
+      )}
       {onRotate && (
         <button
           type="button"
@@ -635,6 +681,11 @@ export function ScanItemPanel({ jobId, item, onAdd, onRetry, onDismiss, onReview
 
   const active = ['pending', 'processing', 'retrying'].includes(item.status)
   const noMatches = item.status === 'done' && !item.matches?.length
+
+  const searchByPhoto = () => {
+    searchGoogleByPhoto(photoUrl, item.filename)
+    toast(t('scanner.searchByPhotoSaved'), { duration: 6000 })
+  }
 
   const rotate = async () => {
     setRotating(true)
@@ -701,6 +752,7 @@ export function ScanItemPanel({ jobId, item, onAdd, onRetry, onDismiss, onReview
           }}
           onRotate={item.has_image && !active ? rotate : undefined}
           rotating={rotating}
+          onSearchPhoto={photoUrl ? searchByPhoto : undefined}
           t={t}
         />
 
@@ -770,6 +822,7 @@ export function ScanItemPanel({ jobId, item, onAdd, onRetry, onDismiss, onReview
             jobId={jobId}
             itemId={item.id}
             matches={item.matches}
+            nameEn={item.recognized?.name_en}
             onSelect={match => onAdd(item, match)}
             onZoom={(match, matchIndex) => onReview(item, matchIndex)}
             t={t}

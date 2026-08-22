@@ -1187,6 +1187,14 @@ const en = {
     showDetails: 'Show details',
     hideDetails: 'Hide details',
     printedTotalMismatch: "Printed set total doesn't match this photo",
+    noCatalogueImage: 'No catalogue scan exists for this printing.',
+    lookup_images: 'Search images',
+    lookup_ebay: 'Search eBay listings',
+    lookup_cardmarket: 'Search Cardmarket',
+    lookup_pokellector: 'Search Pokellector',
+    lookupShort: 'find image',
+    searchByPhoto: 'Search Google by this photo',
+    searchByPhotoSaved: 'Photo saved to your downloads — drop it into the Google Lens tab that just opened',
   },
 
   // Language filter / card language
