@@ -7,20 +7,23 @@ import {
   downloadBackup, restoreBackup, exportCSV,
   getSetting, setSetting, getTelegramStatus, saveSettings, setAuthMode,
   getUsers, createUser, updateUser, deleteUser, changePassword, changeAvatar, changeUsername,
-  getContributors, getSupporters, getRescueDonations, getCustomMatches, downloadDebugLog,
+  getContributors, getSupporters, getCustomMatches, downloadDebugLog,
   getProfile, updateProfile, deleteScanDiagnostics,
+  deleteAllCollectionCardPhotos,
 } from '../api/client'
 import api from '../api/client'
 import { useAuth } from '../contexts/AuthContext'
 import { useTheme } from '../hooks/useTheme'
 import { useSettings } from '../contexts/SettingsContext'
+import { useConfirmDialog } from '../contexts/ConfirmDialogContext'
 import Modal from '../components/ui/Modal'
 import AvatarPicker from '../components/AvatarPicker'
+import ScannerSettingsCard from '../components/ScannerSettingsCard'
 import { formatDistanceToNow } from 'date-fns'
 import toast from 'react-hot-toast'
 import { TCGDEX_LANGUAGES, normalizeTcgdexLanguageCsv, tcgdexLanguageLabel } from '../utils/tcgdexLanguages'
 import { APP_LANGUAGES } from '../utils/appLanguages'
-import { invalidateTcgdexFilterLanguages } from '../utils/queryInvalidation'
+import { invalidateCollectionPhotoState, invalidateTcgdexFilterLanguages } from '../utils/queryInvalidation'
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
@@ -192,16 +195,46 @@ const CURRENCY_SYMBOLS = {
   GBP: '£',
 }
 
-function formatSupporterAmount(amount, currency = 'EUR') {
-  const numericAmount = Number(amount || 0)
+function formatSupporterAmount(amountCents, currency = 'EUR') {
+  const cents = typeof amountCents === 'bigint' ? amountCents : BigInt(amountCents || 0)
   const safeCurrency = currency || 'EUR'
-  const formattedAmount = Number.isFinite(numericAmount) ? numericAmount.toFixed(2) : '0.00'
+  const formattedAmount = `${cents / 100n}.${String(cents % 100n).padStart(2, '0')}`
   const symbol = CURRENCY_SYMBOLS[safeCurrency]
   if (symbol) return `${symbol}${formattedAmount}`
   return `${formattedAmount} ${safeCurrency}`
 }
 
+export function summarizeSupporters(supporters = []) {
+  const amountTotals = new Map()
+  let donationCount = 0n
+  let hasMixedCurrency = false
+
+  for (const supporter of supporters) {
+    if (!supporter.support) continue
+    const support = supporter.support
+    donationCount += BigInt(support.donation_count)
+    if (support.currency === 'MIXED') {
+      hasMixedCurrency = true
+      continue
+    }
+    amountTotals.set(
+      support.currency,
+      (amountTotals.get(support.currency) || 0n) + BigInt(support.total_amount_cents),
+    )
+  }
+
+  return {
+    supporterCount: supporters.length,
+    donationCount,
+    amountTotals: [...amountTotals.entries()]
+      .sort(([leftCurrency], [rightCurrency]) => leftCurrency.localeCompare(rightCurrency))
+      .map(([currency, amountCents]) => ({ currency, amountCents })),
+    hasMixedCurrency,
+  }
+}
+
 function SupporterCard({ supporter, t }) {
+  const support = supporter.support
   const content = (
     <div className="flex items-center gap-3 px-3 py-2 rounded-xl bg-bg-elevated border border-border text-left transition-colors hover:border-brand-red/50">
       {supporter.crown && (
@@ -215,11 +248,13 @@ function SupporterCard({ supporter, t }) {
       )}
       <div className="min-w-0">
         <p className="text-xs font-semibold text-text-primary truncate">{supporter.name}</p>
-        <p className="text-[11px] text-text-secondary">
-          {formatSupporterAmount(supporter.total_amount, supporter.currency)} · {supporter.donation_count || 0} {supporter.donation_count === 1 ? t('settings.supporterDonation') : t('settings.supporterDonations')}
-        </p>
-        {supporter.latest_supported_at && (
-          <p className="text-[10px] text-text-muted">{t('settings.latestSupport')}: {supporter.latest_supported_at}</p>
+        {support && (
+          <p className="text-[11px] text-text-secondary">
+            {formatSupporterAmount(support.total_amount_cents, support.currency)} · {support.donation_count} {support.donation_count === 1 ? t('settings.supporterDonation') : t('settings.supporterDonations')}
+          </p>
+        )}
+        {support?.latest_supported_on && (
+          <p className="text-[10px] text-text-muted">{t('settings.latestSupport')}: {support.latest_supported_on}</p>
         )}
       </div>
     </div>
@@ -236,38 +271,22 @@ function SupporterCard({ supporter, t }) {
   return <div className="min-w-[180px] flex-1 max-w-xs">{content}</div>
 }
 
-function RescueDonationTotal({ t }) {
-  const { data: rescueDonations, isLoading } = useQuery({
-    queryKey: ['rescue-donations'],
-    queryFn: () => getRescueDonations(),
-    staleTime: 60 * 60 * 1000,
-  })
-
-  if (isLoading) {
-    return <div className="skeleton h-14 w-full max-w-xs mx-auto rounded-xl" />
-  }
-
-  return (
-    <div className="inline-flex flex-col items-center gap-1 px-4 py-2 rounded-xl bg-bg-elevated border border-border">
-      <span className="text-[10px] font-black uppercase tracking-[0.18em] text-text-muted">{t('settings.rescueDonationTotal')}</span>
-      <span className="text-lg font-black text-text-primary">{formatSupporterAmount(rescueDonations?.total_amount || 0, rescueDonations?.currency || 'EUR')}</span>
-      <span className="text-[10px] text-text-muted">{t('settings.rescueDonationBatchHint')}</span>
-    </div>
-  )
-}
-
-function SupportersSection({ t }) {
-  const { data: supporters = [], isLoading } = useQuery({
-    queryKey: ['supporters'],
-    queryFn: () => getSupporters(),
-    staleTime: 60 * 60 * 1000,
-  })
-
+export function SupportersPanel({ supporters = [], isLoading = false, unavailable = false, t }) {
   if (isLoading) {
     return (
       <SettingsCard>
         <div className="p-4 flex justify-center">
           <div className="skeleton h-8 w-48 rounded" />
+        </div>
+      </SettingsCard>
+    )
+  }
+
+  if (unavailable) {
+    return (
+      <SettingsCard>
+        <div className="p-4 text-center">
+          <p className="text-sm text-text-muted">{t('settings.supportersUnavailable')}</p>
         </div>
       </SettingsCard>
     )
@@ -283,9 +302,27 @@ function SupportersSection({ t }) {
     )
   }
 
+  const summary = summarizeSupporters(supporters)
+  const supporterLabel = summary.supporterCount === 1 ? t('settings.supporter') : t('settings.supporterPlural')
+  const donationLabel = summary.donationCount === 1n ? t('settings.supporterDonation') : t('settings.supporterDonations')
+
   return (
     <SettingsCard>
       <div className="p-4">
+        <div className="mb-4 pb-4 border-b border-border flex flex-wrap items-center justify-center gap-x-4 gap-y-2 text-xs text-text-secondary">
+          <span><strong className="text-text-primary">{summary.supporterCount}</strong> {supporterLabel}</span>
+          <span><strong className="text-text-primary">{summary.donationCount.toString()}</strong> {donationLabel}</span>
+          {summary.amountTotals.length > 0 && (
+            <span>
+              <strong className="text-text-primary">
+                {summary.amountTotals
+                  .map(({ currency, amountCents }) => formatSupporterAmount(amountCents, currency))
+                  .join(' + ')}
+              </strong>{' '}{t('settings.totalSupport')}
+            </span>
+          )}
+          {summary.hasMixedCurrency && <span>{t('settings.mixedCurrencySupport')}</span>}
+        </div>
         <div className="flex flex-wrap gap-3 justify-center">
           {supporters.map((supporter, index) => (
             <SupporterCard key={`${supporter.name}-${supporter.url || index}`} supporter={supporter} t={t} />
@@ -294,6 +331,45 @@ function SupportersSection({ t }) {
       </div>
     </SettingsCard>
   )
+}
+
+export function supporterQueryOptions(queryFn = getSupporters) {
+  return {
+    queryKey: ['supporters'],
+    queryFn,
+    enabled: false,
+    retry: false,
+    staleTime: 0,
+    gcTime: Infinity,
+    refetchInterval: false,
+    refetchIntervalInBackground: false,
+    refetchOnMount: false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    networkMode: 'always',
+  }
+}
+
+function SupportersSection({ t }) {
+  // Reuse one entry request across React StrictMode's effect replay, but not across real remounts.
+  const entryRequestRef = useRef(null)
+  const [entryPending, setEntryPending] = useState(true)
+  const { data: supporters = [], refetch, isFetching, isError, isRefetchError } = useQuery(supporterQueryOptions())
+
+  useEffect(() => {
+    let active = true
+    const entryRequest = entryRequestRef.current || refetch()
+    entryRequestRef.current = entryRequest
+    const finishEntry = () => {
+      if (active) setEntryPending(false)
+    }
+    void entryRequest.then(finishEntry, finishEntry)
+    return () => {
+      active = false
+    }
+  }, [refetch])
+
+  return <SupportersPanel supporters={supporters} isLoading={entryPending || isFetching} unavailable={isError || isRefetchError} t={t} />
 }
 
 
@@ -307,18 +383,21 @@ export default function Settings() {
   const [usernameInput, setUsernameInput] = useState('')
   const queryClient = useQueryClient()
   const navigate = useNavigate()
-  const { user, updateCurrentUser, multiUser } = useAuth()
+  const { user, updateCurrentUser, multiUser, modeLocked } = useAuth()
   const { settings, updateSettings, t, pricePrimaryField, exchangeRate } = useSettings()
+  const supportPageUrl = settings.language === 'de'
+    ? 'https://pokecollector.romerg.de/de/#support'
+    : 'https://pokecollector.romerg.de/#support'
+  const confirmDialog = useConfirmDialog()
   const publicProfilesEnabled = settings.public_profiles_enabled === 'true'
   const { theme, setTheme, themes } = useTheme()
   const [activeTab, setActiveTab] = useState('general')
 
-  const [geminiKey, setGeminiKey] = useState('')
-  const [geminiDirty, setGeminiDirty] = useState(false)
   const [backupOptions, setBackupOptions] = useState(['full'])
   const [debugModeEnabled, setDebugModeEnabled] = useState(false)
   const [scanDiagnosticsSaving, setScanDiagnosticsSaving] = useState(false)
   const [scanDiagnosticsDeleting, setScanDiagnosticsDeleting] = useState(false)
+  const [cardPhotosDeleting, setCardPhotosDeleting] = useState(false)
 
   // Recurring automatic full sync interval (days) and small price sync interval (minutes).
   const [fullSyncIntervalDays, setFullSyncIntervalDays] = useState('5')
@@ -327,6 +406,28 @@ export default function Settings() {
   // Notification settings
   const [priceAlertsEnabled, setPriceAlertsEnabled] = useState(false)
   const [alertThreshold, setAlertThreshold] = useState('10')
+
+  // Changing authentication mode has immediate access consequences, so always warn first.
+  const [multiUserModalMode, setMultiUserModalMode] = useState(null)
+  const [multiUserSaving, setMultiUserSaving] = useState(false)
+
+  const applyMultiUserMode = async (val) => {
+    try {
+      await setAuthMode(val)
+      window.location.reload()
+      return true
+    } catch {
+      toast.error(t('common.error'))
+      return false
+    }
+  }
+
+  const confirmMultiUserChange = async () => {
+    if (!multiUserModalMode) return
+    setMultiUserSaving(true)
+    const applied = await applyMultiUserMode(multiUserModalMode === 'enable')
+    if (!applied) setMultiUserSaving(false)
+  }
 
   // Load individual settings from backend
   const { data: fullSyncIntervalData } = useQuery({
@@ -347,11 +448,6 @@ export default function Settings() {
   const { data: alertThresholdData } = useQuery({
     queryKey: ['setting', 'price_alert_threshold'],
     queryFn: () => getSetting('price_alert_threshold').catch(() => ({ value: '10' })),
-  })
-
-  const { data: geminiKeyData } = useQuery({
-    queryKey: ['setting', 'gemini_api_key'],
-    queryFn: () => getSetting('gemini_api_key').catch(() => ({ value: '' })),
   })
 
   // Public profile
@@ -422,10 +518,6 @@ export default function Settings() {
   useEffect(() => {
     if (alertThresholdData?.value) setAlertThreshold(alertThresholdData.value)
   }, [alertThresholdData])
-
-  useEffect(() => {
-    if (geminiKeyData?.value !== undefined && !geminiDirty) setGeminiKey(geminiKeyData.value)
-  }, [geminiKeyData])
 
   useEffect(() => {
     setDebugModeEnabled(settings.debug_mode === 'true')
@@ -616,8 +708,44 @@ export default function Settings() {
     }
   }
 
+  const handlePhotoPreferenceToggle = async (enabled) => {
+    try {
+      await updateSettings({ prefer_own_card_photos: enabled ? 'true' : 'false' })
+      invalidateCollectionPhotoState(queryClient)
+      toast.success(t('settings.saved'))
+    } catch {
+      toast.error(t('settings.saveFailed'))
+    }
+  }
+
+  const handleDeleteCardPhotos = async () => {
+    const confirmed = await confirmDialog({
+      title: t('common.delete'),
+      message: t('settings.deleteCardPhotosConfirm'),
+      confirmLabel: t('common.delete'),
+      destructive: true,
+    })
+    if (!confirmed) return
+    setCardPhotosDeleting(true)
+    try {
+      await deleteAllCollectionCardPhotos()
+      invalidateCollectionPhotoState(queryClient)
+      toast.success(t('settings.cardPhotosDeleted'))
+    } catch {
+      toast.error(t('settings.cardPhotosDeleteFailed'))
+    } finally {
+      setCardPhotosDeleting(false)
+    }
+  }
+
   const handleDeleteScanDiagnostics = async () => {
-    if (!window.confirm(t('settings.scanDiagnosticsDeleteConfirm'))) return
+    const confirmed = await confirmDialog({
+      title: t('common.delete'),
+      message: t('settings.scanDiagnosticsDeleteConfirm'),
+      confirmLabel: t('common.delete'),
+      destructive: true,
+    })
+    if (!confirmed) return
     setScanDiagnosticsDeleting(true)
     try {
       await deleteScanDiagnostics()
@@ -656,7 +784,16 @@ export default function Settings() {
       toast.error(t('settings.selectSql'))
       return
     }
-    if (!confirm(t('settings.restoreConfirm'))) return
+    const confirmed = await confirmDialog({
+      title: t('common.restore'),
+      message: t('settings.restoreConfirm'),
+      confirmLabel: t('common.restore'),
+      destructive: true,
+    })
+    if (!confirmed) {
+      e.target.value = ''
+      return
+    }
 
     setRestoring(true)
     try {
@@ -682,6 +819,7 @@ export default function Settings() {
   const scanDiagnosticsEnabled = settings.scan_diagnostics_enabled === 'true'
   const scanDiagnosticsAvailable = settings.scan_diagnostics_available === 'true'
   const scanDiagnosticsDeletionAvailable = settings.scan_diagnostics_deletion_available === 'true'
+  const preferOwnCardPhotos = settings.prefer_own_card_photos === 'true'
 
   const usernameMutation = useMutation({
     mutationFn: (username) => changeUsername(username),
@@ -908,23 +1046,67 @@ export default function Settings() {
               <SettingsCard>
                 <SettingsRow
                   label={t('settings.multiUserMode')}
-                  description={t('settings.multiUserModeDesc')}
+                  description={modeLocked ? t('settings.multiUserModeLocked') : t('settings.multiUserModeDesc')}
                   last
                 >
                   <Toggle
                     value={multiUser}
+                    disabled={modeLocked}
                     label={t('settings.multiUserMode')}
-                    onChange={async (val) => {
-                      try {
-                        await setAuthMode(val)
-                        window.location.reload()
-                      } catch {
-                        toast.error(t('common.error'))
-                      }
+                    onChange={(val) => {
+                      if (modeLocked) return
+                      setMultiUserModalMode(val ? 'enable' : 'disable')
                     }}
                   />
                 </SettingsRow>
               </SettingsCard>
+
+              <Modal
+                isOpen={Boolean(multiUserModalMode)}
+                onClose={() => {
+                  if (!multiUserSaving) setMultiUserModalMode(null)
+                }}
+                title={t(multiUserModalMode === 'disable'
+                  ? 'settings.multiUserDisableTitle'
+                  : 'settings.multiUserEnableTitle')}
+                size="sm"
+                mobileSheet={false}
+              >
+                <div className="space-y-4 p-4">
+                  <p className="text-sm text-text-primary">
+                    {multiUserModalMode === 'disable'
+                      ? t('settings.multiUserDisableWarning')
+                      : t('settings.multiUserEnableWarning').replace('{username}', user?.username ?? 'admin')}
+                  </p>
+                  <p className="text-xs text-text-muted">
+                    {t(multiUserModalMode === 'disable'
+                      ? 'settings.multiUserDisablePreserved'
+                      : 'settings.multiUserEnableResetHint')}
+                  </p>
+                  <div className="flex gap-3 pt-2">
+                    <button
+                      type="button"
+                      onClick={() => setMultiUserModalMode(null)}
+                      disabled={multiUserSaving}
+                      className="btn-ghost flex-1"
+                    >
+                      {t('common.cancel')}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={confirmMultiUserChange}
+                      disabled={multiUserSaving}
+                      className="btn-primary flex-1 whitespace-normal"
+                    >
+                      {multiUserSaving
+                        ? t('common.saving')
+                        : t(multiUserModalMode === 'disable'
+                          ? 'settings.multiUserDisableConfirm'
+                          : 'settings.multiUserEnableConfirm')}
+                    </button>
+                  </div>
+                </div>
+              </Modal>
             </section>
           )}
 
@@ -949,7 +1131,7 @@ export default function Settings() {
                   onChange={handleCurrencyChange}
                 />
               </SettingsRow>
-              <SettingsRow label={t('settings.priceType')} description={t('settings.priceTypeDesc')} last>
+              <SettingsRow label={t('settings.priceType')} description={t('settings.priceTypeDesc')}>
                 <SelectControl
                   value={currentPriceType}
                   options={[
@@ -963,41 +1145,39 @@ export default function Settings() {
                   onChange={handlePriceTypeChange}
                 />
               </SettingsRow>
+              <SettingsRow
+                label={t('settings.preferOwnCardPhotos')}
+                description={t('settings.preferOwnCardPhotosDesc')}
+              >
+                <Toggle
+                  value={preferOwnCardPhotos}
+                  label={t('settings.preferOwnCardPhotos')}
+                  onChange={handlePhotoPreferenceToggle}
+                />
+              </SettingsRow>
+              <SettingsRow
+                label={t('settings.deleteCardPhotos')}
+                description={t('settings.deleteCardPhotosDesc')}
+                last
+              >
+                <button
+                  type="button"
+                  onClick={handleDeleteCardPhotos}
+                  disabled={cardPhotosDeleting}
+                  className="btn-ghost flex items-center gap-1.5 px-2.5 py-1.5 text-xs text-brand-red disabled:opacity-50"
+                >
+                  <Trash2 size={13} />
+                  {cardPhotosDeleting ? t('common.deleting') : t('common.delete')}
+                </button>
+              </SettingsRow>
             </SettingsCard>
           </section>
 
           {/* ── 6. KI / KARTEN-SCANNER ── */}
           <section className="space-y-1">
             <SectionHeader title={t('settings.sectionAI')} />
+            <ScannerSettingsCard t={t} />
             <SettingsCard>
-              <SettingsRow label={t('settings.geminiApiKey')} description={t('settings.geminiApiKeyDesc')}>
-                <div className="flex items-center gap-2 w-full mt-2">
-                  <input
-                    type={geminiDirty ? "text" : "password"}
-                    value={geminiKey}
-                    onChange={e => { setGeminiKey(e.target.value); setGeminiDirty(true) }}
-                    placeholder="AIza..."
-                    className="input flex-1 text-xs font-mono"
-                    style={{ minWidth: 0 }}
-                  />
-                  {geminiKey && !geminiDirty && (
-                    <span className="text-xs text-green flex-shrink-0">✅</span>
-                  )}
-                  {geminiDirty && (
-                    <button
-                      onClick={async () => {
-                        await saveSetting('gemini_api_key', geminiKey)
-                        setGeminiDirty(false)
-                        queryClient.invalidateQueries({ queryKey: ['setting', 'gemini_api_key'] })
-                        toast.success(t('settings.apiKeySaved'))
-                      }}
-                      className="btn-primary-sm flex-shrink-0"
-                    >
-                      {t('common.save')}
-                    </button>
-                  )}
-                </div>
-              </SettingsRow>
               <SettingsRow
                 label={t('settings.scanDiagnostics')}
                 description={scanDiagnosticsAvailable
@@ -1227,7 +1407,13 @@ export default function Settings() {
               <SettingsRow label={t('settings.clearImageCache')} description={t('settings.clearImageCacheDesc')}>
                 <button
                   onClick={async () => {
-                    if (!confirm(t('settings.clearImageCacheConfirm'))) return
+                    const confirmed = await confirmDialog({
+                      title: t('settings.clearImageCache'),
+                      message: t('settings.clearImageCacheConfirm'),
+                      confirmLabel: t('common.clear'),
+                      destructive: true,
+                    })
+                    if (!confirmed) return
                     try {
                       await api.post('/backup/clear-image-cache')
                       toast.success(t('settings.clearImageCacheSuccess'))
@@ -1455,20 +1641,14 @@ export default function Settings() {
             <SettingsCard>
               <div className="p-4 text-center space-y-3">
                 <p className="text-2xl">🐾</p>
-                <p className="text-sm text-text-secondary">
-                  {t('settings.sponsorMessage')}
-                </p>
-                <RescueDonationTotal t={t} />
-                <p className="text-xs text-text-muted">
-                  {t('settings.kofiHint')}
-                </p>
+                <p className="text-sm font-semibold text-text-secondary">PokéCollector × Tierrettung Köln-Porz</p>
                 <a
-                  href="https://ko-fi.com/gillesromer"
+                  href={supportPageUrl}
                   target="_blank"
                   rel="noreferrer"
                   className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-brand-red text-white text-sm font-semibold hover:opacity-90 transition-opacity"
                 >
-                  ☕ {t('settings.kofiButton')}
+                  🐾 Betterplace
                 </a>
               </div>
             </SettingsCard>
@@ -1491,6 +1671,7 @@ export default function Settings() {
 }
 
 function UsersTab({ t, queryClient }) {
+  const confirmDialog = useConfirmDialog()
   const [showModal, setShowModal] = useState(false)
   const [editingUser, setEditingUser] = useState(null)
   const [formUsername, setFormUsername] = useState('')
@@ -1578,7 +1759,15 @@ function UsersTab({ t, queryClient }) {
                   </button>
                   <button onClick={() => openEdit(u)} className="text-text-muted hover:text-text-primary"><Pencil size={15} /></button>
                   {u.id !== currentUser?.id && (
-                    <button onClick={() => { if (window.confirm(t('settings.users.deleteConfirm'))) deleteMut.mutate(u.id) }} className="text-text-muted hover:text-brand-red"><Trash2 size={15} /></button>
+                    <button onClick={async () => {
+                      const confirmed = await confirmDialog({
+                        title: t('common.delete'),
+                        message: t('settings.users.deleteConfirm'),
+                        confirmLabel: t('common.delete'),
+                        destructive: true,
+                      })
+                      if (confirmed) deleteMut.mutate(u.id)
+                    }} className="text-text-muted hover:text-brand-red"><Trash2 size={15} /></button>
                   )}
                 </div>
               </SettingsRow>

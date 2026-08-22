@@ -2,12 +2,14 @@ import { BrowserRouter, Navigate, Outlet, Route, Routes } from 'react-router-dom
 import { Suspense, lazy, useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import PokeBallLoader from './components/PokeBallLoader'
+import AuthStartupScreen from './components/AuthStartupScreen'
 import { SettingsProvider } from './contexts/SettingsContext'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
 import { forceChangePassword } from './api/client'
 import Layout from './components/Layout'
 import { useSettings } from './contexts/SettingsContext'
 import PublicHomeButton from './components/PublicHomeButton'
+import { ConfirmDialogProvider } from './contexts/ConfirmDialogContext'
 
 const HomeScreen = lazy(() => import('./pages/HomeScreen'))
 const Dashboard = lazy(() => import('./pages/Dashboard'))
@@ -127,14 +129,10 @@ function PublicRoutes() {
 }
 
 function ProtectedRoutes() {
-  const { user, loading, multiUser } = useAuth()
+  const { user, loading, connectionError, multiUser, retryConnection } = useAuth()
 
   if (loading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-bg-primary">
-        <PokeBallLoader size={48} />
-      </div>
-    )
+    return <AuthStartupScreen connectionError={connectionError} onRetry={retryConnection} />
   }
 
   if (!user && multiUser) {
@@ -188,18 +186,20 @@ export default function App() {
   return (
     <AuthProvider>
       <SettingsProvider>
-        <BrowserRouter>
-          <Routes>
-            {import.meta.env.DEV && <Route path="/__card-system" element={lazyRoute(<CardSystemGallery />)} />}
-            <Route path="/login" element={lazyRoute(<Login />)} />
-            <Route path="/u" element={<PublicRoutes />}>
-              <Route index element={lazyRoute(<PublicDirectory />)} />
-              <Route path=":handle" element={lazyRoute(<PublicProfile />)} />
-              <Route path=":handle/binder/:binderId" element={lazyRoute(<PublicBinderView />)} />
-            </Route>
-            <Route path="/*" element={<ProtectedRoutes />} />
-          </Routes>
-        </BrowserRouter>
+        <ConfirmDialogProvider>
+          <BrowserRouter>
+            <Routes>
+              {import.meta.env.DEV && <Route path="/__card-system" element={lazyRoute(<CardSystemGallery />)} />}
+              <Route path="/login" element={lazyRoute(<Login />)} />
+              <Route path="/u" element={<PublicRoutes />}>
+                <Route index element={lazyRoute(<PublicDirectory />)} />
+                <Route path=":handle" element={lazyRoute(<PublicProfile />)} />
+                <Route path=":handle/binder/:binderId" element={lazyRoute(<PublicBinderView />)} />
+              </Route>
+              <Route path="/*" element={<ProtectedRoutes />} />
+            </Routes>
+          </BrowserRouter>
+        </ConfirmDialogProvider>
       </SettingsProvider>
     </AuthProvider>
   )

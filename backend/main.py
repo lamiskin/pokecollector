@@ -45,6 +45,16 @@ def read_app_version() -> str:
 async def lifespan(app: FastAPI):
     # Startup
     logger.info("Starting Pokemon TCG Collection API...")
+    from api.auth import env_user_mode
+    _forced_mode = env_user_mode(warn_invalid=True)
+    if _forced_mode == "single":
+        logger.warning(
+            "USER_MODE=single: single-user mode is forced and the login screen is disabled "
+            "regardless of the stored setting. This is a local recovery hatch - unset it once "
+            "you have regained access, and do not leave it set on a public install."
+        )
+    elif _forced_mode == "multi":
+        logger.info("USER_MODE=multi: multi-user mode is forced; the in-app toggle is disabled.")
     current_version = read_app_version()
     from database import DATABASE_URL, SessionLocal, engine, init_db
     from services.auth import bootstrap_admin
@@ -138,7 +148,7 @@ async def debug_request_logging(request: Request, call_next):
     return response
 
 # Include routers
-from api import auth, cards, collection, sets, wishlist, binders, dashboard, analytics, sync, products, trades, export, backup, settings, images, social, pokedex, public, profile, scan_jobs
+from api import auth, cards, collection, sets, wishlist, binders, dashboard, analytics, sync, products, trades, export, backup, settings, images, social, pokedex, public, profile, scan_jobs, community
 from api.github import router as github_router
 from api.recognize import router as recognize_router
 
@@ -191,6 +201,7 @@ app.include_router(pokedex.router, prefix="/api/pokedex", tags=["pokedex"])
 app.include_router(public.router, prefix="/api/public", tags=["public"])
 app.include_router(profile.router, prefix="/api/profile", tags=["profile"])
 app.include_router(github_router, prefix="/api/github", tags=["github"])
+app.include_router(community.router, prefix="/api/community", tags=["community"])
 
 
 @app.get("/api/health")

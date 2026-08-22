@@ -10,6 +10,8 @@ const api = axios.create({
 })
 
 api.interceptors.request.use((config) => {
+  if (config.skipAuthentication) return config
+
   const token = localStorage.getItem('token')
   if (token) {
     config.headers.Authorization = `Bearer ${token}`
@@ -20,7 +22,7 @@ api.interceptors.request.use((config) => {
 api.interceptors.response.use(
   (response) => response,
   (error) => {
-    if (error.response?.status === 401) {
+    if (error.response?.status === 401 && !error.config?.preserveSessionOnUnauthorized) {
       const token = localStorage.getItem('token')
       localStorage.removeItem('token')
       localStorage.removeItem('user')
@@ -41,8 +43,16 @@ export const login = (username, password) => {
   }).then(r => r.data)
 }
 
-export const getMe = () => api.get('/auth/me').then(r => r.data)
-export const getAuthMode = () => api.get('/auth/mode').then(r => r.data)
+export const getMe = ({ withoutToken = false, preserveSession = false } = {}) => api.get('/auth/me', {
+  skipAuthentication: withoutToken,
+  preserveSessionOnUnauthorized: preserveSession,
+}).then(r => r.data)
+export const getAuthMode = () => api.get('/auth/mode', {
+  // Mode discovery is public. A leftover token must not influence bootstrap
+  // or let a transient/invalid response destroy the stored session.
+  skipAuthentication: true,
+  preserveSessionOnUnauthorized: true,
+}).then(r => r.data)
 export const setAuthMode = (enabled) => api.put('/auth/mode', { enabled }).then(r => r.data)
 export const getUsers = () => api.get('/auth/users').then(r => r.data)
 export const createUser = (data) => api.post('/auth/users', data).then(r => r.data)
@@ -97,6 +107,7 @@ export const updateCustomCard = (cardId, data) => api.put(`/cards/custom/${cardI
 export const updateCardCustomImage = (cardId, data) => api.put(`/cards/${cardId}/custom-image`, data).then(r => r.data)
 export const deleteCustomCard = (cardId) => api.delete(`/cards/custom/${cardId}`)
 export const getCustomCards = () => api.get('/cards/custom')
+export const cloneCustomCard = (cardId) => api.post(`/cards/custom/${cardId}/clone`).then(r => r.data)
 
 // Card recognition via Gemini Vision
 export const recognizeCard = (imageFile) => {
@@ -129,6 +140,11 @@ export const deleteScanJob = jobId =>
 export const fetchScanJobItemImage = (jobId, itemId) =>
   api.get(`/cards/recognize/jobs/${jobId}/items/${itemId}/image`, { responseType: 'blob' })
     .then(r => URL.createObjectURL(r.data))
+// Raw Blob rather than an object URL — for handing the scanned photo off to
+// uploadCollectionItemPhoto when a match is confirmed, not for display.
+export const fetchScanJobItemImageBlob = (jobId, itemId) =>
+  api.get(`/cards/recognize/jobs/${jobId}/items/${itemId}/image`, { responseType: 'blob' })
+    .then(r => r.data)
 
 // Custom card migration
 export const getCustomMatches = () => api.get('/cards/custom/matches')
@@ -140,6 +156,35 @@ export const getCollection = (params) => api.get('/collection/', { params })
 export const getUserCollection = (userId, params = {}) => api.get(`/collection/user/${userId}`, { params }).then(r => r.data)
 export const searchCollection = (params) => api.get('/collection/', { params })
 export const addToCollection = (data) => api.post('/collection/', data)
+
+// The owner's own photo of a card the catalogue has no scan of. A blob rather
+// than an <img src>: unlike /api/images this endpoint is authenticated, because
+// the photo belongs to the collector and not to the shared card catalogue.
+// Returns the Blob — callers make and revoke their own object URLs, so the
+// bytes can be cached once and rendered in several places.
+export const fetchCollectionItemPhoto = (itemId) =>
+  api.get(`/collection/${itemId}/photo`, { responseType: 'blob' }).then(r => r.data)
+
+// For cards collected before the scanner kept photos, added by hand, or scanned
+// and resolved earlier — resolve discards the photo, so there is otherwise no
+// way to give those a picture. The backend strips EXIF and bounds the size.
+export const uploadCollectionItemPhoto = (itemId, file) => {
+  const form = new FormData()
+  form.append('file', file)
+  // The header is required, not decoration: this client defaults every request
+  // to application/json, so without the override the multipart body is sent
+  // under the wrong content type and the server rejects it as a missing field.
+  return api.post(`/collection/${itemId}/photo`, form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  }).then(r => r.data)
+}
+
+export const deleteCollectionItemPhoto = (itemId) =>
+  api.delete(`/collection/${itemId}/photo`).then(r => r.data)
+
+export const deleteAllCollectionCardPhotos = () =>
+  api.delete('/settings/card-photos').then(r => r.data)
+
 export const bulkAddToCollection = (items) => api.post('/collection/bulk-add', { items }).then(r => r.data)
 export const importCollectionCsv = (file) => {
   const formData = new FormData()
@@ -325,6 +370,9 @@ export const getSettings = () => api.get('/settings/')
 export const saveSettings = (data) => api.put('/settings/', data)
 export const getSetting = (key) => api.get(`/settings/${key}`).then(r => r.data)
 export const setSetting = (key, value) => api.post(`/settings/${key}`, { value }).then(r => r.data)
+export const getScannerConfiguration = () => api.get('/settings/scanner').then(r => r.data)
+export const updateScannerConfiguration = (data) => api.put('/settings/scanner', data).then(r => r.data)
+export const testScannerConfiguration = (data) => api.post('/settings/scanner/test', data).then(r => r.data)
 export const getTelegramStatus = () => api.get('/settings/telegram_status').then(r => r.data)
 export const deleteScanDiagnostics = () => api.delete('/settings/scan-diagnostics').then(r => r.data)
 
@@ -348,7 +396,7 @@ export const downloadDebugLog = () => {
 
 // GitHub / Community
 export const getContributors = () => api.get('/github/contributors').then(r => r.data)
-export const getSupporters = () => api.get('/github/supporters').then(r => r.data)
+export const getSupporters = () => api.get('/community/supporters').then(r => r.data)
 export const getRescueDonations = () => api.get('/github/rescue-donations').then(r => r.data)
 
 // Social

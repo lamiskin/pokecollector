@@ -29,7 +29,6 @@ try:
         card_set_id,
         prioritize_candidates,
         get_gemini_model,
-        gemini_error_message,
         gemini_rate_limit_reason,
         gemini_retry_after_seconds,
         match_card_info,
@@ -37,6 +36,7 @@ try:
         normalize_scanner_card_number,
         post_gemini_generate,
         prioritize_cards_by_number,
+        recognize_sanitized_card,
         retain_ranked_candidates,
         select_search_candidates,
     )
@@ -57,6 +57,50 @@ class RecognizeConfigTests(unittest.TestCase):
         with patch.dict("os.environ", {"GEMINI_MODEL": "models/gemini-3.5-flash"}):
             self.assertEqual(get_gemini_model(), "gemini-3.5-flash")
             self.assertIn("/gemini-3.5-flash:generateContent", build_gemini_generate_url())
+
+
+@unittest.skipUnless(API_TEST_DEPS_AVAILABLE, "FastAPI/httpx are not installed")
+class ProviderCapabilityRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _provider():
+        provider = Mock()
+        provider.name = "openai"
+        provider.model.return_value = "single-image-model"
+        provider.credential.return_value = ""
+        provider.requires_credential.return_value = False
+        provider.generate_text = AsyncMock(return_value=(
+            '{"name":"Pikachu","name_en":"Pikachu","language":"en"}',
+            None,
+        ))
+        return provider
+
+    async def test_degraded_capability_disables_runtime_visual_verification(self):
+        provider = self._provider()
+        matcher = AsyncMock(return_value={"recognized": {}, "matches": []})
+        with patch("api.recognize.get_provider", return_value=provider), patch(
+            "api.recognize.require_scanner_capability_mode", return_value="degraded"
+        ), patch("api.recognize.match_card_info", new=matcher):
+            await recognize_sanitized_card(
+                object(), 7, b"image-bytes", "image/jpeg"
+            )
+
+        self.assertFalse(matcher.await_args.kwargs["allow_visual_verification"])
+
+    async def test_changed_endpoint_proof_blocks_scanning_until_retested(self):
+        provider = self._provider()
+        with patch("api.recognize.get_provider", return_value=provider), patch(
+            "api.recognize.require_scanner_capability_mode",
+            side_effect=HTTPException(
+                status_code=409,
+                detail="Test and save the scanner configuration again.",
+            ),
+        ), self.assertRaises(HTTPException) as caught:
+            await recognize_sanitized_card(
+                object(), 7, b"image-bytes", "image/jpeg"
+            )
+
+        self.assertEqual(caught.exception.status_code, 409)
+        provider.generate_text.assert_not_awaited()
 
 
 @unittest.skipUnless(API_TEST_DEPS_AVAILABLE, "FastAPI/httpx are not installed in this lightweight test environment")
@@ -861,20 +905,36 @@ class RotationFallbackTests(unittest.IsolatedAsyncioTestCase):
         Image.new("RGB", (300, 420), (10, 20, 30)).save(buf, format="JPEG")
         return buf.getvalue()
 
+    @staticmethod
+    def _provider():
+        provider = Mock()
+        provider.name = "gemini"
+        provider.model.return_value = "gemini-flash-latest"
+        provider.credential.return_value = "key"
+        provider.requires_credential.return_value = True
+        return provider
+
     def setUp(self):
         self.image_bytes = self._fake_jpeg_bytes()
         self.match_mock = AsyncMock(return_value={"recognized": {}, "matches": []})
         self.match_patch = patch.object(recognize_module, "match_card_info", new=self.match_mock)
         self.match_patch.start()
         self.addCleanup(self.match_patch.stop)
-        self.key_patch = patch.object(recognize_module, "get_gemini_key", return_value="key")
-        self.key_patch.start()
-        self.addCleanup(self.key_patch.stop)
+        self.provider_patch = patch.object(
+            recognize_module, "get_provider", return_value=self._provider()
+        )
+        self.provider_patch.start()
+        self.addCleanup(self.provider_patch.stop)
+        self.capability_patch = patch.object(
+            recognize_module, "require_scanner_capability_mode", return_value="full"
+        )
+        self.capability_patch.start()
+        self.addCleanup(self.capability_patch.stop)
 
     async def test_retries_other_orientations_when_no_name_is_read(self):
         attempts = []
 
-        async def fake_extract(client, api_key, image_bytes, content_type):
+        async def fake_extract(provider, client, api_key, image_bytes, content_type):
             attempts.append(len(image_bytes))
             if len(attempts) < 3:
                 return {"name": ""}, "{}", None
@@ -893,7 +953,7 @@ class RotationFallbackTests(unittest.IsolatedAsyncioTestCase):
     async def test_upright_cards_are_not_rotated_at_all(self):
         calls = []
 
-        async def fake_extract(client, api_key, image_bytes, content_type):
+        async def fake_extract(provider, client, api_key, image_bytes, content_type):
             calls.append(1)
             return {"name": "Gengar"}, '{"name":"Gengar"}', None
 
@@ -908,7 +968,7 @@ class RotationFallbackTests(unittest.IsolatedAsyncioTestCase):
     async def test_gives_up_after_every_orientation(self):
         calls = []
 
-        async def fake_extract(client, api_key, image_bytes, content_type):
+        async def fake_extract(provider, client, api_key, image_bytes, content_type):
             calls.append(1)
             return {"name": None}, "{}", None
 
@@ -926,11 +986,6 @@ class RotationFallbackTests(unittest.IsolatedAsyncioTestCase):
 
 @unittest.skipUnless(API_TEST_DEPS_AVAILABLE, "FastAPI/httpx are not installed in this lightweight test environment")
 class RecognizeErrorTests(unittest.TestCase):
-    def test_extracts_gemini_error_message(self):
-        response = httpx.Response(404, json={"error": {"message": "model retired"}})
-
-        self.assertEqual(gemini_error_message(response), "model retired")
-
     def test_extracts_retry_delay_from_gemini_retry_info(self):
         response = httpx.Response(
             429,
@@ -990,22 +1045,68 @@ class RecognizeErrorTests(unittest.TestCase):
 
 @unittest.skipUnless(API_TEST_DEPS_AVAILABLE, "FastAPI/httpx are not installed in this lightweight test environment")
 class RecognizeApiTests(unittest.IsolatedAsyncioTestCase):
-    async def test_gemini_404_surfaces_upstream_message(self):
+    async def test_gemini_404_is_permanent_without_upstream_text(self):
+        upstream_secret = "This model echoed private-key-material."
+
         class FakeClient:
             async def post(self, *args, **kwargs):
                 return httpx.Response(
                     404,
-                    json={"error": {"message": "This model is no longer available to new users."}},
+                    json={"error": {"message": upstream_secret}},
+                )
+
+        with patch("api.recognize.acquire_gemini_slot") as acquire, \
+                patch("api.recognize.logger") as provider_logger:
+            acquire.return_value = None
+            with self.assertRaises(HTTPException) as ctx:
+                await post_gemini_generate(
+                    FakeClient(),
+                    "https://example.test/v1beta/models/removed-model:generateContent",
+                    "key",
+                    {},
+                )
+
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("removed-model", ctx.exception.detail)
+        self.assertNotIn(upstream_secret, ctx.exception.detail)
+        from services.scan_queue import PermanentScanError, _scan_error_from_http
+
+        queue_error = _scan_error_from_http(ctx.exception)
+        self.assertIsInstance(queue_error, PermanentScanError)
+        self.assertNotIn(upstream_secret, str(queue_error))
+        self.assertNotIn(upstream_secret, repr(provider_logger.mock_calls))
+
+    async def test_other_gemini_4xx_errors_are_permanent_and_safe(self):
+        upstream_secret = "arbitrary-upstream-secret"
+
+        class FakeClient:
+            def __init__(self, status_code):
+                self.status_code = status_code
+
+            async def post(self, *args, **kwargs):
+                return httpx.Response(
+                    self.status_code,
+                    json={"error": {"message": upstream_secret}},
                 )
 
         with patch("api.recognize.acquire_gemini_slot") as acquire:
             acquire.return_value = None
-            with self.assertRaises(HTTPException) as ctx:
-                await post_gemini_generate(FakeClient(), "https://example.test", "key", {})
+            for status_code in (409, 422):
+                with self.subTest(status_code=status_code):
+                    with self.assertRaises(HTTPException) as ctx:
+                        await post_gemini_generate(
+                            FakeClient(status_code),
+                            "https://example.test/v1beta/models/test:generateContent",
+                            "key",
+                            {},
+                        )
+                    self.assertEqual(ctx.exception.status_code, 400)
+                    self.assertNotIn(upstream_secret, ctx.exception.detail)
+                    from services.scan_queue import PermanentScanError, _scan_error_from_http
 
-        self.assertEqual(ctx.exception.status_code, 502)
-        self.assertIn("GEMINI_MODEL", ctx.exception.detail)
-        self.assertIn("no longer available", ctx.exception.detail)
+                    queue_error = _scan_error_from_http(ctx.exception)
+                    self.assertIsInstance(queue_error, PermanentScanError)
+                    self.assertNotIn(upstream_secret, str(queue_error))
 
     async def test_gemini_429_persists_provider_retry_delay(self):
         class FakeClient:

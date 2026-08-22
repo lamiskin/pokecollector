@@ -9,8 +9,10 @@ This document reflects the current code layout at the repository root.
 | Frontend | React 18 + Vite + Tailwind CSS | 3000 |
 | Backend | FastAPI | 8000 |
 | Database | PostgreSQL 18 | 5432 |
-| External APIs | TCGdex, Gemini, Frankfurter, GitHub | external |
+| External APIs | TCGdex, Gemini or OpenAI-compatible scanner, Frankfurter, GitHub | external |
 | Containerization | Docker + docker compose | - |
+
+The table lists the default published host ports, set with `FRONTEND_PORT` and `BACKEND_PORT`. Inside the Compose network the frontend listens on `80`, the backend on `8000`, and PostgreSQL on `5432` without being published.
 
 ## Directory Structure
 
@@ -70,7 +72,6 @@ pokecollector/
 │   │   └── pages/
 │   └── index.html
 ├── docs/
-├── SUPPORTERS.csv
 ├── docker-compose.yml
 └── README.md
 ```
@@ -116,6 +117,7 @@ Key ORM models in `backend/models.py`:
 - `ScanJobItem`
 - `ScanQueueUserState`
 - `GeminiQuotaState`
+- `ScannerProviderLimitState`
 
 Notable current model rules:
 
@@ -141,7 +143,7 @@ The split is defined in `backend/api/settings.py`:
   - currency
   - price display preferences
   - Telegram keys and alert preferences
-  - Gemini key
+  - Gemini/OpenAI-compatible provider keys and provider-specific scanner choices
   - scanner diagnostics consent
   - trainer name
 - `ADMIN_ONLY_KEYS`
@@ -182,17 +184,17 @@ Recognition is implemented in `backend/api/recognize.py` and surfaced through `f
 Current flow:
 
 1. The user captures or uploads up to 50 photos. Uploads are size-limited, re-encoded, orientation-normalized, stripped of metadata, and stored as private JPEG files.
-2. Single photos run individually. Batch-eligible photos are grouped into two-to-four-card composites to reduce Gemini calls; uncertain composite positions fall back to their original individual photo.
-3. Gemini extracts name, split collector number, printed total, set code, regulation mark, type, energy type (for Energy cards, from the central symbol), HP, language, and artist. Unclear small text must be returned as `null`; set code and energy type carry an explicit anti-hallucination rule so Gemini cannot fill them from training data instead of the image. If a single-photo read comes back with no name at all, the photo is retried rotated 180/90/270 degrees before giving up — the name is the only thing search has to go on, so an upside-down photo would otherwise fail outright.
+2. Single photos run individually. Batch-eligible photos are grouped into two-to-four-card composites to reduce provider calls; uncertain composite positions fall back to their original individual photo.
+3. The selected Gemini or OpenAI-compatible provider extracts name, split collector number, printed total, set code, regulation mark, type, energy type (for Energy cards, from the central symbol), HP, language, and artist. Unclear small text must be returned as `null`; set code and energy type carry an explicit anti-hallucination rule so the provider cannot fill them from training data instead of the image. If a single-photo read comes back with no name at all, the photo is retried rotated 180/90/270 degrees before giving up — the name is the only thing search has to go on, so an upside-down photo would otherwise fail outright.
 4. TCGdex candidates are searched in the detected language with English fallback. A basic Energy card prints only a generic name ("Basic Energy") with its type shown by a symbol, so that pair is substituted with the catalogue-style name (e.g. "Water Energy") derived from the read symbol and searched first. Results are floated by recognized number and set code *before* the per-search candidate cap so a correctly-identified printing cannot be discarded just because TCGdex returned it late. The combined candidate pool is then ranked deterministically by local number, language, printed total, set code, regulation mark, artist, and HP. Missing fields are neutral; contradictions reduce rank.
 5. When metadata remains inconclusive, conservative pHash compares the original photo with a bounded candidate set, followed by a second artwork-ensemble pass (phash + dhash + colour hash) on the same downloaded images if pHash abstains. Both accept only a close, clearly separated winner with no metadata contradiction.
-6. Individual scans may use a second Gemini visual comparison if both artwork passes abstain. Composite scans instead return to the individual queue path.
+6. Individual scans may use a second provider visual comparison if both artwork passes abstain. Composite scans instead return to the individual queue path. OpenAI-compatible selections must prove their configured endpoint/model before scanning. Models that pass only the single-image probe may be saved by an administrator in acknowledged limited mode, which disables the second visual-comparison step.
 7. Once a candidate is chosen, its catalogue scan (upright by definition) is compared against the original photo to detect whether the photo itself was rotated; single-photo scans instead trust the orientation-retry angle from step 3 directly, since it is more reliable and works even for candidates TCGdex has no image for.
 8. Results are persisted in the `/scans` review inbox. Confirming or dismissing an item deletes its queued photo; unresolved jobs expire after 14 days.
 
-`backend/services/scan_queue.py` provides fair, restart-safe background dispatch with leases. Recognition attempts are capped separately from transient quota failures. `backend/services/gemini_rate_limit.py` shares quota state by API-key fingerprint so concurrent users of the same key cannot bypass a provider delay; distinct keys remain independent. Structured daily-quota signals are separated from short-term limits, and provider `Retry-After` / `google.rpc.RetryInfo` delays take precedence over fallback backoff.
+`backend/services/scan_queue.py` provides fair, restart-safe background dispatch with leases. Recognition attempts are capped separately from transient quota failures. Gemini shares quota state by its existing API-key fingerprint so upgrades preserve active pacing and quota blocks. Compatible providers persist blocks under a fingerprint keyed with the resolved private server secret, without storing credentials or administrator endpoint text. Structured daily-quota signals are separated from short-term limits, and provider `Retry-After` / `google.rpc.RetryInfo` delays take precedence over fallback backoff.
 
-Optional diagnostics live in `backend/services/scan_trace.py`. The server must set `SCAN_TRACE_DIR`, and each user must separately enable **Share scanner diagnostics** (off by default). Only opted-in attempts store a sanitized photo plus structured extraction/search/ranking data. Turning the toggle off stops future traces without deleting old ones; the adjacent delete action removes that user's trace subtree. `SCAN_TRACE_STORAGE_DIR` remains stable when collection is disabled so explicit and account deletion can still find old data. Account deletion writes a revocation marker before cleanup so an in-flight attempt cannot recreate the deleted user's files. No Gemini key or authentication credential is recorded.
+Optional diagnostics live in `backend/services/scan_trace.py`. The server must set `SCAN_TRACE_DIR`, and each user must separately enable **Share scanner diagnostics** (off by default). Only opted-in attempts store a sanitized photo plus structured extraction/search/ranking data, including provider and model identifiers. Turning the toggle off stops future traces without deleting old ones; the adjacent delete action removes that user's trace subtree. `SCAN_TRACE_STORAGE_DIR` remains stable when collection is disabled so explicit and account deletion can still find old data. Account deletion writes a revocation marker before cleanup so an in-flight attempt cannot recreate the deleted user's files. No provider key or authentication credential is recorded.
 
 ## Frontend State
 
@@ -224,13 +226,14 @@ Current frontend state layers:
 - English is the preferred fallback for missing data, images, and prices only when the same exact TCGdex card or set ID exists in English
 - Regional-only cards are not guessed by translated name
 
-### Gemini
+### Scanner providers
 
-- Used for smart scanner recognition
-- Key is read per user from `user_settings`
-- Scanner model is configurable through `GEMINI_MODEL` and defaults to `gemini-flash-latest`
-- Scanner calls use the API-key header rather than putting the key in the request URL
-- Transient capacity failures are retried; rate limits, invalid keys, and unavailable models are reported separately
+- Gemini is the default; administrators may also enable hosted or self-hosted OpenAI-compatible providers
+- Provider communication is isolated behind one shared scanner-provider layer, while matching, visual verification, queueing, and warnings remain provider-neutral
+- Users choose only administrator-approved providers and models; administrators can test an Advanced custom model before saving it
+- OpenAI-compatible provider/model selections must pass the real-image capability probe; an administrator may explicitly accept single-image-only limited mode, while Gemini keeps its established automatic verification behavior
+- Credentials are read per user from `user_settings`; endpoints and approved models remain administrator-controlled
+- Transient capacity failures are retried; rate limits, invalid keys, unavailable models, and permanent request failures are reported separately without reflecting arbitrary upstream messages
 
 ### Telegram
 
@@ -240,8 +243,10 @@ Current frontend state layers:
 ### GitHub / Community
 
 - `backend/api/github.py` fetches contributors from the GitHub API
-- Supporters are read from `SUPPORTERS.csv`
-- `frontend/src/pages/Settings.jsx` renders both in the Community section
+- `backend/api/community.py` is the only client of the versioned public supporter registry at `pokecollector.romerg.de`
+- Supporter responses are size-bounded and strictly validated before use; unknown fields, unsafe values, malformed responses, redirects, and upstream failures are rejected
+- Supporter data is not persisted or served from a fallback. The Community view fetches on each entry, retains only an in-memory browser cache between entries, and hides cached data while that fetch is pending or after it fails; there is no recurring polling
+- `frontend/src/pages/Settings.jsx` renders contributors and the validated supporter projection in the Community section
 
 ## Security Notes
 
