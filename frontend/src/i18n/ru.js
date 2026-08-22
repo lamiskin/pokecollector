@@ -508,8 +508,6 @@ const ru = {
     sortName: 'Название',
     sortPnl: 'P&L',
     filterType: 'Тип товара',
-    filterDateFrom: 'С',
-    filterDateTo: 'По',
     filterOnlyProfit: 'Только прибыль',
     filterOnlyLoss: 'Только убыток',
     filterAll: 'Все',

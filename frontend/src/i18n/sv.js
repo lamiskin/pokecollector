@@ -504,8 +504,6 @@ const sv = {
     sortName: 'Namn',
     sortPnl: 'V&F',
     filterType: 'Produkttyp',
-    filterDateFrom: 'Från',
-    filterDateTo: 'Till',
     filterOnlyProfit: 'Bara vinst',
     filterOnlyLoss: 'Bara förlust',
     filterAll: 'Alla',

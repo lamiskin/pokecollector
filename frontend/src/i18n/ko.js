@@ -508,8 +508,6 @@ const ko = {
     sortName: '이름',
     sortPnl: '손익',
     filterType: '상품 유형',
-    filterDateFrom: '시작',
-    filterDateTo: '종료',
     filterOnlyProfit: '이익만',
     filterOnlyLoss: '손실만',
     filterAll: '전체',

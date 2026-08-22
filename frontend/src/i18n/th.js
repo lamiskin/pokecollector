@@ -506,8 +506,6 @@ const th = {
     sortName: 'ชื่อ',
     sortPnl: 'กำไร/ขาดทุน',
     filterType: 'ประเภทสินค้า',
-    filterDateFrom: 'จาก',
-    filterDateTo: 'ถึง',
     filterOnlyProfit: 'เฉพาะกำไร',
     filterOnlyLoss: 'เฉพาะขาดทุน',
     filterAll: 'ทั้งหมด',

@@ -508,8 +508,6 @@ const ja = {
     sortName: '名前',
     sortPnl: '損益',
     filterType: '商品タイプ',
-    filterDateFrom: '開始日',
-    filterDateTo: '終了日',
     filterOnlyProfit: '利益のみ',
     filterOnlyLoss: '損失のみ',
     filterAll: 'すべて',

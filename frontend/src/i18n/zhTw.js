@@ -508,8 +508,6 @@ const zhTw = {
     sortName: '名稱',
     sortPnl: '盈虧',
     filterType: '產品類型',
-    filterDateFrom: '從',
-    filterDateTo: '至',
     filterOnlyProfit: '僅獲利',
     filterOnlyLoss: '僅虧損',
     filterAll: '全部',

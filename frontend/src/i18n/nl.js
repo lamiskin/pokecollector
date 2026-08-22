@@ -506,8 +506,6 @@ const nl = {
     sortName: 'Naam',
     sortPnl: 'P&L',
     filterType: 'Producttype',
-    filterDateFrom: 'Van',
-    filterDateTo: 'Tot',
     filterOnlyProfit: 'Alleen winst',
     filterOnlyLoss: 'Alleen verlies',
     filterAll: 'Alles',

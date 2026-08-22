@@ -508,8 +508,6 @@ const es = {
     sortName: 'Nombre',
     sortPnl: 'PyG',
     filterType: 'Tipo de producto',
-    filterDateFrom: 'Desde',
-    filterDateTo: 'Hasta',
     filterOnlyProfit: 'Solo beneficio',
     filterOnlyLoss: 'Solo pérdida',
     filterAll: 'Todo',

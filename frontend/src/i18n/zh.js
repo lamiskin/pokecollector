@@ -508,8 +508,6 @@ const zh = {
     sortName: '名称',
     sortPnl: '盈亏',
     filterType: '产品类型',
-    filterDateFrom: '从',
-    filterDateTo: '至',
     filterOnlyProfit: '仅盈利',
     filterOnlyLoss: '仅亏损',
     filterAll: '全部',

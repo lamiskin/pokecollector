@@ -508,8 +508,6 @@ const id = {
     sortName: 'Nama',
     sortPnl: 'P&L',
     filterType: 'Tipe Produk',
-    filterDateFrom: 'Dari',
-    filterDateTo: 'Sampai',
     filterOnlyProfit: 'Hanya laba',
     filterOnlyLoss: 'Hanya rugi',
     filterAll: 'Semua',
