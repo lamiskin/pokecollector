@@ -209,3 +209,22 @@ Update this file's list whenever a branch is merged into or removed from
   backend stores it in `images_small`/`images_large` same as a synced
   card), so no new "does this custom card have real art" check was needed.
   Independent branch off bare `main`.
+- `fix/batching-respects-provider-capability` — a composite grid asks the
+  model to read several cards out of one image, which needs the same
+  multi-image capability visual verification already depends on
+  (`scanner_capability_mode`, proven once by the `/settings/scanner/test`
+  probe and persisted as an endpoint/model-bound proof). `recognize.py`'s
+  single-photo path already respected the mode; the batch enqueue path in
+  `scan_jobs.py` called `require_scanner_capability_mode(...)` for its
+  validation side effect only and discarded the returned mode, so a
+  provider proven single-image-only (`degraded`) could still be asked to
+  composite whenever the client's per-photo `individual` toggle wasn't set.
+  Now `capability_mode` gates `batch_modes` directly — server-side defense
+  in depth, not just trusting the frontend's own toggle state. Frontend
+  hides the now-pointless "process individually" toggles (per-photo and
+  toggle-all) in degraded mode, inferred from
+  `scannerConfiguration?.visual_verification !== 'disabled'`. Found while
+  auditing an abandoned pre-#355 branch; most of its Gemini-specific
+  retry/UI text was already superseded by #355's provider-neutral rewrite,
+  but this gate was never carried over. Independent branch off bare
+  `main`. Upstream PR: Git-Romer/pokecollector#382.
