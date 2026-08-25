@@ -882,6 +882,7 @@ async def _api_search_fallback(
                 "name": card.get("name"),
                 "number": card.get("localId"),
                 "image": f"{card.get('image')}/low.webp" if card.get("image") else None,
+                "image_hd": f"{card.get('image')}/high.webp" if card.get("image") else None,
                 "rarity": card.get("rarity"),
             }
             for card in api_cards
@@ -931,6 +932,7 @@ async def _fetch_candidates_for_pair(
                 "name": row.name,
                 "number": row.number,
                 "image": row.images_small,
+                "image_hd": row.images_large,
                 "rarity": row.rarity,
             }
             for row in rows
@@ -970,6 +972,7 @@ async def _fetch_candidates_for_pair(
                 "set": None,
                 "number": card.get("number"),
                 "image": card.get("image"),
+                "image_hd": card.get("image_hd"),
                 "rarity": card.get("rarity"),
                 "lang": search_language,
                 "_lang": search_language,
