@@ -439,6 +439,7 @@ class SearchAndRankCandidatesLocalDbTests(unittest.IsolatedAsyncioTestCase):
             number="118",
             rarity="Common",
             images_small="https://assets.tcgdex.net/en/base/base4/118/low.webp",
+            images_large="https://assets.tcgdex.net/en/base/base4/118/high.webp",
             lang="en",
             is_custom=False,
         ))
@@ -456,6 +457,11 @@ class SearchAndRankCandidatesLocalDbTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(candidate["number"], "118")
         self.assertEqual(
             candidate["image"], "https://assets.tcgdex.net/en/base/base4/118/low.webp"
+        )
+        # Regression case: the review zoom modal renders this at full size,
+        # and without it fell back to upscaling the 245px thumbnail instead.
+        self.assertEqual(
+            candidate["image_hd"], "https://assets.tcgdex.net/en/base/base4/118/high.webp"
         )
         self.assertEqual(candidate["rarity"], "Common")
         self.assertEqual(candidate["lang"], "en")
@@ -671,6 +677,9 @@ class SearchAndRankCandidatesLocalDbTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(candidate["number"], "1")
         self.assertEqual(
             candidate["image"], "https://assets.tcgdex.net/en/sv/sv99/1/low.webp"
+        )
+        self.assertEqual(
+            candidate["image_hd"], "https://assets.tcgdex.net/en/sv/sv99/1/high.webp"
         )
 
     async def test_local_miss_and_api_failure_yields_no_candidates_not_an_error(self):
