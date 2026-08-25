@@ -27,7 +27,30 @@ Update this file's list whenever a branch is merged into or removed from
   could run taller than the real screen, reading as the top frame cut off.
   Switched to `dvh`, and added a `safe-area-inset-top` floor on the overlay's
   own top padding as a second line of defense against full-screen fixed
-  overlays rendering behind (not below) the address bar.
+  overlays rendering behind (not below) the address bar. Third later fix:
+  found comparing this branch's own before/after screenshots against
+  `main` -- a candidate whose TCGdex image genuinely 404s showed the
+  proper "Artwork unavailable, Retry" state on `main`, but nothing on
+  this branch. Both the grid tile and the zoom modal's candidate side had
+  switched to a bare `<img>` with no `onError` handling somewhere in the
+  rewrite; grid tile now routes through `CardImage` (non-compact, since
+  these tiles are large enough that the icon-only `compactError` mode
+  used for small thumbnails elsewhere read as unexplained), the zoom
+  modal's candidate side got the same failed/retry state added inline
+  instead, since it needs the pan/zoom transform and progressive-blur
+  styling `CardImage` doesn't support. Also folded in
+  `fix/scanner-candidate-image-hd`'s change (see its own entry below,
+  further down this list before this session's split) rather than
+  keeping it a separate PR: this branch's own frontend code already
+  reads `image_hd` (the whole point of the linked pan/zoom review), so
+  without that fix the feature never actually delivered on its premise —
+  zooming just scaled up the same low-res thumbnail. On `testing`, that
+  fold's own new test doesn't apply (this branch's pre-refactor,
+  live-API-only candidate search isn't the code path here anymore, and
+  `testing` already had separate `image_hd` coverage from the original
+  `fix/scanner-candidate-image-hd` merge below) — dropped here, kept on
+  `feature/scan-review-ui-fresh` itself where the code it exercises still
+  exists.
 - `fix/card-dialog-mobile-safe-area` — the shared card-detail dialog
   (`UnifiedCardDialog` in `UnifiedCard.jsx`, used by Collection, Analytics,
   and BinderDetail) had the same fixed-overlay-behind-the-address-bar
