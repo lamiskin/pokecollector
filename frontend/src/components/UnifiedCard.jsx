@@ -294,7 +294,12 @@ export function UnifiedCardDialog({
   const setNumber = getCardSetNumber(card)
   const dialog = (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-3 backdrop-blur-sm sm:p-6"
+      // padding-top floored at safe-area-inset-top: on some mobile browsers
+      // a fixed, full-screen overlay can render partly behind the address
+      // bar rather than below it, which reads as the dialog's own top edge
+      // (and the image inside it) being cut off. safe-area-inset-top is the
+      // platform's own answer for how much is currently covered up top.
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-3 [padding-top:max(0.75rem,env(safe-area-inset-top))] backdrop-blur-sm sm:p-6 sm:[padding-top:max(1.5rem,env(safe-area-inset-top))]"
       onClick={onClose}
     >
       <div
