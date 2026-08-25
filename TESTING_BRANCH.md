@@ -50,7 +50,15 @@ Update this file's list whenever a branch is merged into or removed from
   `testing` already had separate `image_hd` coverage from the original
   `fix/scanner-candidate-image-hd` merge below) — dropped here, kept on
   `feature/scan-review-ui-fresh` itself where the code it exercises still
-  exists.
+  exists. Fourth later fix: the zoom modal's new artwork-unavailable panel
+  used `bg-bg-elevated` (a flat grey fill) first, which clashed against
+  the modal's dark background instead of reading as a card-shaped
+  placeholder; a near-transparent `rgba(255,255,255,0.03)` fill (matching
+  the sibling "no catalogue image" state) was tried next, but that one
+  sits over solid black while this one sits over a card-shaped skeleton,
+  so the same alpha just clashed a different way instead of disappearing.
+  Settled on `bg-black/55`, the same treatment this same modal's loading
+  spinner circle already uses.
 - `fix/card-dialog-mobile-safe-area` — the shared card-detail dialog
   (`UnifiedCardDialog` in `UnifiedCard.jsx`, used by Collection, Analytics,
   and BinderDetail) had the same fixed-overlay-behind-the-address-bar
