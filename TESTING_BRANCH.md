@@ -146,9 +146,15 @@ Update this file's list whenever a branch is merged into or removed from
   candidates" for Japanese scans. Added `ENGLISH_FALLBACK_MAX_CANDIDATES`
   (2x the trigger threshold) and enforced it on what actually gets added,
   not just checked between pairs, since a single pair's own result limit
-  can already exceed the cap in one call. Stacked on
-  `fix/scanner-vintage-multilingual-accuracy`, sibling to
-  `fix/scanner-candidate-image-hd`.
+  can already exceed the cap in one call. Originally its own branch
+  stacked on `fix/scanner-vintage-multilingual-accuracy`; folded into that
+  branch directly (cherry-picked, pushed, standalone branch deleted) once
+  it had an open PR — this fix only makes sense against the fallback
+  mechanism that branch introduces (`ENGLISH_FALLBACK_MIN_CANDIDATES`
+  doesn't exist without it), so reviewing them apart meant presenting a
+  known-flooding version of the mechanism before immediately fixing it in
+  a follow-up. No functional change to `testing` itself, already merged
+  here independently before the fold.
 - `feature/scanner-gemini-fallback` — opt-in per-user toggle
   (`scanner_gemini_fallback`, default off), now surfaced in Settings under
   AI/Card Scanner next to the diagnostics toggle. When on, an OpenAI-
