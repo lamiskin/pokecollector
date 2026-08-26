@@ -77,13 +77,6 @@ function initialSettings() {
   return { ...DEFAULT_SETTINGS, language: readCachedLanguage() || DEFAULT_SETTINGS.language }
 }
 
-// Currency symbols and last-resort rates used only if the backend's own
-// /settings/exchange-rate call (which already has its own live-fetch-then-
-// fallback logic) is unreachable entirely.
-const CURRENCY_SYMBOLS = { EUR: '€', USD: '$', AUD: 'A$' }
-const EUR_FALLBACK_RATES = { EUR: 1.0, USD: 1.1, AUD: 1.63 }
-const USD_FALLBACK_RATES = { EUR: 0.91, USD: 1.0, AUD: 1.43 }
-
 const SettingsContext = createContext(null)
 
 export function SettingsProvider({ children }) {
