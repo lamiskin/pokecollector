@@ -12,7 +12,6 @@ logger = logging.getLogger(__name__)
 
 _sync_running = False
 _price_sync_running = False
-_jp_price_sync_running = False
 
 
 def _ensure_utc_z(dt) -> str:
@@ -109,20 +108,15 @@ def trigger_jp_price_sync(
     """Manually trigger a Suruga-ya JPY price sync for owned Japanese cards. Admin only."""
     if current_user.role != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
-    global _jp_price_sync_running
-    if _jp_price_sync_running:
+    from services.scheduler import is_jp_price_sync_running, run_jp_price_sync
+    if is_jp_price_sync_running():
         return {"message": "JP price sync already running", "status": "running"}
 
     def run_jp_price_sync_task():
-        global _jp_price_sync_running
-        _jp_price_sync_running = True
-        from services.scheduler import run_jp_price_sync
         try:
             run_jp_price_sync()
         except Exception:
             logger.exception("Background JP price sync failed")
-        finally:
-            _jp_price_sync_running = False
 
     background_tasks.add_task(run_jp_price_sync_task)
     return {"message": "JP price sync started", "status": "started"}
@@ -216,7 +210,8 @@ def get_sync_status(
     current_user: User = Depends(get_current_user),
 ):
     """Get sync status and history."""
-    global _sync_running, _price_sync_running, _jp_price_sync_running
+    global _sync_running, _price_sync_running
+    from services.scheduler import is_jp_price_sync_running
 
     last_sync = db.query(SyncLog).order_by(SyncLog.started_at.desc()).first()
     last_full_sync = db.query(SyncLog).filter(SyncLog.sync_type == "full").order_by(SyncLog.started_at.desc()).first()
@@ -244,7 +239,7 @@ def get_sync_status(
         "last_sync": _sync_log_payload(last_sync),
         "last_full_sync": _sync_log_payload(last_full_sync),
         "last_price_sync": _sync_log_payload(last_price_sync),
-        "is_jp_price_sync_running": _jp_price_sync_running,
+        "is_jp_price_sync_running": is_jp_price_sync_running(),
         "last_jp_price_sync": _sync_log_payload(last_jp_price_sync),
         "history": history,
     }
