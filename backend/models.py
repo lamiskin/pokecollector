@@ -124,6 +124,13 @@ class Card(Base):
     price_jpy_match_note = Column(String, nullable=True)  # matched listing's title + set/print line, for manual sanity-checking
     price_jpy_source_url = Column(String, nullable=True)
     price_jpy_updated_at = Column(DateTime, nullable=True)
+    # Pre-converted EUR value of the JPY price, computed and stored once at sync time
+    # (not converted on read) so effective_market_price() — a hot path, called for every
+    # card in the collection on every portfolio/export/dashboard calculation — never has
+    # to make a live exchange-rate lookup. This is the only price_jpy_* field that
+    # actually feeds into "the" effective price, and only as the last-resort fallback
+    # when no Cardmarket/TCGPlayer price exists at all.
+    price_jpy_eur_equivalent = Column(Float, nullable=True)
     last_metadata_enrichment_attempt_at = Column(DateTime, nullable=True, index=True)
     # Card variants from TCGdex
     variants_normal = Column(Boolean)

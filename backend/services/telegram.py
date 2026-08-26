@@ -2,9 +2,11 @@ import httpx
 import os
 import logging
 
-from services.exchange_rates import parse_frankfurter_v2_rate
+from services.exchange_rates import fallback_exchange_rate, parse_frankfurter_v2_rate
 
 logger = logging.getLogger(__name__)
+
+_CURRENCY_SYMBOLS = {"EUR": "€", "USD": "$", "AUD": "A$", "JPY": "¥"}
 
 
 def _get_telegram_credentials(db=None, user_id=None):
@@ -89,15 +91,15 @@ def _format_user_eur(amount: float, db=None, user_id=None) -> str:
         except Exception:
             currency = "EUR"
 
-    if currency == "USD":
+    if currency != "EUR" and currency in _CURRENCY_SYMBOLS:
         try:
             with httpx.Client(timeout=5.0) as client:
-                response = client.get("https://api.frankfurter.dev/v2/rate/EUR/USD")
+                response = client.get(f"https://api.frankfurter.dev/v2/rate/EUR/{currency}")
                 response.raise_for_status()
                 rate = parse_frankfurter_v2_rate(response.json())
         except Exception:
-            rate = 1.1
-        return f"${(amount or 0) * rate:.2f}"
+            rate = fallback_exchange_rate("EUR", currency)
+        return f"{_CURRENCY_SYMBOLS[currency]}{(amount or 0) * rate:.2f}"
     return f"€{(amount or 0):.2f}"
 
 

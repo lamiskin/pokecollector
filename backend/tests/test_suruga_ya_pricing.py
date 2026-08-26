@@ -1,13 +1,16 @@
 import unittest
+from unittest.mock import MagicMock, patch
 
 from bs4 import BeautifulSoup
 
 from services.suruga_ya_pricing import (
     build_candidate,
     build_search_url,
+    fetch_jpy_to_eur_rate,
     parse_item_html,
     parse_price_range,
     parse_release_date,
+    representative_jpy_price,
     select_best_match,
 )
 
@@ -235,6 +238,41 @@ class SelectBestMatchTests(unittest.TestCase):
         in_stock = self._candidate(release_date="1996-10-20", in_stock=True, price_low=280.0)
         result = select_best_match([out_of_stock, in_stock], target_release_date="1996-10-20")
         self.assertTrue(result.in_stock)
+
+
+class RepresentativeJpyPriceTests(unittest.TestCase):
+    def test_averages_low_and_high(self):
+        self.assertEqual(representative_jpy_price(580.0, 1280.0, None), 930.0)
+
+    def test_falls_back_to_low_only(self):
+        self.assertEqual(representative_jpy_price(280.0, None, None), 280.0)
+
+    def test_falls_back_to_high_only(self):
+        self.assertEqual(representative_jpy_price(None, 1280.0, None), 1280.0)
+
+    def test_falls_back_to_marketplace_when_out_of_stock(self):
+        self.assertEqual(representative_jpy_price(None, None, 380.0), 380.0)
+
+    def test_none_when_nothing_available(self):
+        self.assertIsNone(representative_jpy_price(None, None, None))
+
+
+class FetchJpyToEurRateTests(unittest.TestCase):
+    @patch("services.suruga_ya_pricing.httpx.get")
+    def test_uses_live_rate_when_available(self, mock_get):
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"rate": 0.0054}
+        mock_get.return_value = mock_response
+
+        self.assertEqual(fetch_jpy_to_eur_rate(), 0.0054)
+        mock_get.assert_called_once_with(
+            "https://api.frankfurter.dev/v2/rate/JPY/EUR", timeout=8
+        )
+
+    @patch("services.suruga_ya_pricing.httpx.get")
+    def test_falls_back_to_static_rate_on_failure(self, mock_get):
+        mock_get.side_effect = Exception("network down")
+        self.assertEqual(fetch_jpy_to_eur_rate(), 0.0054)
 
 
 if __name__ == "__main__":

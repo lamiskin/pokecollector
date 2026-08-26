@@ -567,6 +567,9 @@ def _run_migrations(conn):
         "ALTER TABLE cards ADD COLUMN IF NOT EXISTS price_jpy_match_note VARCHAR",
         "ALTER TABLE cards ADD COLUMN IF NOT EXISTS price_jpy_source_url VARCHAR",
         "ALTER TABLE cards ADD COLUMN IF NOT EXISTS price_jpy_updated_at TIMESTAMP",
+        # v61: pre-converted EUR value of the JPY price, so effective_market_price()
+        # never needs a live exchange-rate lookup on its hot path.
+        "ALTER TABLE cards ADD COLUMN IF NOT EXISTS price_jpy_eur_equivalent DOUBLE PRECISION",
     ]
     for stmt in migrations:
         try:

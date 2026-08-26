@@ -39,6 +39,21 @@ REQUEST_DELAY_SECONDS = 1.5  # be a polite, low-volume crawler — this runs on 
 BYPARR_TIMEOUT_MS = 60000
 BYPARR_URL = os.getenv("BYPARR_URL", "http://byparr:8191/v1")
 
+def fetch_jpy_to_eur_rate() -> float:
+    """Live JPY→EUR rate, fetched once per sync run (not per card — see
+    Card.price_jpy_eur_equivalent's docstring for why this isn't a per-read lookup).
+    """
+    from services.exchange_rates import fallback_exchange_rate, parse_frankfurter_v2_rate
+
+    try:
+        response = httpx.get("https://api.frankfurter.dev/v2/rate/JPY/EUR", timeout=8)
+        response.raise_for_status()
+        return parse_frankfurter_v2_rate(response.json())
+    except Exception:
+        logger.warning("Live JPY/EUR rate lookup failed, using static fallback")
+        return fallback_exchange_rate("JPY", "EUR")
+
+
 _RARITY_MARKER_RE = re.compile(r"\[([●◆★◇])\]")
 _NUMBER_TOTAL_RE = re.compile(r"^(\d+)/(\d+)")
 _YEN_RE = re.compile(r"￥\s*([\d,]+)")
@@ -91,6 +106,21 @@ def parse_price_range(price_text: str | None) -> tuple[float | None, float | Non
     if len(amounts) == 1:
         return amounts[0], amounts[0]
     return amounts[0], amounts[-1]
+
+
+def representative_jpy_price(
+    low: float | None, high: float | None, marketplace: float | None
+) -> float | None:
+    """One JPY figure to stand in for 'the' price of a matched listing, mirroring
+    Cardmarket's "avg" semantics rather than the rock-bottom lowest condition tier.
+    """
+    if low is not None and high is not None:
+        return (low + high) / 2
+    if low is not None:
+        return low
+    if high is not None:
+        return high
+    return marketplace
 
 
 def build_candidate(
@@ -278,6 +308,8 @@ def sync_jp_prices_for_collection(db: Session) -> dict:
     if not cards:
         return {"attempted": 0, "updated": 0, "no_match": 0, "failed": 0}
 
+    jpy_to_eur_rate = fetch_jpy_to_eur_rate()
+
     with httpx.Client() as client:
         for card in cards:
             attempted += 1
@@ -321,6 +353,12 @@ def sync_jp_prices_for_collection(db: Session) -> dict:
                 card.price_jpy_match_note = f"{best.title} ({best.release_date or 'date unknown'})"
                 card.price_jpy_source_url = best.product_url
                 card.price_jpy_updated_at = datetime.datetime.utcnow()
+                representative_jpy = representative_jpy_price(
+                    best.price_low, best.price_high, best.marketplace_price
+                )
+                card.price_jpy_eur_equivalent = (
+                    representative_jpy * jpy_to_eur_rate if representative_jpy is not None else None
+                )
                 db.commit()
                 updated += 1
             except Exception:
