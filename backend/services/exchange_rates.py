@@ -1,6 +1,6 @@
 from decimal import Decimal, InvalidOperation
 
-SUPPORTED_CURRENCIES = {"EUR", "USD", "AUD"}
+SUPPORTED_CURRENCIES = {"EUR", "USD", "AUD", "JPY"}
 FALLBACK_RATES = {
     ("EUR", "USD"): 1.1,
     ("USD", "EUR"): 0.91,
@@ -8,6 +8,14 @@ FALLBACK_RATES = {
     ("AUD", "EUR"): 0.61,
     ("USD", "AUD"): 1.43,
     ("AUD", "USD"): 0.70,
+    # JPY: only used as a last-resort fallback if the live Frankfurter lookup
+    # fails — precision doesn't matter much here, just needs to be roughly sane.
+    ("JPY", "EUR"): 0.0054,
+    ("EUR", "JPY"): 185.0,
+    ("JPY", "USD"): 0.0063,
+    ("USD", "JPY"): 159.0,
+    ("JPY", "AUD"): 0.0089,
+    ("AUD", "JPY"): 112.0,
 }
 
 

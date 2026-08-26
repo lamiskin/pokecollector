@@ -8,6 +8,7 @@ from models import BinderCard, CollectionItem, CollectionCardPhoto, Card, Produc
 from schemas import CollectionItemCreate, CollectionItemUpdate, CollectionItemResponse, BulkCollectionAddRequest, BulkCollectionAddResponse
 from services import pokemon_api
 from services.card_fallbacks import apply_cross_language_fallbacks, build_missing_language_card
+from services.card_values import effective_market_price
 from services.card_numbers import card_number_matches
 from services.collection_photos import MAX_UPLOAD_BYTES, InvalidPhoto, normalize_photo
 from services.card_visibility import visible_any_card_filter, visible_card_filter

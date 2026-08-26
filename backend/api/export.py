@@ -13,7 +13,7 @@ import datetime
 router = APIRouter()
 
 
-_CURRENCY_SYMBOLS = {"EUR": "€", "USD": "$", "AUD": "A$"}
+_CURRENCY_SYMBOLS = {"EUR": "€", "USD": "$", "AUD": "A$", "JPY": "¥"}
 
 
 def _normalize_currency(value: str | None) -> tuple[str, str]:

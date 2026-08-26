@@ -1,3 +1,11 @@
+// Raw JPY display for Suruga-ya prices — never run through formatPrice(), which
+// assumes a EUR input and applies the user's currency conversion; these are shown
+// as the actual yen figure alongside the converted price, not instead of it.
+export function formatJpy(value) {
+  if (value == null || Number.isNaN(Number(value))) return null
+  return new Intl.NumberFormat('ja-JP', { style: 'currency', currency: 'JPY' }).format(Number(value))
+}
+
 export const PRICE_PRIMARY_TO_FIELD = {
   market: 'price_market',
   avg: 'price_market',
@@ -29,6 +37,9 @@ function positivePrice(value) {
   return Number.isFinite(price) && price > 0 ? price : null
 }
 
+// Only entry point for price_jpy_eur_equivalent (a personal, local-only Suruga-ya
+// price pre-converted to EUR at sync time) into "the" price — last-resort fallback
+// only, mirrors effective_market_price() in backend/services/card_values.py exactly.
 export function getEffectiveCardPrice(card, variant, priceField = 'price_trend') {
   if (!card) return 0
   if (REVERSE_HOLO_VARIANTS.has(variant)) {
@@ -43,12 +54,12 @@ export function getEffectiveCardPrice(card, variant, priceField = 'price_trend')
       const price = positivePrice(candidate)
       if (price != null) return price
     }
-    return 0
+    return positivePrice(card.price_jpy_eur_equivalent) || 0
   }
 
   for (const candidate of [card[priceField], card.price_market]) {
     const price = positivePrice(candidate)
     if (price != null) return price
   }
-  return 0
+  return positivePrice(card.price_jpy_eur_equivalent) || 0
 }

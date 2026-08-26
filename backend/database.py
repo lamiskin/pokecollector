@@ -559,6 +559,17 @@ def _run_migrations(conn):
                     FOREIGN KEY (custom_owner_id) REFERENCES users(id) ON DELETE CASCADE;
             END IF;
         END$$""",
+        # v60: Suruga-ya JPY prices for owned Japanese cards (personal, local-only feature).
+        "ALTER TABLE cards ADD COLUMN IF NOT EXISTS price_jpy_low DOUBLE PRECISION",
+        "ALTER TABLE cards ADD COLUMN IF NOT EXISTS price_jpy_high DOUBLE PRECISION",
+        "ALTER TABLE cards ADD COLUMN IF NOT EXISTS price_jpy_marketplace DOUBLE PRECISION",
+        "ALTER TABLE cards ADD COLUMN IF NOT EXISTS price_jpy_variant VARCHAR",
+        "ALTER TABLE cards ADD COLUMN IF NOT EXISTS price_jpy_match_note VARCHAR",
+        "ALTER TABLE cards ADD COLUMN IF NOT EXISTS price_jpy_source_url VARCHAR",
+        "ALTER TABLE cards ADD COLUMN IF NOT EXISTS price_jpy_updated_at TIMESTAMP",
+        # v61: pre-converted EUR value of the JPY price, so effective_market_price()
+        # never needs a live exchange-rate lookup on its hot path.
+        "ALTER TABLE cards ADD COLUMN IF NOT EXISTS price_jpy_eur_equivalent DOUBLE PRECISION",
     ]
     for stmt in migrations:
         try:

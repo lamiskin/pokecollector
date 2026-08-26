@@ -6,7 +6,7 @@ from services.exchange_rates import fallback_exchange_rate, parse_frankfurter_v2
 
 logger = logging.getLogger(__name__)
 
-_CURRENCY_SYMBOLS = {"EUR": "€", "USD": "$", "AUD": "A$"}
+_CURRENCY_SYMBOLS = {"EUR": "€", "USD": "$", "AUD": "A$", "JPY": "¥"}
 
 
 def _get_telegram_credentials(db=None, user_id=None):

@@ -27,6 +27,13 @@ const TRANSLATION_LOADERS = {
 }
 const SUPPORTED_LANGUAGES = new Set(['en', ...Object.keys(TRANSLATION_LOADERS)])
 
+// Currency symbols and last-resort rates used only if the backend's own
+// /settings/exchange-rate call (which already has its own live-fetch-then-
+// fallback logic) is unreachable entirely.
+const CURRENCY_SYMBOLS = { EUR: '€', USD: '$', AUD: 'A$' }
+const EUR_FALLBACK_RATES = { EUR: 1.0, USD: 1.1, AUD: 1.63 }
+const USD_FALLBACK_RATES = { EUR: 0.91, USD: 1.0, AUD: 1.43 }
+
 const DEFAULT_SETTINGS = {
   language: 'en',
   price_display: '["trend", "avg", "avg1", "avg7", "avg30", "low"]',

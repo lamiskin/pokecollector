@@ -2,7 +2,7 @@ import { useState, useMemo, useId, useRef, useEffect } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { createPortal } from 'react-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Trash2, Check, X, Filter, SortAsc, Download, Upload, Loader2, ChevronUp, ChevronDown, Search, PenLine, Grid2X2, List, Library, BookOpen, Heart, Copy, ArrowLeft, Package } from 'lucide-react'
+import { Trash2, Check, X, Filter, SortAsc, Download, Upload, Loader2, ChevronUp, ChevronDown, Search, PenLine, Grid2X2, List, Library, BookOpen, Heart, Copy, ArrowLeft, Package, ExternalLink } from 'lucide-react'
 import { getCollection, updateCollectionItem, updateCardCustomImage, removeFromCollection, importCollectionCsv, exportCSV, exportPDF, getSets, addToCollection, getBinders, addCollectionItemToBinder, getWishlist, getApiErrorMessage, uploadCollectionItemPhoto, deleteCollectionItemPhoto } from '../api/client'
 import { CustomCardModal } from '../components/CardItem'
 import { useSettings } from '../contexts/SettingsContext'
@@ -17,7 +17,7 @@ import clsx from 'clsx'
 import { cardImageUrl, hasCatalogueImage, resolveCardImageUrl } from '../utils/imageUrl'
 import { cardNumberMatches } from '../utils/cardNumbers'
 import { normalizeSearchText, textIncludes } from '../utils/textSearch'
-import { getEffectiveCardPrice } from '../utils/prices'
+import { formatJpy, getEffectiveCardPrice } from '../utils/prices'
 import TcgdexLanguageSelect from '../components/TcgdexLanguageSelect'
 import { tcgdexLanguageLabel } from '../utils/tcgdexLanguages'
 import { invalidateCardState, invalidateCollectionPhotoState, invalidateTcgdexFilterLanguages } from '../utils/queryInvalidation'
@@ -662,6 +662,41 @@ function CollectionEditModal({ item, onClose }) {
             <p className="text-xs text-text-muted">{t('collection.totalVal')}</p>
             <p className="mt-1 text-xl font-black text-text-primary">{marketPrice > 0 ? formatPrice(marketPrice * item.quantity) : '—'}</p>
           </div>
+        </div>
+      )}
+
+      {activeTab === 'prices' && card?.price_jpy_low != null && (
+        <div className="mt-3 space-y-2 rounded-xl border border-border bg-bg-card p-3">
+          <p className="text-xs font-medium uppercase tracking-wide text-text-muted">
+            {t('prices.surugaYaTitle')}
+          </p>
+          <p className="text-lg font-bold text-text-primary">
+            {formatJpy(card.price_jpy_low)}
+            {card.price_jpy_high != null && card.price_jpy_high !== card.price_jpy_low
+              ? ` – ${formatJpy(card.price_jpy_high)}`
+              : ''}
+          </p>
+          {card.price_jpy_marketplace != null && (
+            <p className="text-xs text-text-secondary">
+              {t('prices.surugaYaMarketplace')}: {formatJpy(card.price_jpy_marketplace)}
+            </p>
+          )}
+          {card.price_jpy_match_note && (
+            <p className="truncate text-[11px] text-text-muted" title={card.price_jpy_match_note}>
+              {t('prices.surugaYaMatch')}: {card.price_jpy_match_note}
+            </p>
+          )}
+          {card.price_jpy_source_url && (
+            <a
+              href={card.price_jpy_source_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="btn-ghost inline-flex items-center gap-1.5 text-xs"
+            >
+              <ExternalLink size={14} />
+              {t('prices.surugaYaViewListing')}
+            </a>
+          )}
         </div>
       )}
 

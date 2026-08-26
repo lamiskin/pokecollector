@@ -1117,6 +1117,11 @@ const de = {
     history: 'Preisverlauf',
     sinceTracking: 'seit Tracking',
     cardmarketTitle: 'Cardmarket-Preise',
+    surugaYaTitle: 'Suruga-ya-Preis (JPY)',
+    surugaYaNote: 'Kein Cardmarket-Preis verfügbar — es wird stattdessen ein Suruga-ya-Treffer angezeigt.',
+    surugaYaMatch: 'Gefundener Eintrag',
+    surugaYaMarketplace: 'Marktplatz',
+    surugaYaViewListing: 'Angebot ansehen',
   },
 
   // Set Detail
