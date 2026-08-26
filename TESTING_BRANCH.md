@@ -209,6 +209,18 @@ Update this file's list whenever a branch is merged into or removed from
   backend stores it in `images_small`/`images_large` same as a synced
   card), so no new "does this custom card have real art" check was needed.
   Independent branch off bare `main`.
+- `feature/scan-always-saves-own-photo` — `attachScanFallbackPhoto` only
+  saved a scanned photo when the matched catalogue card had no reference
+  artwork of its own, a fallback for cards TCGdex has no scan of. Found
+  while backfilling own-photos for 182 real scan photos against 125
+  photo-less collection items: for any card *with* catalogue art (the
+  large majority), the original photo was discarded the moment the scan
+  job item resolved, even though a scan is a photo of this exact physical
+  copy and the catalogue's reference image is a different printing/copy
+  entirely. Dropped the `hasReferenceArtwork` check so a scan photo is
+  always saved now, still skipped only when the card already has a saved
+  own photo (never overwritten). Independent branch off bare `main`.
+  Personal-preference behavior change; not intended for an upstream PR.
 - `fix/batching-respects-provider-capability` — a composite grid asks the
   model to read several cards out of one image, which needs the same
   multi-image capability visual verification already depends on
