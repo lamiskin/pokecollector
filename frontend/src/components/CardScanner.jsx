@@ -15,12 +15,10 @@ import { parseMoneyInputValue } from '../utils/moneyInput'
 import { CardDisplay } from './card-system'
 import { tcgdexLanguageLabel } from '../utils/tcgdexLanguages'
 import { isSupportedScannerImage, SCANNER_IMAGE_ACCEPT } from '../utils/scannerImages'
-import { hasCatalogueImage } from '../utils/imageUrl'
 
 export async function attachScanFallbackPhoto({ created, match, getPhoto, uploadPhoto = uploadCollectionItemPhoto }) {
   const createdCard = created?.card
-  const hasReferenceArtwork = hasCatalogueImage(createdCard) || Boolean(createdCard?.custom_image_url)
-  if (!getPhoto || !createdCard || created?.has_scan_photo || hasReferenceArtwork) return false
+  if (!getPhoto || !createdCard || created?.has_scan_photo) return false
   try {
     const photo = await getPhoto()
     if (!photo) return false
@@ -36,8 +34,10 @@ export async function attachScanFallbackPhoto({ created, match, getPhoto, upload
 // `getPhoto`, when given, resolves to the Blob/File the user actually scanned.
 // Callers decide how to source it: CardScanner has the raw File in hand,
 // ScanQueue fetches it from the job's stored bytes. Called only after the
-// collection item exists, and only matters for cards TCGdex has no scan of —
-// and only when the matched card has no catalogue artwork and no saved fallback.
+// collection item exists. Always saves the scan photo as this card's own
+// photo, catalogue artwork or not — a scan is the physical card, and a
+// catalogue's reference image is a different printing/copy. Skipped only
+// when the card already has a saved own photo (never overwritten).
 // A failed photo attach must never block adding the card itself.
 export function ScanAddModal({ match, defaultLang, getPhoto, onClose, onAdded }) {
   const { t, exchangeRate, exchangeRateReady } = useSettings()
