@@ -254,3 +254,15 @@ Update this file's list whenever a branch is merged into or removed from
   of -- not instead of -- the vertical opaque-background fix, which
   remains correct for the legitimate top/bottom overscroll case. No PR
   yet.
+- `feature/aud-currency-support` — adds AUD as a third supported display
+  currency alongside EUR/USD, generalizing the existing binary EUR/USD
+  branching (exchange-rate fetching, CSV/PDF export, Telegram price
+  alerts, settings dropdown) to a small currency-keyed lookup instead.
+  Reuses the existing Frankfurter-backed live rate lookup with static
+  fallbacks the same way EUR/USD already did. Verified with the full
+  backend test suite (all passing, plus new targeted tests for the
+  changed functions) and a live browser check in an isolated throwaway
+  stack (own database, own network, unique container names — the
+  production containers were never touched by the actual test run).
+  Independent branch off bare `main`. Not meant for upstream, per explicit
+  user request.
