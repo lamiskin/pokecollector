@@ -228,3 +228,19 @@ Update this file's list whenever a branch is merged into or removed from
   retry/UI text was already superseded by #355's provider-neutral rewrite,
   but this gate was never carried over. Independent branch off bare
   `main`. Upstream PR: Git-Romer/pokecollector#382.
+- `fix/firefox-android-white-canvas-v2` — the app had no opaque
+  `background-color` on `html` or `body`; the whole dark appearance
+  depended on a single animated gradient image. `body`'s winning
+  background rule uses the unlayered `background` shorthand, which resets
+  `background-color` to transparent, leaving `body` with only a gradient
+  image propagated to the canvas over the browser's default white.
+  Chromium extends that propagated image across overscroll/safe-area
+  regions; Firefox on Android doesn't, so those regions showed white bars.
+  Sets `background-color: var(--color-bg)` on `html` (whose background
+  always paints the whole canvas) and restores an opaque colour to
+  `body`'s shorthand as a fallback. Cherry-picked from the old fork main,
+  where it had already shipped and then silently dropped out when the
+  fork was reset to exactly match `upstream/main`. Independent branch off
+  bare `main`. Deleted once by mistake mid-session (assumed superseded by
+  `testing` content that turned out not to include it) and restored from
+  the object store once that was caught — no PR yet.
