@@ -42,16 +42,17 @@ describe('attachScanFallbackPhoto', () => {
     expect(uploadPhoto).not.toHaveBeenCalled()
   })
 
-  it('does not retain scanner photos when catalogue artwork exists', async () => {
-    const getPhoto = vi.fn()
+  it('retains a scan photo even when catalogue artwork exists', async () => {
+    const photo = new Blob(['own-copy'], { type: 'image/jpeg' })
+    const uploadPhoto = vi.fn().mockResolvedValue({})
     const attached = await attachScanFallbackPhoto({
       created: { id: 14, has_scan_photo: false, card: { id: 'catalogued-card', images_small: 'scan.webp' } },
       match: { id: 'recognition-card-without-art' },
-      getPhoto,
-      uploadPhoto: vi.fn(),
+      getPhoto: vi.fn().mockResolvedValue(photo),
+      uploadPhoto,
     })
-    expect(attached).toBe(false)
-    expect(getPhoto).not.toHaveBeenCalled()
+    expect(attached).toBe(true)
+    expect(uploadPhoto).toHaveBeenCalledWith(14, photo)
   })
 
   it('uses the confirmed language card rather than recognition artwork', async () => {
@@ -67,8 +68,9 @@ describe('attachScanFallbackPhoto', () => {
     expect(uploadPhoto).toHaveBeenCalledWith(16, photo)
   })
 
-  it('preserves an existing custom catalogue fallback', async () => {
-    const getPhoto = vi.fn()
+  it('retains a scan photo even when a custom catalogue image exists', async () => {
+    const photo = new Blob(['own-copy'], { type: 'image/jpeg' })
+    const uploadPhoto = vi.fn().mockResolvedValue({})
     const attached = await attachScanFallbackPhoto({
       created: {
         id: 17,
@@ -76,11 +78,11 @@ describe('attachScanFallbackPhoto', () => {
         card: { id: 'fallback-card', custom_image_url: 'https://example.test/card.jpg' },
       },
       match: { id: 'fallback-card' },
-      getPhoto,
-      uploadPhoto: vi.fn(),
+      getPhoto: vi.fn().mockResolvedValue(photo),
+      uploadPhoto,
     })
-    expect(attached).toBe(false)
-    expect(getPhoto).not.toHaveBeenCalled()
+    expect(attached).toBe(true)
+    expect(uploadPhoto).toHaveBeenCalledWith(17, photo)
   })
 
   it('swallows upload failures after the collection item was added', async () => {
