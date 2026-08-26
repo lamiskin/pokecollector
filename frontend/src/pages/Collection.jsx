@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router-dom'
 import { createPortal } from 'react-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Trash2, Check, X, Filter, SortAsc, Download, Upload, Loader2, ChevronUp, ChevronDown, Search, PenLine, Grid2X2, List, Library, BookOpen, Heart, Copy, ArrowLeft, Package, ExternalLink } from 'lucide-react'
-import { getCollection, updateCollectionItem, updateCardCustomImage, removeFromCollection, importCollectionCsv, exportCSV, exportPDF, getSets, addToCollection, getBinders, addCollectionItemToBinder, getWishlist, getApiErrorMessage, uploadCollectionItemPhoto, deleteCollectionItemPhoto } from '../api/client'
+import { getCollection, updateCollectionItem, updateCardCustomImage, updateCardManualValue, removeFromCollection, importCollectionCsv, exportCSV, exportPDF, getSets, addToCollection, getBinders, addCollectionItemToBinder, getWishlist, getApiErrorMessage, uploadCollectionItemPhoto, deleteCollectionItemPhoto } from '../api/client'
 import { CustomCardModal } from '../components/CardItem'
 import { useSettings } from '../contexts/SettingsContext'
 import { useConfirmDialog } from '../contexts/ConfirmDialogContext'
@@ -278,6 +278,7 @@ function CollectionEditModal({ item, onClose }) {
   const [newVersionPrice, setNewVersionPrice] = useState('')
   const [customImageUrl, setCustomImageUrl] = useState(card?.custom_image_url || '')
   const [savedCustomImageUrl, setSavedCustomImageUrl] = useState(card?.custom_image_url || '')
+  const [manualValue, setManualValue] = useState(formatMoneyInputValue(card?.manual_value_override, exchangeRate))
   const [customImageVersion, setCustomImageVersion] = useState(0)
   const [activeTab, setActiveTab] = useState('manage')
   const [hasOwnPhoto, setHasOwnPhoto] = useState(Boolean(item.has_scan_photo))
@@ -300,6 +301,7 @@ function CollectionEditModal({ item, onClose }) {
     lang: item.lang || 'en',
     price: itemPriceInput,
     customImageUrl: card?.custom_image_url || '',
+    manualValue: formatMoneyInputValue(card?.manual_value_override, exchangeRate),
   })
 
   useEffect(() => {
@@ -311,6 +313,7 @@ function CollectionEditModal({ item, onClose }) {
       lang: item.lang || 'en',
       price: itemPriceInput,
       customImageUrl: card?.custom_image_url || '',
+      manualValue: formatMoneyInputValue(card?.manual_value_override, exchangeRate),
     }
 
     const prevItem = prevItemRef.current
@@ -324,6 +327,7 @@ function CollectionEditModal({ item, onClose }) {
       setPrice(nextItem.price)
       setCustomImageUrl(nextItem.customImageUrl)
       setSavedCustomImageUrl(nextItem.customImageUrl)
+      setManualValue(nextItem.manualValue)
     } else {
       if (quantity === prevItem.quantity && nextItem.quantity !== prevItem.quantity) {
         setQuantity(nextItem.quantity)
@@ -344,10 +348,13 @@ function CollectionEditModal({ item, onClose }) {
         setCustomImageUrl(nextItem.customImageUrl)
         setSavedCustomImageUrl(nextItem.customImageUrl)
       }
+      if (manualValue === prevItem.manualValue && nextItem.manualValue !== prevItem.manualValue) {
+        setManualValue(nextItem.manualValue)
+      }
     }
 
     prevItemRef.current = nextItem
-  }, [item.id, item.quantity, item.condition, item.variant, item.lang, item.purchase_price, itemPriceInput, card?.custom_image_url])
+  }, [item.id, item.quantity, item.condition, item.variant, item.lang, item.purchase_price, itemPriceInput, card?.custom_image_url, card?.manual_value_override, exchangeRate])
 
   const { data: binders = [] } = useQuery({
     queryKey: ['binders'],
@@ -444,6 +451,19 @@ function CollectionEditModal({ item, onClose }) {
       const detail = err?.response?.data?.detail || t('common.error')
       toast.error(detail)
     },
+  })
+
+  const manualValueMutation = useMutation({
+    mutationFn: () => updateCardManualValue(item.card_id, {
+      manual_value_override: parseMoneyInputValue(manualValue, exchangeRate, null),
+    }),
+    onSuccess: (updatedCard) => {
+      setManualValue(formatMoneyInputValue(updatedCard?.manual_value_override, exchangeRate))
+      toast.success(t('prices.manualValueSaved'))
+      invalidateCardState(queryClient)
+      invalidateTcgdexFilterLanguages(queryClient)
+    },
+    onError: (err) => toast.error(err?.response?.data?.detail || t('common.error')),
   })
 
   // Invalidating the photo query is what makes the new picture appear: the blob
@@ -691,6 +711,30 @@ function CollectionEditModal({ item, onClose }) {
               {t('prices.surugaYaViewListing')}
             </a>
           )}
+        </div>
+      )}
+
+      {activeTab === 'prices' && (
+        <div className="mt-3 space-y-2 rounded-xl border border-border bg-bg-card p-3">
+          <p className="text-xs font-medium uppercase tracking-wide text-text-muted">
+            {t('prices.manualValueTitle')}
+          </p>
+          <p className="text-[11px] text-text-muted">{t('prices.manualValueNote')}</p>
+          <div className="flex items-center gap-2">
+            <MoneyInput
+              placeholder={t('card.purchasePricePlaceholder')}
+              value={manualValue}
+              onChange={e => setManualValue(e.target.value)}
+            />
+            <button
+              type="button"
+              className="btn-secondary shrink-0 text-xs"
+              disabled={manualValueMutation.isPending}
+              onClick={() => manualValueMutation.mutate()}
+            >
+              {t('common.save')}
+            </button>
+          </div>
         </div>
       )}
 

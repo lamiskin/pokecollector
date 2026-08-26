@@ -570,6 +570,9 @@ def _run_migrations(conn):
         # v61: pre-converted EUR value of the JPY price, so effective_market_price()
         # never needs a live exchange-rate lookup on its hot path.
         "ALTER TABLE cards ADD COLUMN IF NOT EXISTS price_jpy_eur_equivalent DOUBLE PRECISION",
+        # v62: hand-entered EUR fallback value (personal, local-only feature) for
+        # cards no automated price source ever matches.
+        "ALTER TABLE cards ADD COLUMN IF NOT EXISTS manual_value_override DOUBLE PRECISION",
     ]
     for stmt in migrations:
         try:

@@ -98,6 +98,10 @@ class CardBase(BaseModel):
     price_jpy_match_note: Optional[str] = None
     price_jpy_source_url: Optional[str] = None
     price_jpy_eur_equivalent: Optional[float] = None
+    # Hand-entered EUR fallback (personal, local-only) — absolute last resort in
+    # effective_market_price(), used only when neither Cardmarket nor the JPY
+    # price above exists.
+    manual_value_override: Optional[float] = None
     # Variants
     variants_normal: Optional[bool] = None
     variants_reverse: Optional[bool] = None
@@ -135,6 +139,10 @@ class CustomCardUpdate(BaseModel):
 
 class CardCustomImageUpdate(BaseModel):
     custom_image_url: Optional[str] = None
+
+
+class CardManualValueUpdate(BaseModel):
+    manual_value_override: Optional[float] = None
 
 
 class CardWithSet(CardBase):

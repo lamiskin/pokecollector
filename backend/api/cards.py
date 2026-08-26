@@ -7,7 +7,7 @@ from typing import Optional, List
 from api.auth import get_current_user
 from database import get_db
 from models import Binder, BinderCard, Card, Set, PriceHistory, CustomCardMatch, CollectionItem, WishlistItem, User, ImageCache, ProductCard, ProductLedgerEntry, TradeItem
-from schemas import CardBase, CardWithSet, PriceHistoryResponse, CardCustomCreate, CustomCardUpdate, CardCustomImageUpdate
+from schemas import CardBase, CardWithSet, PriceHistoryResponse, CardCustomCreate, CustomCardUpdate, CardCustomImageUpdate, CardManualValueUpdate
 from services import pokemon_api
 from services.card_fallbacks import (
     apply_cross_language_fallbacks,
@@ -121,6 +121,7 @@ def _card_to_dict(card: Card, current_user_id: int | None = None) -> dict:
         "price_tcg_reverse_market": getattr(card, 'price_tcg_reverse_market', None),
         "price_tcg_holo_market": getattr(card, 'price_tcg_holo_market', None),
         "price_source_lang": getattr(card, "price_source_lang", None),
+        "manual_value_override": getattr(card, "manual_value_override", None),
         "variants_normal": getattr(card, "variants_normal", None),
         "variants_reverse": getattr(card, "variants_reverse", None),
         "variants_holo": getattr(card, "variants_holo", None),
@@ -1053,6 +1054,35 @@ def update_card_custom_image(
     if card.custom_image_url != (image_url or None):
         db.query(ImageCache).filter(ImageCache.image_key.in_(custom_cache_keys)).delete(synchronize_session=False)
     card.custom_image_url = image_url or None
+    db.commit()
+    db.refresh(card)
+    return _card_to_dict(card)
+
+
+@router.put("/{card_id}/manual-value", response_model=CardBase)
+def update_card_manual_value(
+    card_id: str,
+    update: CardManualValueUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Set or clear a personal, local-only EUR fallback value for a card.
+
+    Absolute last resort in effective_market_price() — only used when neither
+    Cardmarket nor the Suruga-ya JPY price exists for this card at all.
+    """
+    card = db.query(Card).filter(
+        Card.id == card_id,
+        visible_any_card_filter(db, current_user.id, "all"),
+    ).first()
+    if not card:
+        raise HTTPException(status_code=404, detail="Card not found")
+
+    value = update.manual_value_override
+    if value is not None and value < 0:
+        raise HTTPException(status_code=422, detail="Value must be positive")
+
+    card.manual_value_override = value
     db.commit()
     db.refresh(card)
     return _card_to_dict(card)

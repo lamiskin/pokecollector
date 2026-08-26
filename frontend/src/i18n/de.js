@@ -1120,6 +1120,9 @@ const de = {
     surugaYaMatch: 'Gefundener Eintrag',
     surugaYaMarketplace: 'Marktplatz',
     surugaYaViewListing: 'Angebot ansehen',
+    manualValueTitle: 'Manueller Ersatzwert',
+    manualValueNote: 'Wird nur verwendet, wenn für diese Karte weder ein Cardmarket- noch ein Suruga-ya-Preis vorliegt.',
+    manualValueSaved: 'Ersatzwert gespeichert',
   },
 
   // Set Detail
