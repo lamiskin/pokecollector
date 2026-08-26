@@ -71,14 +71,33 @@ def run_price_sync():
         db.close()
 
 
+_jp_price_sync_running = False
+
+
+def is_jp_price_sync_running() -> bool:
+    return _jp_price_sync_running
+
+
 def run_jp_price_sync():
-    """Suruga-ya JPY price sync for owned Japanese cards — personal, local-only feature."""
+    """Suruga-ya JPY price sync for owned Japanese cards — personal, local-only feature.
+
+    Self-guarding: the scheduler's own interval trigger and the manual
+    /api/sync/prices/jp endpoint both call this same function, so a single
+    flag here (checked before either caller starts real work) is enough to
+    stop them racing and running the full 43-card sync twice concurrently.
+    """
+    global _jp_price_sync_running
+    if _jp_price_sync_running:
+        logger.info("Suruga-ya JP price sync already running, skipping")
+        return
+
     import datetime as dt
 
     from database import SessionLocal
     from models import SyncLog
     from services.suruga_ya_pricing import sync_jp_prices_for_collection
 
+    _jp_price_sync_running = True
     db = SessionLocal()
     log = SyncLog(started_at=dt.datetime.utcnow(), status="running", sync_type="jp_price")
     db.add(log)
@@ -103,6 +122,7 @@ def run_jp_price_sync():
         log.finished_at = dt.datetime.utcnow()
         db.commit()
         db.close()
+        _jp_price_sync_running = False
 
 
 def run_scan_queue_maintenance():
