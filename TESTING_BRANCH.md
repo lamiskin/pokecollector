@@ -243,4 +243,14 @@ Update this file's list whenever a branch is merged into or removed from
   fork was reset to exactly match `upstream/main`. Independent branch off
   bare `main`. Deleted once by mistake mid-session (assumed superseded by
   `testing` content that turned out not to include it) and restored from
-  the object store once that was caught — no PR yet.
+  the object store once that was caught. Second commit added after a
+  real-device screenshot showed a persistent white strip on the *right*
+  edge, at rest rather than only during a bounce gesture -- a different
+  bug from the vertical case the first commit targets, where painting a
+  colour over it would only have hidden a real horizontal-overflow bug
+  rather than fixed it. Nothing at the page root should ever scroll
+  sideways, so `overflow-x: hidden` was added to `html, body` to remove
+  that scroll surface (and the bounce region it creates) entirely, on top
+  of -- not instead of -- the vertical opaque-background fix, which
+  remains correct for the legitimate top/bottom overscroll case. No PR
+  yet.
