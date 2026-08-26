@@ -70,6 +70,13 @@ function initialSettings() {
   return { ...DEFAULT_SETTINGS, language: readCachedLanguage() || DEFAULT_SETTINGS.language }
 }
 
+// Currency symbols and last-resort rates used only if the backend's own
+// /settings/exchange-rate call (which already has its own live-fetch-then-
+// fallback logic) is unreachable entirely.
+const CURRENCY_SYMBOLS = { EUR: '€', USD: '$', AUD: 'A$' }
+const EUR_FALLBACK_RATES = { EUR: 1.0, USD: 1.1, AUD: 1.63 }
+const USD_FALLBACK_RATES = { EUR: 0.91, USD: 1.0, AUD: 1.43 }
+
 const SettingsContext = createContext(null)
 
 export function SettingsProvider({ children }) {
@@ -79,7 +86,7 @@ export function SettingsProvider({ children }) {
   const [exchangeRate, setExchangeRate] = useState(1.0)
   const [exchangeRateReady, setExchangeRateReady] = useState(true)
   const [exchangeRateCurrency, setExchangeRateCurrency] = useState('EUR')
-  const [usdToEurRate, setUsdToEurRate] = useState(0.91)
+  const [usdToTargetRate, setUsdToTargetRate] = useState(0.91)
   const [loadedTranslations, setLoadedTranslations] = useState({ en })
 
   // Load settings from backend once auth mode is known. Single-user mode has no
@@ -159,25 +166,27 @@ export function SettingsProvider({ children }) {
 
     const curr = settings.currency || 'EUR'
     let cancelled = false
-    if (curr === 'USD') {
-      setExchangeRateReady(false)
-      setExchangeRateCurrency(null)
-      setExchangeRate(1.1)
-      fetchExchangeRate('EUR', 'USD', 1.1).then(rate => {
-        if (!cancelled) {
-          setExchangeRate(rate)
-          setExchangeRateCurrency('USD')
-          setExchangeRateReady(true)
-        }
-      })
-    } else {
+    if (curr === 'EUR') {
       setExchangeRateReady(true)
       setExchangeRateCurrency('EUR')
       setExchangeRate(1.0)
-      fetchExchangeRate('USD', 'EUR', 0.91).then(rate => {
-        if (!cancelled) setUsdToEurRate(rate)
+    } else {
+      setExchangeRateReady(false)
+      setExchangeRateCurrency(null)
+      setExchangeRate(EUR_FALLBACK_RATES[curr] ?? 1.0)
+      fetchExchangeRate('EUR', curr, EUR_FALLBACK_RATES[curr] ?? 1.0).then(rate => {
+        if (!cancelled) {
+          setExchangeRate(rate)
+          setExchangeRateCurrency(curr)
+          setExchangeRateReady(true)
+        }
       })
     }
+    // Needed whenever the selected currency isn't USD itself, to convert
+    // TCGPlayer's USD-denominated prices into the selected currency.
+    fetchExchangeRate('USD', curr, USD_FALLBACK_RATES[curr] ?? 1.0).then(rate => {
+      if (!cancelled) setUsdToTargetRate(rate)
+    })
     return () => { cancelled = true }
   }, [settings.currency, authLoading, multiUser, user?.id])
 
@@ -249,8 +258,8 @@ export function SettingsProvider({ children }) {
   }, [settings.price_primary])
 
   const currency = settings.currency || 'EUR'
-  const currencySymbol = currency === 'USD' ? '$' : '€'
-  const moneyExchangeRateReady = currency !== 'USD' || (exchangeRateReady && exchangeRateCurrency === 'USD')
+  const currencySymbol = CURRENCY_SYMBOLS[currency] || '€'
+  const moneyExchangeRateReady = currency === 'EUR' || (exchangeRateReady && exchangeRateCurrency === currency)
   const pricePrimary = getPricePrimary()
   const pricePrimaryField = priceFieldFromPrimary(pricePrimary)
 
@@ -262,9 +271,9 @@ export function SettingsProvider({ children }) {
 
   const formatUsdPrice = useCallback((usdAmount) => {
     if (usdAmount == null || isNaN(Number(usdAmount))) return '-'
-    const converted = currency === 'USD' ? Number(usdAmount) : Number(usdAmount) * usdToEurRate
+    const converted = currency === 'USD' ? Number(usdAmount) : Number(usdAmount) * usdToTargetRate
     return `${currencySymbol}${converted.toFixed(2)}`
-  }, [currency, currencySymbol, usdToEurRate])
+  }, [currency, currencySymbol, usdToTargetRate])
 
   return (
     <SettingsContext.Provider value={{

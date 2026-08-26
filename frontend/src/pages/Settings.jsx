@@ -193,6 +193,7 @@ const CURRENCY_SYMBOLS = {
   EUR: '€',
   USD: '$',
   GBP: '£',
+  AUD: 'A$',
 }
 
 function formatSupporterAmount(amountCents, currency = 'EUR') {
@@ -1141,6 +1142,7 @@ export default function Settings() {
                   options={[
                     { value: 'EUR', label: '€ EUR' },
                     { value: 'USD', label: '$ USD' },
+                    { value: 'AUD', label: 'A$ AUD' },
                   ]}
                   onChange={handleCurrencyChange}
                 />
