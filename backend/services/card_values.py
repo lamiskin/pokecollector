@@ -53,9 +53,20 @@ def effective_market_price(card, variant=None, price_field: str | None = "price_
     JPY-derived value enters "the" price — never overwrites price_market/price_trend
     directly, so vintage JP cards' fuzzy print matching stays a last resort, not a
     silent substitute for real Cardmarket data.
+
+    Falls back further still to manual_value_override — a hand-entered EUR estimate,
+    personal/local-only — only when neither Cardmarket nor the JPY price exists.
+    Absolute last resort, for cards no automated source has ever priced.
     """
     if not card:
         return 0
+
+    def _last_resort() -> float:
+        jpy = _positive_price(getattr(card, "price_jpy_eur_equivalent", None))
+        if jpy is not None:
+            return jpy
+        return _positive_price(getattr(card, "manual_value_override", None)) or 0
+
     field = normalize_price_field(price_field)
     if variant in REVERSE_HOLO_VARIANTS:
         holo_field = HOLO_FIELD_MAP.get(field)
@@ -68,10 +79,10 @@ def effective_market_price(card, variant=None, price_field: str | None = "price_
             price = _positive_price(candidate)
             if price is not None:
                 return price
-        return _positive_price(getattr(card, "price_jpy_eur_equivalent", None)) or 0
+        return _last_resort()
 
     for candidate in (getattr(card, field, None), getattr(card, "price_market", None)):
         price = _positive_price(candidate)
         if price is not None:
             return price
-    return _positive_price(getattr(card, "price_jpy_eur_equivalent", None)) or 0
+    return _last_resort()

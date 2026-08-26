@@ -38,8 +38,15 @@ function positivePrice(value) {
 }
 
 // Only entry point for price_jpy_eur_equivalent (a personal, local-only Suruga-ya
-// price pre-converted to EUR at sync time) into "the" price — last-resort fallback
-// only, mirrors effective_market_price() in backend/services/card_values.py exactly.
+// price pre-converted to EUR at sync time) and manual_value_override (a hand-entered
+// EUR fallback, personal/local-only, absolute last resort) into "the" price —
+// mirrors effective_market_price() in backend/services/card_values.py exactly.
+function lastResortPrice(card) {
+  const jpy = positivePrice(card.price_jpy_eur_equivalent)
+  if (jpy != null) return jpy
+  return positivePrice(card.manual_value_override) || 0
+}
+
 export function getEffectiveCardPrice(card, variant, priceField = 'price_trend') {
   if (!card) return 0
   if (REVERSE_HOLO_VARIANTS.has(variant)) {
@@ -54,12 +61,12 @@ export function getEffectiveCardPrice(card, variant, priceField = 'price_trend')
       const price = positivePrice(candidate)
       if (price != null) return price
     }
-    return positivePrice(card.price_jpy_eur_equivalent) || 0
+    return lastResortPrice(card)
   }
 
   for (const candidate of [card[priceField], card.price_market]) {
     const price = positivePrice(candidate)
     if (price != null) return price
   }
-  return positivePrice(card.price_jpy_eur_equivalent) || 0
+  return lastResortPrice(card)
 }

@@ -131,6 +131,10 @@ class Card(Base):
     # actually feeds into "the" effective price, and only as the last-resort fallback
     # when no Cardmarket/TCGPlayer price exists at all.
     price_jpy_eur_equivalent = Column(Float, nullable=True)
+    # Personal, local-only manual fallback (EUR) — a hand-entered estimate used only
+    # when neither Cardmarket nor the JPY price above exists at all. Absolute last
+    # resort in effective_market_price(); never overwrites a real synced price.
+    manual_value_override = Column(Float, nullable=True)
     last_metadata_enrichment_attempt_at = Column(DateTime, nullable=True, index=True)
     # Card variants from TCGdex
     variants_normal = Column(Boolean)

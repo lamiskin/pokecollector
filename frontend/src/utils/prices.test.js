@@ -56,4 +56,26 @@ describe('getEffectiveCardPrice', () => {
     const card = { price_trend: null, price_market: null }
     expect(getEffectiveCardPrice(card, 'Normal', 'price_trend')).toBe(0)
   })
+
+  it('falls back to manual_value_override when neither Cardmarket nor JPY price exists', () => {
+    const card = { price_trend: null, price_market: null, price_jpy_eur_equivalent: null, manual_value_override: 12.5 }
+    expect(getEffectiveCardPrice(card, 'Normal', 'price_trend')).toBe(12.5)
+  })
+
+  it('reverse holo also falls back to manual_value_override', () => {
+    const card = {
+      price_trend: null,
+      price_trend_holo: null,
+      price_market: null,
+      price_market_holo: null,
+      price_jpy_eur_equivalent: null,
+      manual_value_override: 12.5,
+    }
+    expect(getEffectiveCardPrice(card, 'Reverse Holo', 'price_trend')).toBe(12.5)
+  })
+
+  it('the JPY price still wins over manual_value_override', () => {
+    const card = { price_trend: null, price_market: null, price_jpy_eur_equivalent: 5.02, manual_value_override: 12.5 }
+    expect(getEffectiveCardPrice(card, 'Normal', 'price_trend')).toBe(5.02)
+  })
 })

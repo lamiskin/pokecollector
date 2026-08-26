@@ -1136,6 +1136,9 @@ const en = {
     surugaYaMatch: 'Matched listing',
     surugaYaMarketplace: 'Marketplace',
     surugaYaViewListing: 'View listing',
+    manualValueTitle: 'Manual Fallback Value',
+    manualValueNote: 'Used only when no Cardmarket or Suruga-ya price exists for this card at all.',
+    manualValueSaved: 'Fallback value saved',
   },
 
   // Set Detail
