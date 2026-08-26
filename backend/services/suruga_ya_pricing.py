@@ -7,17 +7,28 @@ on the set's release date (which does exist locally, from TCGdex's own
 modern cards. A listing that can't be tied to the card by one of those two
 signals is skipped rather than guessed at — a wrong vintage-print match is
 worse than no price at all.
+
+Fetching goes through Byparr (a FlareSolverr-API-compatible sidecar, see
+docker-compose.yml's `byparr` service) rather than a browser in this process —
+Suruga-ya sits behind a Cloudflare Turnstile challenge that plain/patched
+Playwright couldn't get past, confirmed not IP-related (see
+project_jp_price_fetcher_blocked memory for the full investigation). Byparr
+solves the challenge with a hardened Firefox build and hands back plain HTML,
+so this module only needs an HTTP client and an HTML parser.
 """
 
 from __future__ import annotations
 
 import datetime
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass
 from urllib.parse import quote
 
+import httpx
+from bs4 import BeautifulSoup
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
@@ -25,10 +36,8 @@ logger = logging.getLogger(__name__)
 SEARCH_URL = "https://www.suruga-ya.jp/search"
 VINTAGE_SUFFIX = "　旧裏"  # full-width space + "old back" — Suruga-ya's vintage-print filter term
 REQUEST_DELAY_SECONDS = 1.5  # be a polite, low-volume crawler — this runs on ~dozens of cards, once a week
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
-)
+BYPARR_TIMEOUT_MS = 60000
+BYPARR_URL = os.getenv("BYPARR_URL", "http://byparr:8191/v1")
 
 _RARITY_MARKER_RE = re.compile(r"\[([●◆★◇])\]")
 _NUMBER_TOTAL_RE = re.compile(r"^(\d+)/(\d+)")
@@ -168,53 +177,76 @@ def select_best_match(
     return (in_stock or pool)[0]
 
 
-def fetch_candidates(page, query: str) -> list[SurugaYaCandidate]:
-    """Fetch and parse Suruga-ya search results for one query string. Playwright I/O only —
-    all actual parsing goes through build_candidate() so it stays unit-testable without a browser.
+def fetch_html_via_byparr(url: str, *, client: httpx.Client) -> str | None:
+    """Resolve one URL through Byparr's FlareSolverr-compatible API and return the HTML.
+
+    Byparr solves Suruga-ya's Cloudflare Turnstile challenge with a hardened Firefox
+    build and hands back the final page; a fresh solve costs roughly 10s, which is fine
+    at this volume (a few dozen cards, once a week).
     """
-    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
-
-    page.goto(build_search_url(query), timeout=20000)
     try:
-        page.wait_for_selector(".item", timeout=15000)
-    except PlaywrightTimeoutError:
-        return []
-
-    candidates = []
-    for item in page.query_selector_all(".item"):
-        title_el = item.query_selector("h3.product-name")
-        if not title_el:
-            continue
-        title = title_el.inner_text()
-
-        release_el = item.query_selector(".release_date")
-        release_date_line = release_el.inner_text() if release_el else None
-
-        price_el = item.query_selector(".price_teika")
-        price_text = price_el.inner_text() if price_el else None
-        if not price_text:
-            stock_el = item.query_selector(".item_price .price")
-            price_text = stock_el.inner_text() if stock_el else None
-
-        marketplace_el = item.query_selector(".makeplaTit .text-red strong")
-        marketplace_text = marketplace_el.inner_text() if marketplace_el else None
-
-        link_el = item.query_selector(".title a")
-        href = link_el.get_attribute("href") if link_el else None
-        product_url = ""
-        if href:
-            product_url = href if href.startswith("http") else f"https://www.suruga-ya.jp{href}"
-
-        candidates.append(
-            build_candidate(
-                title=title,
-                release_date_line=release_date_line,
-                price_text=price_text,
-                marketplace_text=marketplace_text,
-                product_url=product_url,
-            )
+        response = client.post(
+            BYPARR_URL,
+            json={"cmd": "request.get", "url": url, "maxTimeout": BYPARR_TIMEOUT_MS},
+            timeout=BYPARR_TIMEOUT_MS / 1000 + 10,
         )
-    return candidates
+        response.raise_for_status()
+        payload = response.json()
+    except Exception:
+        logger.exception("Byparr request failed for %s", url)
+        return None
+
+    if payload.get("status") != "ok":
+        logger.warning("Byparr could not resolve %s: %s", url, payload.get("message"))
+        return None
+    return payload.get("solution", {}).get("response")
+
+
+def parse_item_html(item) -> SurugaYaCandidate | None:
+    """Build a candidate from one BeautifulSoup `.item` element. Only the DOM traversal
+    lives here — all string parsing goes through build_candidate() so it stays
+    unit-testable without any HTML at all.
+    """
+    title_el = item.select_one("h3.product-name")
+    if not title_el:
+        return None
+    title = title_el.get_text()
+
+    release_el = item.select_one(".release_date")
+    release_date_line = release_el.get_text() if release_el else None
+
+    price_el = item.select_one(".price_teika")
+    price_text = price_el.get_text() if price_el else None
+    if not price_text:
+        stock_el = item.select_one(".item_price .price")
+        price_text = stock_el.get_text() if stock_el else None
+
+    marketplace_el = item.select_one(".makeplaTit .text-red strong")
+    marketplace_text = marketplace_el.get_text() if marketplace_el else None
+
+    link_el = item.select_one(".title a")
+    href = link_el.get("href") if link_el else None
+    product_url = ""
+    if href:
+        product_url = href if href.startswith("http") else f"https://www.suruga-ya.jp{href}"
+
+    return build_candidate(
+        title=title,
+        release_date_line=release_date_line,
+        price_text=price_text,
+        marketplace_text=marketplace_text,
+        product_url=product_url,
+    )
+
+
+def fetch_candidates(query: str, *, client: httpx.Client) -> list[SurugaYaCandidate]:
+    """Fetch and parse Suruga-ya search results for one query string."""
+    html = fetch_html_via_byparr(build_search_url(query), client=client)
+    if not html:
+        return []
+    soup = BeautifulSoup(html, "html.parser")
+    candidates = [parse_item_html(item) for item in soup.select(".item")]
+    return [c for c in candidates if c is not None]
 
 
 def sync_jp_prices_for_collection(db: Session) -> dict:
@@ -225,7 +257,6 @@ def sync_jp_prices_for_collection(db: Session) -> dict:
     cards" means owned, not the full synced catalogue.
     """
     from models import Card, CollectionItem, Set
-    from playwright.sync_api import sync_playwright
 
     card_ids = [
         row[0]
@@ -247,60 +278,55 @@ def sync_jp_prices_for_collection(db: Session) -> dict:
     if not cards:
         return {"attempted": 0, "updated": 0, "no_match": 0, "failed": 0}
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
-        page = browser.new_page(user_agent=USER_AGENT)
-        try:
-            for card in cards:
-                attempted += 1
-                try:
-                    set_row = (
-                        db.query(Set)
-                        .filter(Set.tcg_set_id == card.set_id, Set.lang == "ja")
-                        .first()
-                    )
-                    target_release_date = set_row.release_date if set_row else None
-                    target_total = str(set_row.printed_total) if set_row and set_row.printed_total else None
+    with httpx.Client() as client:
+        for card in cards:
+            attempted += 1
+            try:
+                set_row = (
+                    db.query(Set)
+                    .filter(Set.tcg_set_id == card.set_id, Set.lang == "ja")
+                    .first()
+                )
+                target_release_date = set_row.release_date if set_row else None
+                target_total = str(set_row.printed_total) if set_row and set_row.printed_total else None
 
-                    collection_row = (
-                        db.query(CollectionItem).filter(CollectionItem.card_id == card.id).first()
-                    )
-                    prefer_holo = bool(
-                        collection_row and collection_row.variant in ("Holo", "Reverse Holo")
-                    )
+                collection_row = (
+                    db.query(CollectionItem).filter(CollectionItem.card_id == card.id).first()
+                )
+                prefer_holo = bool(
+                    collection_row and collection_row.variant in ("Holo", "Reverse Holo")
+                )
 
-                    candidates = fetch_candidates(page, f"{card.name}{VINTAGE_SUFFIX}")
-                    if not candidates:
-                        candidates = fetch_candidates(page, card.name)
+                candidates = fetch_candidates(f"{card.name}{VINTAGE_SUFFIX}", client=client)
+                if not candidates:
+                    candidates = fetch_candidates(card.name, client=client)
 
-                    best = select_best_match(
-                        candidates,
-                        target_release_date=target_release_date,
-                        target_number=card.number,
-                        target_total=target_total,
-                        prefer_holo=prefer_holo,
-                    )
+                best = select_best_match(
+                    candidates,
+                    target_release_date=target_release_date,
+                    target_number=card.number,
+                    target_total=target_total,
+                    prefer_holo=prefer_holo,
+                )
 
-                    if best is None:
-                        no_match += 1
-                        time.sleep(REQUEST_DELAY_SECONDS)
-                        continue
+                if best is None:
+                    no_match += 1
+                    time.sleep(REQUEST_DELAY_SECONDS)
+                    continue
 
-                    card.price_jpy_low = best.price_low
-                    card.price_jpy_high = best.price_high
-                    card.price_jpy_marketplace = best.marketplace_price
-                    card.price_jpy_variant = "holo" if best.is_holo else "normal"
-                    card.price_jpy_match_note = f"{best.title} ({best.release_date or 'date unknown'})"
-                    card.price_jpy_source_url = best.product_url
-                    card.price_jpy_updated_at = datetime.datetime.utcnow()
-                    db.commit()
-                    updated += 1
-                except Exception:
-                    logger.exception("Suruga-ya price fetch failed for card %s", card.id)
-                    db.rollback()
-                    failed += 1
-                time.sleep(REQUEST_DELAY_SECONDS)
-        finally:
-            browser.close()
+                card.price_jpy_low = best.price_low
+                card.price_jpy_high = best.price_high
+                card.price_jpy_marketplace = best.marketplace_price
+                card.price_jpy_variant = "holo" if best.is_holo else "normal"
+                card.price_jpy_match_note = f"{best.title} ({best.release_date or 'date unknown'})"
+                card.price_jpy_source_url = best.product_url
+                card.price_jpy_updated_at = datetime.datetime.utcnow()
+                db.commit()
+                updated += 1
+            except Exception:
+                logger.exception("Suruga-ya price fetch failed for card %s", card.id)
+                db.rollback()
+                failed += 1
+            time.sleep(REQUEST_DELAY_SECONDS)
 
     return {"attempted": attempted, "updated": updated, "no_match": no_match, "failed": failed}

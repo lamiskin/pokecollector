@@ -63,6 +63,7 @@ services:
       SCAN_UPLOAD_DIR: /app/data/scan-uploads
       SCAN_TRACE_DIR: ${SCAN_TRACE_DIR:-}
       SCAN_TRACE_STORAGE_DIR: /app/data/scan-traces
+      BYPARR_URL: http://byparr:8191/v1
     depends_on:
       postgres:
         condition: service_healthy
@@ -78,6 +79,14 @@ services:
       - ./data/scan-traces:/app/data/scan-traces
     ports:
       - "${BACKEND_PORT:-8000}:8000"
+
+  # Cloudflare-Turnstile-solving sidecar for the Suruga-ya JP price fetcher (personal,
+  # local-only feature — see backend/services/suruga_ya_pricing.py). Not exposed to the
+  # host; only the backend talks to it, over the internal network by service name.
+  byparr:
+    image: ghcr.io/thephaseless/byparr:latest
+    container_name: pokemon-byparr
+    restart: unless-stopped
 
   frontend:
     build:
