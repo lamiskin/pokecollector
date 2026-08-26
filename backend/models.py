@@ -113,6 +113,17 @@ class Card(Base):
     price_source_lang = Column(String, nullable=True)  # Set when prices are copied from another TCGdex language
     last_price_sync_attempt_at = Column(DateTime, nullable=True)
     last_price_sync_success_at = Column(DateTime, nullable=True)
+    # Suruga-ya JPY prices — personal, local-only feature (not sourced from TCGdex).
+    # Kept separate from price_market/price_trend rather than merged into them:
+    # vintage-print matching is fuzzy (no number/set key on Suruga-ya pre-2002),
+    # so this is deliberately additive/reviewable, never auto-blended into "the" price.
+    price_jpy_low = Column(Float, nullable=True)
+    price_jpy_high = Column(Float, nullable=True)
+    price_jpy_marketplace = Column(Float, nullable=True)  # Suruga-ya's third-party マケプレ listing
+    price_jpy_variant = Column(String, nullable=True)  # "holo" or "normal" — best-effort from the matched listing's rarity marker/(キラ) tag
+    price_jpy_match_note = Column(String, nullable=True)  # matched listing's title + set/print line, for manual sanity-checking
+    price_jpy_source_url = Column(String, nullable=True)
+    price_jpy_updated_at = Column(DateTime, nullable=True)
     last_metadata_enrichment_attempt_at = Column(DateTime, nullable=True, index=True)
     # Card variants from TCGdex
     variants_normal = Column(Boolean)
