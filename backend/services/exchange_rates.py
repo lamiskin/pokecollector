@@ -1,9 +1,13 @@
 from decimal import Decimal, InvalidOperation
 
-SUPPORTED_CURRENCIES = {"EUR", "USD"}
+SUPPORTED_CURRENCIES = {"EUR", "USD", "AUD"}
 FALLBACK_RATES = {
     ("EUR", "USD"): 1.1,
     ("USD", "EUR"): 0.91,
+    ("EUR", "AUD"): 1.63,
+    ("AUD", "EUR"): 0.61,
+    ("USD", "AUD"): 1.43,
+    ("AUD", "USD"): 0.70,
 }
 
 
