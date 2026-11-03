@@ -1,7 +1,6 @@
 services:
   postgres:
     image: postgres:18-alpine
-    container_name: pokemon-postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: pokemon
@@ -32,8 +31,9 @@ services:
       retries: 5
 
   backend:
-    image: ghcr.io/git-romer/pokecollector-backend:${POKECOLLECTOR_VERSION:-1.55.1}
-    container_name: pokemon-backend
+    image: ${BACKEND_IMAGE:-pokecollector-backend:local}
+    build:
+      context: ./backend
     restart: unless-stopped
     environment:
       DATABASE_URL: postgresql://pokemon:${POSTGRES_PASSWORD:-changeme}@postgres:5432/pokemon_tcg
@@ -70,11 +70,11 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      - ./backups:/app/backups
-      - ./data/auth:/app/data/auth
-      - ./data/pokedex-images:/app/data/pokedex-images
-      - ./data/scan-uploads:/app/data/scan-uploads
-      - ./data/scan-traces:/app/data/scan-traces
+      - ${BACKUPS_DIR:-./backups}:/app/backups
+      - ${AUTH_DIR:-./data/auth}:/app/data/auth
+      - ${POKEDEX_IMAGE_DIR:-./data/pokedex-images}:/app/data/pokedex-images
+      - ${SCAN_UPLOAD_HOST_DIR:-./data/scan-uploads}:/app/data/scan-uploads
+      - ${SCAN_TRACE_HOST_DIR:-./data/scan-traces}:/app/data/scan-traces
     ports:
       - "${BACKEND_PORT:-8000}:8000"
 
@@ -82,13 +82,13 @@ services:
   # local-only feature — see backend/services/suruga_ya_pricing.py). Not exposed to the
   # host; only the backend talks to it, over the internal network by service name.
   byparr:
-    image: ghcr.io/thephaseless/byparr:latest
-    container_name: pokemon-byparr
+    image: ${BYPARR_IMAGE:-ghcr.io/thephaseless/byparr:latest}
     restart: unless-stopped
 
   frontend:
-    image: ghcr.io/git-romer/pokecollector-frontend:${POKECOLLECTOR_VERSION:-1.55.1}
-    container_name: pokemon-frontend
+    image: ${FRONTEND_IMAGE:-pokecollector-frontend:local}
+    build:
+      context: ./frontend
     restart: unless-stopped
     depends_on:
       - backend

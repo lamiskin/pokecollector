@@ -1,5 +1,9 @@
 # Deployment and releases
 
+> This fork builds and runs its own images and runs two isolated instances.
+> See [FORK_DEPLOYMENT.md](FORK_DEPLOYMENT.md). The published-image procedure
+> below applies to upstream PokéCollector, not to this fork's Prod.
+
 PokéCollector's normal Docker installation uses published container images. A
 source checkout and local image build are optional development tools, not
 installation requirements.

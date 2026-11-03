@@ -481,6 +481,7 @@ Published installations pull frontend and backend images from `ghcr.io` and Post
 
 - [Branch naming, destinations and release policy](docs/FORK_WORKFLOW.md)
 - [Fork maintenance and Dev/Prod runbook](docs/FORK_RUNBOOK.md)
+- [Running the fork's Dev and Prod instances](docs/FORK_DEPLOYMENT.md)
 - [Agent working guidance](AGENTS.md)
 
 These describe the new target workflow; existing branches and deployments
