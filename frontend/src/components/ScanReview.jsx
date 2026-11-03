@@ -1,10 +1,12 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { createPortal } from 'react-dom'
-import { AlertTriangle, Camera, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Loader2, Plus, RefreshCw, Sparkles, Trash2, X } from 'lucide-react'
+import { AlertTriangle, Camera, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Loader2, Plus, RefreshCw, Search, Sparkles, Trash2, X } from 'lucide-react'
+import toast from 'react-hot-toast'
 import { fetchScanCandidateImage, fetchScanJobItemImage } from '../api/client'
 import CardImage from './CardImage'
 import { useDialogBehavior } from './ui/dialogBehavior'
 import { formatRetryCountdown } from '../utils/retryCountdown'
+import { cardLookupLinks, searchGoogleByPhoto } from '../utils/cardLookup'
 
 // Shared between the queue page (ScanQueue) and, previously, the capture
 // modal — the capture modal now has its own inline results grid and its own
@@ -247,7 +249,7 @@ const zoomStyle = ({ scale, x, y }) => scale === 1 ? undefined : {
 }
 
 export function CardZoomModal({
-  card, photoUrl, onClose, t, matches, index = 0, onIndex, onAccept, jobId, itemId,
+  card, photoUrl, onClose, t, matches, index = 0, onIndex, onAccept, jobId, itemId, nameEn,
 }) {
   const canNavigate = Array.isArray(matches) && matches.length > 1 && onIndex
   const step = useCallback(delta => {
@@ -469,6 +471,25 @@ export function CardZoomModal({
                   otherwise need — without it the blurred stand-in spreads
                   past the card edge into the black overlay and fades to
                   nothing. */}
+              {/* Nothing to compare against: TCGdex has no scan of this
+                  printing. Say so and offer somewhere to go, rather than
+                  showing a broken frame — this is the case the reviewer most
+                  needs help with. */}
+              {!card.image && !full ? (
+                <div className={`${CARD_FRAME} flex flex-col justify-center gap-3 rounded-xl px-4 text-center`}
+                  style={{ background: 'rgba(255,255,255,0.03)', border: '1px dashed rgba(255,255,255,0.14)' }}
+                  onClick={e => e.stopPropagation()}>
+                  <p className="text-xs text-text-muted">{t('scanner.noCatalogueImage')}</p>
+                  <div className="flex flex-col gap-2">
+                    {cardLookupLinks(card, nameEn).map(link => (
+                      <a key={link.key} href={link.url} target="_blank" rel="noopener noreferrer"
+                        className="btn-ghost inline-flex items-center justify-center gap-1.5 text-xs">
+                        <Search size={13} />{t(`scanner.lookup_${link.key}`)}
+                      </a>
+                    ))}
+                  </div>
+                </div>
+              ) : (
               <div ref={frameRef} onClick={onCardClick}
                 className={`${CARD_FRAME} relative overflow-hidden ${zoomed ? 'cursor-grab' : 'cursor-zoom-in'}`}>
                 {!imageFailed && (
@@ -521,6 +542,7 @@ export function CardZoomModal({
                   </div>
                 )}
               </div>
+              )}
               <figcaption className="mt-2 w-full space-y-0.5 text-center">
                 <p className="text-base font-bold text-white">{card?.name}</p>
                 <p className="text-sm font-mono font-semibold text-brand-red">
@@ -611,7 +633,7 @@ export function usePrefetchMatchImages(matches) {
 }
 
 // ─── The candidate grid — the "which of these DB candidates is it" picker ──
-function CandidateGrid({ jobId, itemId, matches, onSelect, onZoom, t }) {
+function CandidateGrid({ jobId, itemId, matches, onSelect, onZoom, nameEn, t }) {
   usePrefetchMatchImages(matches)
 
   if (!matches?.length) return null
@@ -631,40 +653,59 @@ function CandidateGrid({ jobId, itemId, matches, onSelect, onZoom, t }) {
             onTouchStart={() => prefetchImage(hdImage)}
             className="group relative flex flex-col transition-all duration-200 hover:rotate-1 hover:shadow-glow"
           >
-            <button
-              type="button"
-              onClick={() => onZoom(match, matchIndex)}
-              aria-label={t('scanner.compareCandidate')}
-              title={t('scanner.compareCandidate')}
-              className="relative aspect-[2.5/3.5] w-full overflow-hidden rounded-xl text-left ring-1 ring-white/5 transition-all duration-200 group-hover:ring-2 group-hover:ring-brand-red/30 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-brand-red"
-            >
-              {match.image ? (
-                // CardImage, not a bare <img>: a candidate URL failing to load
-                // (not just being absent) needs the same "artwork unavailable,
-                // retry" state every other card image gets — a broken image
-                // with no explanation is a worse result than the "no image at
-                // all" branch below, which at least offers a way out. Full
-                // (non-compact) error state, not compactError: these tiles
-                // are large enough that the icon-only compact mode used for
-                // small thumbnails elsewhere reads as unexplained, same
-                // complaint this is fixing in the first place.
-                <CardImage src={match.image} alt={match.name}
-                  className="h-full w-full object-cover shadow-lg transition-transform duration-300 group-hover:scale-[1.02]" />
-              ) : (
-                <div className="flex h-full w-full items-center justify-center rounded-xl bg-bg-surface">
-                  <span className="p-1 text-center text-[9px] text-text-muted">{match.name}</span>
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => onZoom(match, matchIndex)}
+                aria-label={t('scanner.compareCandidate')}
+                title={t('scanner.compareCandidate')}
+                className="relative aspect-[2.5/3.5] w-full overflow-hidden rounded-xl text-left ring-1 ring-white/5 transition-all duration-200 group-hover:ring-2 group-hover:ring-brand-red/30 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-brand-red"
+              >
+                {match.image ? (
+                  // CardImage, not a bare <img>: a candidate URL failing to load
+                  // (not just being absent) needs the same "artwork unavailable,
+                  // retry" state every other card image gets — a broken image
+                  // with no explanation is a worse result than the "no image at
+                  // all" branch below, which at least offers a way out. Full
+                  // (non-compact) error state, not compactError: these tiles
+                  // are large enough that the icon-only compact mode used for
+                  // small thumbnails elsewhere reads as unexplained, same
+                  // complaint this is fixing in the first place.
+                  <CardImage src={match.image} alt={match.name}
+                    className="h-full w-full object-cover shadow-lg transition-transform duration-300 group-hover:scale-[1.02]" />
+                ) : (
+                  <div className="h-full w-full rounded-xl bg-bg-surface" />
+                )}
+                {match.printed_total_mismatch && (
+                  <span
+                    className="absolute left-1 top-1 rounded border border-amber-400 bg-amber-500/90 px-1 py-0.5 text-[8px] font-black leading-none text-black"
+                    title={t('scanner.printedTotalMismatch')}
+                    aria-label={t('scanner.printedTotalMismatch')}
+                  >
+                    ⚠
+                  </span>
+                )}
+              </button>
+
+              {/* "find image" shortcut: a sibling of the button, never nested
+                  inside an interactive element. The overlay ignores pointer
+                  events so clicks on the card name fall through to the button
+                  (opening the comparison); the link alone re-enables them. */}
+              {!match.image && (
+                <div className="pointer-events-none absolute inset-0 z-10 flex flex-col items-center justify-center gap-1 p-1">
+                  <span aria-hidden="true" className="text-center text-[9px] leading-tight text-text-muted">{match.name}</span>
+                  <a
+                    href={cardLookupLinks(match, nameEn)[0].url}
+                    target="_blank" rel="noopener noreferrer"
+                    title={t('scanner.lookup_images')}
+                    aria-label={t('scanner.lookup_images')}
+                    className="pointer-events-auto inline-flex items-center gap-0.5 rounded-sm text-[9px] text-brand-red/90 hover:text-brand-red focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-red"
+                  >
+                    <Search size={9} />{t('scanner.lookupShort')}
+                  </a>
                 </div>
               )}
-              {match.printed_total_mismatch && (
-                <span
-                  className="absolute left-1 top-1 rounded border border-amber-400 bg-amber-500/90 px-1 py-0.5 text-[8px] font-black leading-none text-black"
-                  title={t('scanner.printedTotalMismatch')}
-                  aria-label={t('scanner.printedTotalMismatch')}
-                >
-                  ⚠
-                </span>
-              )}
-            </button>
+            </div>
 
             <div className="flex items-start gap-1 pt-1">
               <div className="min-w-0 flex-1">
@@ -699,7 +740,7 @@ function CandidateGrid({ jobId, itemId, matches, onSelect, onZoom, t }) {
 // ─── One queued photo in the review list ────────────────────────────────────
 // `w-24` matches the layout used elsewhere in the batch list: the thumbnail
 // and status sit in a row, with the (much wider) candidate grid below.
-function PhotoThumb({ url, onZoom, t }) {
+function PhotoThumb({ url, onZoom, onSearchPhoto, t }) {
   return (
     <div className="w-24 flex-shrink-0 self-start space-y-1.5">
       <button type="button" onClick={onZoom} disabled={!url}
@@ -709,6 +750,20 @@ function PhotoThumb({ url, onZoom, t }) {
           ? <img src={url} alt={t('scanner.yourPhoto')} className="h-full w-full object-contain" />
           : <Camera size={28} className="text-text-muted opacity-50" />}
       </button>
+      {/* Reverse image search on the photo itself — the most direct way to
+          identify a card no catalogue has a scan of, since it is the one
+          image we definitely have. */}
+      {onSearchPhoto && (
+        <button
+          type="button"
+          onClick={onSearchPhoto}
+          title={t('scanner.searchByPhoto')}
+          aria-label={t('scanner.searchByPhoto')}
+          className="flex w-full items-center justify-center rounded-lg border border-white/10 bg-white/5 py-1 text-text-muted transition-colors hover:border-white/20 hover:text-white"
+        >
+          <Search size={13} />
+        </button>
+      )}
     </div>
   )
 }
@@ -725,6 +780,14 @@ export function ScanItemPanel({ jobId, item, onAdd, onRetry, onDismiss, onReview
 
   const active = ['pending', 'processing', 'retrying'].includes(item.status)
   const noMatches = item.status === 'done' && !item.matches?.length
+
+  const searchByPhoto = () => {
+    // No stored filename on this item shape — a name derived from its
+    // position in the batch is at least identifiable if the reviewer has
+    // several downloads open at once.
+    searchGoogleByPhoto(photoUrl, `photo-${item.position + 1}`)
+    toast(t('scanner.searchByPhotoSaved'), { duration: 6000 })
+  }
 
   // A resolved item is finished business. Left expanded it takes as much
   // room as one still needing a decision, and worse: resolving drops the
@@ -774,6 +837,7 @@ export function ScanItemPanel({ jobId, item, onAdd, onRetry, onDismiss, onReview
             setPhotoExpanded(true)
             onModalChange?.(true)
           }}
+          onSearchPhoto={photoUrl ? searchByPhoto : undefined}
           t={t}
         />
 
@@ -856,6 +920,7 @@ export function ScanItemPanel({ jobId, item, onAdd, onRetry, onDismiss, onReview
             jobId={jobId}
             itemId={item.id}
             matches={item.matches}
+            nameEn={item.recognized?.name_en}
             onSelect={item.resolved ? undefined : match => onAdd(item, match)}
             onZoom={(match, matchIndex) => onReview(item, matchIndex)}
             t={t}
