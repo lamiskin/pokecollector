@@ -2,7 +2,13 @@
 <html lang="en" class="dark">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <!-- interactive-widget=resizes-content: without it, Chrome's default is
+         to shrink the visual viewport when its address bar (or the on-screen
+         keyboard) shows without reflowing layout — so dvh, and a fixed
+         inset-0 overlay's own top edge, stay sized against the address-bar-
+         retracted viewport and end up partly hidden behind the bar rather
+         than resized below it. This makes Chrome actually resize layout. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
     <title>Pokemon TCG Collection</title>
     <!-- Favicons -->
     <link rel="icon" type="image/svg+xml" href="/pokeball.svg?v=2" />
