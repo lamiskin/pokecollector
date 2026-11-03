@@ -1468,6 +1468,14 @@ const en = {
     history: 'Price History',
     sinceTracking: 'since tracking',
     cardmarketTitle: 'Cardmarket Prices',
+    surugaYaTitle: 'Suruga-ya Price (JPY)',
+    surugaYaNote: 'No Cardmarket price available — showing a Suruga-ya listing match instead.',
+    surugaYaMatch: 'Matched listing',
+    surugaYaMarketplace: 'Marketplace',
+    surugaYaViewListing: 'View listing',
+    manualValueTitle: 'Manual Fallback Value',
+    manualValueNote: 'Used only when no Cardmarket or Suruga-ya price exists for this card at all.',
+    manualValueSaved: 'Fallback value saved',
   },
 
   // Set Detail

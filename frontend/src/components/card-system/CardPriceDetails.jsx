@@ -4,7 +4,7 @@ import { ExternalLink } from 'lucide-react'
 import { getPriceHistory } from '../../api/client'
 import { useSettings } from '../../contexts/SettingsContext'
 import { cardmarketLinks } from '../../utils/cardmarket'
-import { getCardPriceValue, getPrimaryCardPrice } from '../../utils/prices'
+import { getCardPriceValue, getPrimaryCardPrice, formatJpy } from '../../utils/prices'
 
 const CARDMARKET_PRICE_KEYS = ['trend', 'avg', 'avg1', 'avg7', 'avg30', 'low']
 const CARDMARKET_REVERSE_PRICE_FIELDS = [
@@ -85,6 +85,44 @@ export default function CardPriceDetails({ card, variant = 'Normal', summary = n
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {card?.price_jpy_low != null && (
+        <div className="bg-bg-card rounded-xl p-3 space-y-2 border border-border">
+          <p className="text-xs text-text-muted font-medium uppercase tracking-wide">
+            {t('prices.surugaYaTitle')}
+          </p>
+          {cardmarketPrices.length === 0 && (
+            <p className="text-[11px] text-text-muted">{t('prices.surugaYaNote')}</p>
+          )}
+          <p className="text-lg font-bold text-text-primary">
+            {formatJpy(card.price_jpy_low)}
+            {card.price_jpy_high != null && card.price_jpy_high !== card.price_jpy_low
+              ? ` – ${formatJpy(card.price_jpy_high)}`
+              : ''}
+          </p>
+          {card.price_jpy_marketplace != null && (
+            <p className="text-xs text-text-secondary">
+              {t('prices.surugaYaMarketplace')}: {formatJpy(card.price_jpy_marketplace)}
+            </p>
+          )}
+          {card.price_jpy_match_note && (
+            <p className="text-[11px] text-text-muted truncate" title={card.price_jpy_match_note}>
+              {t('prices.surugaYaMatch')}: {card.price_jpy_match_note}
+            </p>
+          )}
+          {card.price_jpy_source_url && (
+            <a
+              href={card.price_jpy_source_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="btn-ghost text-xs inline-flex items-center gap-1.5"
+            >
+              <ExternalLink size={14} />
+              {t('prices.surugaYaViewListing')}
+            </a>
+          )}
         </div>
       )}
 
