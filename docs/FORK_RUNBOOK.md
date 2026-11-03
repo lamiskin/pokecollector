@@ -151,6 +151,17 @@ Test this sync candidate in isolated Dev, including migrations and retained
 features. After acceptance, merge the sync branch into `fork/main` and rebuild
 Dev's selected integration when appropriate. Never merge Dev to achieve this.
 
+### Weekly automated check
+
+A scheduled task (OpenChamber, Mondays 07:00 Sydney) runs the same first half of
+this step unattended: fetch, create a throwaway `sync/upstream-<date>` worktree
+from `fork/main`, attempt the merge, and either report conflicts per file or run
+the backend and frontend suites in disposable containers. It never pushes,
+merges into `fork/main`/`dev`, or touches the running instances. When upstream
+has not moved it reports that and stops. Treat its report as the trigger for
+this step, not as approval: a clean merge that passes tests still needs a human
+decision to accept.
+
 ## 6. Build and validate a release
 
 1. Select ready work into `fork/main`, then cut a release branch, for example
