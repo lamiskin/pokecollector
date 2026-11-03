@@ -90,6 +90,20 @@ class CardBase(BaseModel):
     price_tcg_holo_mid: Optional[float] = None
     price_tcg_holo_market: Optional[float] = None
     price_source_lang: Optional[str] = None
+    # Suruga-ya JPY prices — personal, local-only feature. price_jpy_eur_equivalent is
+    # the only one of these that feeds into "the" effective price (as a last resort,
+    # see effective_market_price); the rest are exposed for display/provenance only.
+    price_jpy_low: Optional[float] = None
+    price_jpy_high: Optional[float] = None
+    price_jpy_marketplace: Optional[float] = None
+    price_jpy_variant: Optional[str] = None
+    price_jpy_match_note: Optional[str] = None
+    price_jpy_source_url: Optional[str] = None
+    price_jpy_eur_equivalent: Optional[float] = None
+    # Hand-entered EUR fallback (personal, local-only) — absolute last resort in
+    # effective_market_price(), used only when neither Cardmarket nor the JPY
+    # price above exists.
+    manual_value_override: Optional[float] = None
     # Variants
     variants_normal: Optional[bool] = None
     variants_reverse: Optional[bool] = None
@@ -127,6 +141,10 @@ class CustomCardUpdate(BaseModel):
 
 class CardCustomImageUpdate(BaseModel):
     custom_image_url: Optional[str] = None
+
+
+class CardManualValueUpdate(BaseModel):
+    manual_value_override: Optional[float] = None
 
 
 class CardWithSet(CardBase):

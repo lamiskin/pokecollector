@@ -679,6 +679,16 @@ def _run_migrations(conn):
                 );
             END IF;
         END$$""",
+        # v63: Suruga-ya JPY prices + manual EUR fallback (personal, local-only feature).
+        "ALTER TABLE cards ADD COLUMN IF NOT EXISTS price_jpy_low DOUBLE PRECISION",
+        "ALTER TABLE cards ADD COLUMN IF NOT EXISTS price_jpy_high DOUBLE PRECISION",
+        "ALTER TABLE cards ADD COLUMN IF NOT EXISTS price_jpy_marketplace DOUBLE PRECISION",
+        "ALTER TABLE cards ADD COLUMN IF NOT EXISTS price_jpy_variant VARCHAR",
+        "ALTER TABLE cards ADD COLUMN IF NOT EXISTS price_jpy_match_note VARCHAR",
+        "ALTER TABLE cards ADD COLUMN IF NOT EXISTS price_jpy_source_url VARCHAR",
+        "ALTER TABLE cards ADD COLUMN IF NOT EXISTS price_jpy_updated_at TIMESTAMP",
+        "ALTER TABLE cards ADD COLUMN IF NOT EXISTS price_jpy_eur_equivalent DOUBLE PRECISION",
+        "ALTER TABLE cards ADD COLUMN IF NOT EXISTS manual_value_override DOUBLE PRECISION",
     ]
     for stmt in migrations:
         try:
