@@ -33,7 +33,8 @@ services:
   backend:
     image: ${BACKEND_IMAGE:-pokecollector-backend:local}
     build:
-      context: ./backend
+      context: .
+      dockerfile: backend/Dockerfile
     restart: unless-stopped
     environment:
       DATABASE_URL: postgresql://pokemon:${POSTGRES_PASSWORD:-changeme}@postgres:5432/pokemon_tcg
@@ -88,7 +89,8 @@ services:
   frontend:
     image: ${FRONTEND_IMAGE:-pokecollector-frontend:local}
     build:
-      context: ./frontend
+      context: .
+      dockerfile: frontend/Dockerfile
     restart: unless-stopped
     depends_on:
       - backend
