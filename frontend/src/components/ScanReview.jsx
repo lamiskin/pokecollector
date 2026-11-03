@@ -633,7 +633,7 @@ export function usePrefetchMatchImages(matches) {
 }
 
 // ─── The candidate grid — the "which of these DB candidates is it" picker ──
-function CandidateGrid({ jobId, itemId, matches, onSelect, onZoom, nameEn, t }) {
+export function CandidateGrid({ jobId, itemId, matches, onSelect, onZoom, nameEn, t }) {
   usePrefetchMatchImages(matches)
 
   if (!matches?.length) return null
