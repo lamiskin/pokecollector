@@ -192,7 +192,11 @@ on a real phone. Confirm the retained personal-patch register is covered.
 
 ## 7. Deploy two isolated instances
 
-Before first deployment, implement an environment-specific Compose setup with:
+The isolated setup exists (2026-11-03): `scripts/instance.sh` runs
+`pokecollector-dev` and `pokecollector-prod` from their own env files, with
+separate volumes, media, auth, secrets and backups under `instances/<name>/`.
+It meets the requirements below; re-check them after any upstream change to the
+Compose file.
 
 - Project names `pokecollector-dev` and `pokecollector-prod`.
 - Separate deployment directories and env files; distinct ports/hostnames.
@@ -203,10 +207,10 @@ Before first deployment, implement an environment-specific Compose setup with:
 - Dev notifications disabled, approved scanner credentials and internal access.
 - No unauthenticated public exposure; `PUBLIC_MODE=false` is not access control.
 
-The existing root Compose file is **not yet dual-instance-safe**. Project names
-do not fix its `container_name` collisions or shared relative bind paths.
-Validate the rendered configuration and actual mounted paths for both instances
-before startup. Keep credentials out of Git and diagnostic output.
+Container names are now project-scoped and bind paths come from env variables;
+still validate the rendered configuration and actual mounts for both instances
+before startup, and after any upstream change to the Compose file. Keep
+credentials out of Git and diagnostic output.
 
 For each Prod upgrade: authorize the maintenance window, take a consistent
 database/media backup, verify recovery evidence, record the previous digests,

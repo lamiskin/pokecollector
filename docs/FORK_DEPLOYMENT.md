@@ -68,6 +68,22 @@ Two rules of thumb:
   `USER_MODE=multi` is set. Set it for Prod before widening access, and confirm
   the login screen appears before relying on the firewall alone.
 
+### Authentication
+
+Prod runs with `USER_MODE=multi` (login required); Dev deliberately does not.
+Check with `curl -o /dev/null -w '%{http_code}' http://<host>:<port>/api/collection/`
+— 401 means login is enforced, 200 means the instance is open.
+
+A restored database brings its own `users` rows, so the password in `.env.prod`
+does **not** apply after a restore. Reset it from inside the instance:
+
+```bash
+./scripts/instance.sh prod exec backend \
+  python -m scripts.set_admin_password --username admin --password '<new-password>'
+```
+
+Then confirm a real login through the frontend, not just the API.
+
 ## Build the fork images once
 
 Prod must run the same bytes that were tested in Dev, so build once and pin.
