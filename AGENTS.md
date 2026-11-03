@@ -57,6 +57,13 @@
   branches, and never use `--mirror`, `--all` or `--force` against `origin`.
 - Release tags are immutable: push a tag once, never move or delete it.
 - Report the pushed refs and their commits rather than claiming a push worked.
+- **Purging committed data is the only sanctioned force-push**, and only with
+  explicit authorization. Work from a bare mirror clone in a scratch directory,
+  rewrite only fork commits (`git filter-branch … -- --all ^<upstream-base>`)
+  so upstream commits and their tags stay byte-identical, verify the result,
+  force-push every affected branch, then reset each local worktree to
+  `origin/<branch>`. Take a `git bundle --all` backup first and never rewrite
+  upstream history — it would detach the fork from future upstream merges.
 
 ## Verification
 
