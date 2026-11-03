@@ -477,6 +477,15 @@ Published installations pull frontend and backend images from `ghcr.io` and Post
 
 ## 📚 Documentation
 
+### This fork
+
+- [Branch naming, destinations and release policy](docs/FORK_WORKFLOW.md)
+- [Fork maintenance and Dev/Prod runbook](docs/FORK_RUNBOOK.md)
+- [Agent working guidance](AGENTS.md)
+
+These describe the new target workflow; existing branches and deployments
+require the runbook's explicit migration before using it operationally.
+
 | Doc | Description |
 |-----|-------------|
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Contributor workflow and shared card-interface guidance |
