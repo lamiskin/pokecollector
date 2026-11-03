@@ -19,7 +19,7 @@ Nothing here is run automatically; each step is deliberate.
 | Media, auth keys, backups | `BACKUPS_DIR`, `AUTH_DIR`, `POKEDEX_IMAGE_DIR`, `SCAN_UPLOAD_HOST_DIR`, `SCAN_TRACE_HOST_DIR` in the instance env file |
 | Secrets | separate `.env.dev` / `.env.prod`, never committed |
 | Host ports | `BACKEND_PORT` / `FRONTEND_PORT`, including a bind address |
-| Exposure | both default to loopback; a stack without configured login must not listen publicly |
+| Exposure | backends stay on loopback; frontends may bind the netbird address, which requires a matching UFW rule and login enabled |
 | Outbound side effects | Dev must leave Telegram unset; scanner use is deliberate |
 
 The base Compose file no longer hard-codes container names or relative data
@@ -38,6 +38,35 @@ mkdir -p instances/prod/{backups,auth,pokedex-images,scan-uploads,scan-traces}
 ```
 
 `instances/` and the `.env.*` files are gitignored.
+
+### Exposing a frontend on the netbird interface
+
+The backends stay on loopback; the frontend proxies `/api` to the backend inside
+the Compose network, so nothing else needs publishing. To reach a UI from other
+netbird devices, bind only the frontend:
+
+```bash
+# .env.prod
+FRONTEND_PORT=100.98.173.68:3000
+# .env.dev
+FRONTEND_PORT=100.98.173.68:13000
+```
+
+Then allow the port on that interface, or UFW's default deny will drop it:
+
+```bash
+sudo ufw allow in on wt0 to any port 3000 proto tcp comment 'pokecollector prod'
+sudo ufw allow in on wt0 to any port 13000 proto tcp comment 'pokecollector dev'
+sudo ufw status numbered
+```
+
+Two rules of thumb:
+
+- The bind address is a literal netbird IP. If it changes, `up` fails to start
+  the frontend until the env file is updated; check `ip -br addr show wt0`.
+- Binding a frontend off loopback exposes an instance with **no login** unless
+  `USER_MODE=multi` is set. Set it for Prod before widening access, and confirm
+  the login screen appears before relying on the firewall alone.
 
 ## Build the fork images once
 

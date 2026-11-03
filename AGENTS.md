@@ -30,10 +30,12 @@
   authorization required by the task and global guidance.
 - Dev/Prod must have separate databases, secrets, media, uploads and backups.
   Run them with `./scripts/instance.sh <dev|prod> …`; never `podman-compose`
-  directly, which would default to a shared project name. Both bind to loopback
-  because instances have no login configured. Never test against live Prod,
-  delete its volumes, or rebuild images during promotion. Verify schema
-  compatibility before rollback.
+  directly, which would default to a shared project name. Backends stay on
+  loopback. A frontend may bind the netbird address (`FRONTEND_PORT`), which
+  requires a matching UFW rule for `wt0` and `USER_MODE=multi` on Prod: these
+  instances have no login otherwise. Never test against live Prod, delete its
+  volumes, or rebuild images during promotion. Verify schema compatibility
+  before rollback.
 
 ## Pushing to Git
 
