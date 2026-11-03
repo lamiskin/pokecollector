@@ -33,3 +33,6 @@ data/auth/
 /instances/
 .env.dev
 .env.prod
+
+# Local codemap change-detection state (codemap.md files are committed)
+/.slim/codemap.json

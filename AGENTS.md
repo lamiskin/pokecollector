@@ -1,5 +1,12 @@
 # PokéCollector
 
+## Repository Map
+
+A source-only architectural map is available at [`codemap.md`](codemap.md).
+Before substantial work, use it to locate entry points and module boundaries;
+for a specific area, read that directory's `codemap.md` as well. The codemap
+intentionally excludes tests, documentation and translation catalogs.
+
 ## Fork workflow (read first)
 
 - Policy and naming: [docs/FORK_WORKFLOW.md](docs/FORK_WORKFLOW.md).
