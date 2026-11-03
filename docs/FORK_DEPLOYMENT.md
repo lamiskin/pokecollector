@@ -18,7 +18,8 @@ Nothing here is run automatically; each step is deliberate.
 | Database | the project-scoped `postgres_data` volume |
 | Media, auth keys, backups | `BACKUPS_DIR`, `AUTH_DIR`, `POKEDEX_IMAGE_DIR`, `SCAN_UPLOAD_HOST_DIR`, `SCAN_TRACE_HOST_DIR` in the instance env file |
 | Secrets | separate `.env.dev` / `.env.prod`, never committed |
-| Host ports | `BACKEND_PORT` / `FRONTEND_PORT` |
+| Host ports | `BACKEND_PORT` / `FRONTEND_PORT`, including a bind address |
+| Exposure | both default to loopback; a stack without configured login must not listen publicly |
 | Outbound side effects | Dev must leave Telegram unset; scanner use is deliberate |
 
 The base Compose file no longer hard-codes container names or relative data
