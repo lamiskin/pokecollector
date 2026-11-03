@@ -73,6 +73,60 @@ def run_price_sync():
         db.close()
 
 
+_jp_price_sync_running = False
+
+
+def is_jp_price_sync_running() -> bool:
+    return _jp_price_sync_running
+
+
+def run_jp_price_sync():
+    """Suruga-ya JPY price sync for owned Japanese cards — personal, local-only feature.
+
+    Self-guarding: the scheduler's own interval trigger and the manual
+    /api/sync/prices/jp endpoint both call this same function, so a single
+    flag here (checked before either caller starts real work) is enough to
+    stop them racing and running the full sync twice concurrently.
+    """
+    global _jp_price_sync_running
+    if _jp_price_sync_running:
+        logger.info("Suruga-ya JP price sync already running, skipping")
+        return
+
+    import datetime as dt
+
+    from database import SessionLocal
+    from models import SyncLog
+    from services.suruga_ya_pricing import sync_jp_prices_for_collection
+
+    _jp_price_sync_running = True
+    db = SessionLocal()
+    log = SyncLog(started_at=dt.datetime.utcnow(), status="running", sync_type="jp_price")
+    db.add(log)
+    db.commit()
+    try:
+        logger.info("Starting scheduled Suruga-ya JP price sync...")
+        result = sync_jp_prices_for_collection(db)
+        log.status = "success"
+        log.cards_updated = result["updated"]
+        log.error_message = (
+            f"attempted={result['attempted']} no_match={result['no_match']} failed={result['failed']}"
+        )
+        logger.info(
+            "Scheduled JP price sync completed: attempted=%s updated=%s no_match=%s failed=%s",
+            result["attempted"], result["updated"], result["no_match"], result["failed"],
+        )
+    except Exception as e:
+        log.status = "error"
+        log.error_message = str(e)
+        logger.error(f"Scheduled JP price sync failed: {e}")
+    finally:
+        log.finished_at = dt.datetime.utcnow()
+        db.commit()
+        db.close()
+        _jp_price_sync_running = False
+
+
 def run_scan_queue_maintenance():
     """Recover, process, and expire persistent background scans."""
     import asyncio
@@ -207,6 +261,16 @@ def start_scheduler():
             name="Pokemon TCG Price Sync",
             replace_existing=True,
             next_run_time=now_utc + datetime.timedelta(minutes=price_interval_minutes),
+        )
+
+        # Suruga-ya JPY price sync for owned Japanese cards — personal, local-only.
+        scheduler.add_job(
+            run_jp_price_sync,
+            trigger=IntervalTrigger(weeks=1),
+            id="jp_price_sync_job",
+            name="Suruga-ya JP Price Sync",
+            replace_existing=True,
+            next_run_time=now_utc + datetime.timedelta(minutes=5),
         )
 
         scheduler.add_job(
