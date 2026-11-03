@@ -81,9 +81,9 @@ resolved; keep release tags and stable history.
 
 ## Dev and Prod
 
-Recommended placement is local Dev and another host Prod; actual placement and any
-existing deployment must be verified before implementation. Both on one host
-is also supported by the design, not by the current Compose configuration.
+Both instances currently run locally on the development machine, with no image
+registry: images are built once and pinned by ID in `.env.prod`. Moving Prod to
+another host later requires exporting the images plus a database and media copy.
 
 - Separate Compose projects, deployment directories, configuration, networks,
   databases, secrets, auth files, photos, uploads, caches and backups.

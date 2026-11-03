@@ -66,10 +66,12 @@ A Dev copy is a snapshot; it never syncs back.
 
 ### Prod (first cutover)
 
-The authoritative collection is the local volume
+The authoritative collection was the old local volume
 `pokecollector_postgres_data` (168 rows, 176 copies, 168 own photos, verified
-2026-11-03). Logical backups are in `~/backups/pokecollector/2026-11-03` and on
-another host in `/opt/backups/pokecollector/2026-11-03`.
+2026-11-03). Its verified backups are in `~/backups/pokecollector/2026-11-03`,
+with an off-host copy under `/opt/backups/pokecollector/2026-11-03`. Prod was
+seeded from that dump on 2026-11-03; repeat the procedure only when rebuilding
+or re-seeding an instance.
 
 1. Take a fresh backup immediately before cutover.
 2. Start only the new Prod database, restore into it, then start the app.
