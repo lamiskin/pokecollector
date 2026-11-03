@@ -28,11 +28,14 @@ Use a dedicated worktree for each writing lane. If a branch is already checked
 out elsewhere, use that worktree only if it is yours and clean; otherwise stop
 and coordinate. Confirm `origin` is our fork and `upstream` is the source repo.
 
-## 1. Initial migration (once, separately approved)
+## 1. Initial migration (completed 2026-11-03)
+
+This section is retained as the record of what was done; repeat any step only
+for a new host or instance.
 
 1. Inventory local and remote branches, open/merged upstream PRs, worktrees and
    running/stopped deployments. Locate the actual database and all photo/media
-   storage on each host. Do not assume the old deployment is on another host.
+   storage on each host. Do not assume an old deployment shares this host.
 2. Record and preserve `testing`/`prod` and all feature tips before any resets,
    renames or deletions. Preserve uncommitted work separately without committing
    secrets. Take and restore-test a consistent database/media backup before
