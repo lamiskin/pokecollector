@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
@@ -46,7 +46,23 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("Starting Pokemon TCG Collection API...")
     from api.auth import env_user_mode
+    from services.auth_policy import AuthConfigError, validate_startup_auth_config
+
     _forced_mode = env_user_mode(warn_invalid=True)
+    # Syntax-only validation: fail closed before any database mutation or upgrade
+    # backup. No provider network access happens here.
+    try:
+        _auth_policy = validate_startup_auth_config(user_mode=_forced_mode)
+    except AuthConfigError as exc:
+        # Messages name configuration variables only, never secret values.
+        raise RuntimeError(f"Invalid authentication configuration: {exc}") from exc
+    if _auth_policy.authentication_required:
+        logger.info(
+            "AUTH_MODE=%s: authentication is mandatory; password login %s, OIDC %s.",
+            _auth_policy.auth_mode,
+            "enabled" if _auth_policy.password_login_enabled else "disabled",
+            "enabled" if _auth_policy.oidc_enabled else "disabled",
+        )
     if _forced_mode == "single":
         logger.warning(
             "USER_MODE=single: single-user mode is forced and the login screen is disabled "
@@ -57,7 +73,7 @@ async def lifespan(app: FastAPI):
         logger.info("USER_MODE=multi: multi-user mode is forced; the in-app toggle is disabled.")
     current_version = read_app_version()
     from database import DATABASE_URL, SessionLocal, engine, init_db
-    from services.auth import bootstrap_admin
+    from services.auth_admin import initialize_admin_accounts
     from services.pre_upgrade_backup import maybe_create_pre_upgrade_backup, record_successful_app_version
     maybe_create_pre_upgrade_backup(engine, DATABASE_URL, current_version)
     init_db()
@@ -65,7 +81,11 @@ async def lifespan(app: FastAPI):
 
     db = SessionLocal()
     try:
-        bootstrap_admin(db)
+        # Local/mixed keep the legacy password bootstrap. OIDC-only never mints a
+        # password administrator: it validates that an active administrator is
+        # already linked to the configured issuer (start mixed first, link, then
+        # switch) and aborts startup with an actionable error otherwise.
+        initialize_admin_accounts(db, _auth_policy)
         from services.public_profile import migrate_public_profile_handles
         public_handle_migration = migrate_public_profile_handles(db)
         if public_handle_migration["migrated"] or public_handle_migration["disabled"]:
@@ -120,6 +140,95 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
 )
+
+
+_OIDC_CORS_RESPONSE_HEADERS = (
+    "access-control-allow-origin",
+    "access-control-allow-credentials",
+    "access-control-allow-methods",
+    "access-control-allow-headers",
+    "access-control-max-age",
+)
+
+
+def _finish_oidc_response(response):
+    """Force no-store/no-referrer and remove any wildcard CORS echo."""
+    for header in _OIDC_CORS_RESPONSE_HEADERS:
+        if header in response.headers:
+            del response.headers[header]
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
+
+
+@app.middleware("http")
+async def oidc_cors_and_error_boundary(request: Request, call_next):
+    """Scope exact-origin CORS to OIDC and keep security headers outermost.
+
+    This middleware is added after ``CORSMiddleware``, so it is outer to it:
+    unauthorized OIDC preflights are rejected before the global wildcard policy
+    can echo a credential-bearing origin, and any CORS headers the global
+    middleware added to an OIDC response are stripped. It also converts an
+    unhandled OIDC exception into a generic 500 *inside* the user middleware
+    stack so no-store/no-referrer still apply. Legacy endpoints are untouched.
+    It never reads or logs query strings, codes, states or cookie values.
+    """
+    from services.auth_policy import AuthConfigError, load_auth_policy
+
+    path = request.url.path
+    if not path.startswith("/api/auth/oidc"):
+        return await call_next(request)
+
+    if request.method == "OPTIONS":
+        try:
+            policy = load_auth_policy()
+        except AuthConfigError:
+            return _finish_oidc_response(
+                JSONResponse(
+                    status_code=503,
+                    content={"detail": "Authentication is misconfigured"},
+                )
+            )
+        if policy.oidc is None:
+            return _finish_oidc_response(
+                JSONResponse(status_code=404, content={"detail": "Not found"})
+            )
+        origin = request.headers.get("origin")
+        if origin is None or origin != policy.oidc.app_origin:
+            return _finish_oidc_response(
+                JSONResponse(
+                    status_code=403,
+                    content={"detail": "Invalid request origin"},
+                )
+            )
+        response = _finish_oidc_response(Response(status_code=204))
+        # Exact configured origin only; never `*` and never a reflected
+        # arbitrary origin with credentials.
+        response.headers["Access-Control-Allow-Origin"] = policy.oidc.app_origin
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = (
+            "Authorization, Content-Type"
+        )
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Max-Age"] = "600"
+        response.headers["Vary"] = "Origin"
+        return response
+
+    try:
+        response = await call_next(request)
+    except Exception as exc:  # noqa: BLE001 - OIDC boundary must fail generic
+        # Class name only: never let an exception message containing a callback
+        # URL/query/token reach the logs.
+        logger.warning(
+            "Unhandled OIDC request failure (%s)", type(exc).__name__
+        )
+        return _finish_oidc_response(
+            JSONResponse(
+                status_code=500,
+                content={"detail": "Internal server error"},
+            )
+        )
+    return _finish_oidc_response(response)
 
 
 

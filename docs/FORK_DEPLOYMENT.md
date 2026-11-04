@@ -47,9 +47,9 @@ netbird devices, bind only the frontend:
 
 ```bash
 # .env.prod
-FRONTEND_PORT=100.98.173.68:3000
+FRONTEND_PORT=100.64.0.10:3000
 # .env.dev
-FRONTEND_PORT=100.98.173.68:13000
+FRONTEND_PORT=100.64.0.10:13000
 ```
 
 Then allow the port on that interface, or UFW's default deny will drop it:
@@ -83,6 +83,23 @@ does **not** apply after a restore. Reset it from inside the instance:
 ```
 
 Then confirm a real login through the frontend, not just the API.
+
+### Native OIDC sign-in
+
+Both instance env examples carry `AUTH_MODE` and the `OIDC_*` settings, but
+OIDC stays off while `AUTH_MODE=local`. Native OIDC is optional and
+per-instance: configuring Dev never enables it on Prod, and it does not change
+the Compose project, volume or media isolation above.
+
+- Start an existing instance in `AUTH_MODE=mixed`, link the administrator from
+  Settings, then switch to `oidc-only` if password login should be disabled.
+- `oidc-only` refuses to start without an active linked administrator. OIDC
+  issuer/redirect URIs must be HTTPS, or plain HTTP only for literal loopback
+  development.
+- `OIDC_CLIENT_SECRET` belongs only in the private instance env file.
+
+See [OpenID Connect Authentication](OIDC_AUTHENTICATION.md) for provider
+registration, account linking, recovery and the security model.
 
 ## Build the fork images once
 

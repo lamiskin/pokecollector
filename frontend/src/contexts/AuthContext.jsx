@@ -18,6 +18,15 @@ export function AuthProvider({ children }) {
   const [authStatus, setAuthStatus] = useState('loading')
   const [multiUser, setMultiUser] = useState(true)
   const [modeLocked, setModeLocked] = useState(false)
+  // Legacy defaults keep the password form available if an older backend does
+  // not send the capability fields. Login never renders before bootstrap
+  // resolves, so these values only describe the pre-request fallback.
+  const [authCapabilities, setAuthCapabilities] = useState({
+    authMode: 'local',
+    passwordLoginEnabled: true,
+    oidcEnabled: false,
+    oidcDisplayName: '',
+  })
   const [bootstrapVersion, setBootstrapVersion] = useState(0)
 
   useEffect(() => {
@@ -35,6 +44,12 @@ export function AuthProvider({ children }) {
 
         setMultiUser(result.multiUser)
         setModeLocked(result.modeLocked)
+        setAuthCapabilities({
+          authMode: result.authMode,
+          passwordLoginEnabled: result.passwordLoginEnabled,
+          oidcEnabled: result.oidcEnabled,
+          oidcDisplayName: result.oidcDisplayName,
+        })
         setUser(result.user)
 
         if (result.clearToken) localStorage.removeItem('token')
@@ -103,6 +118,7 @@ export function AuthProvider({ children }) {
       connectionError,
       multiUser,
       modeLocked,
+      ...authCapabilities,
       loginUser,
       updateCurrentUser,
       logout,

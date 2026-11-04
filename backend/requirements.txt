@@ -18,3 +18,5 @@ bcrypt
 python-jose[cryptography]
 slowapi==0.1.9
 beautifulsoup4==4.12.3
+Authlib==1.9.3
+httpx2==2.16.0

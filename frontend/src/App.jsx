@@ -31,6 +31,7 @@ const Settings = lazy(() => import('./pages/Settings'))
 const CardMigration = lazy(() => import('./pages/CardMigration'))
 const ScanQueue = lazy(() => import('./pages/ScanQueue'))
 const Login = lazy(() => import('./pages/Login'))
+const OidcComplete = lazy(() => import('./pages/OidcComplete'))
 const Leaderboard = lazy(() => import('./pages/Leaderboard'))
 const Compare = lazy(() => import('./pages/Compare'))
 const Achievements = lazy(() => import('./pages/Achievements'))
@@ -205,6 +206,7 @@ export default function App() {
             <Routes>
               {import.meta.env.DEV && <Route path="/__card-system" element={lazyRoute(<CardSystemGallery />)} />}
               <Route path="/login" element={lazyRoute(<Login />)} />
+              <Route path="/auth/oidc/complete" element={lazyRoute(<OidcComplete />)} />
               <Route path="/u" element={<PublicRoutes />}>
                 <Route index element={lazyRoute(<PublicDirectory />)} />
                 <Route path=":handle" element={lazyRoute(<PublicProfile />)} />
