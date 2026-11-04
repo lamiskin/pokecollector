@@ -108,7 +108,8 @@ registration, account linking, recovery and the security model.
 Prod must run the same bytes that were tested in Dev. The Fork Release workflow
 (`.github/workflows/fork-release.yml`) builds them from an immutable
 `fork-v<version>-<n>` tag, publishes them to GHCR, and records their digests in
-the release's `release-manifest.json`.
+the release's `release-manifest.json`. Published releases are listed in
+[`RELEASES.md`](RELEASES.md).
 
 Set the published digests in `.env.prod`. The release ships an already-pinned
 `pokecollector.env.example`; copy those two lines rather than retyping them:

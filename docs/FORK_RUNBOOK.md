@@ -201,6 +201,8 @@ decision to accept.
    digests, platform, test evidence), a digest-pinned `pokecollector.env.example`
    and `docker-compose.yml`. Images are `ghcr.io/<owner>/pokecollector-backend`
    and `-frontend`, tagged with the release tag and labelled with the fork SHA.
+   Add a row for it to [`docs/RELEASES.md`](RELEASES.md) — that register is the
+   repository's own record of what was published.
 6. Temporarily run the **clean release candidate** in Dev, not Dev's extra
    experimental combination, using the published digests. Exercise migrations
    on an approved copy of representative data and smoke-test the app.
