@@ -2,7 +2,9 @@
 
 This is the fork-specific companion to [DEPLOYMENT.md](DEPLOYMENT.md), which
 describes upstream's single-instance install with published images. This fork
-cannot use those images — they lack its features — so it builds its own.
+cannot use those images — they lack its features — so it publishes and pulls
+its own fork images (release procedure: [FORK_RUNBOOK.md](FORK_RUNBOOK.md)
+step 6).
 
 Two independent instances run from this checkout as separate Compose projects:
 `pokecollector-dev` and `pokecollector-prod`. They share code, never state.
@@ -101,15 +103,32 @@ the Compose project, volume or media isolation above.
 See [OpenID Connect Authentication](OIDC_AUTHENTICATION.md) for provider
 registration, account linking, recovery and the security model.
 
-## Build the fork images once
+## Fork release images
 
-Prod must run the same bytes that were tested in Dev, so build once and pin.
+Prod must run the same bytes that were tested in Dev. The Fork Release workflow
+(`.github/workflows/fork-release.yml`) builds them from an immutable
+`fork-v<version>-<n>` tag, publishes them to GHCR, and records their digests in
+the release's `release-manifest.json`.
+
+Set the published digests in `.env.prod`. The release ships an already-pinned
+`pokecollector.env.example`; copy those two lines rather than retyping them:
+
+```bash
+podman pull ghcr.io/<owner>/pokecollector-backend@sha256:<digest>
+podman pull ghcr.io/<owner>/pokecollector-frontend@sha256:<digest>
+./scripts/instance.sh prod up -d   # pulls anything missing locally
+```
+
+A local build is the fallback when the release workflow is unavailable:
 
 ```bash
 ./scripts/instance.sh prod build --no-cache backend frontend
 podman image inspect pokecollector-backend:prod pokecollector-frontend:prod \
-  --format '{{.Id}} {{.RepoDigests}}'   # record both in the release manifest
+  --format '{{.Id}} {{.RepoDigests}}'
 ```
+
+That build is a different artifact from a published release: record its IDs and
+do not present it as the release digests.
 
 ## Seed an instance
 
@@ -153,16 +172,22 @@ rehearsed in Dev first, with a copy of the Dev database taken beforehand.
 
 ## Upgrade and release
 
-1. Accept work into `fork/main`.
+1. Accept work into `fork/main` and push it.
 2. Cut `release/<version>-fork.<n>` from it and freeze the commit.
-3. Build images from that commit; label and record their IDs.
-4. Deploy those exact images to Dev, run the migrations and smoke-test.
-5. Only then pin the same images in `.env.prod` and restart Prod.
-6. Record the release tag, image IDs, backup used and verification results.
+3. Optionally rehearse: `gh workflow run fork-release.yml --ref <release-branch>
+   -f tag=fork-v<version>-<n> -f publish=false`.
+4. Push the annotated `fork-v<version>-<n>` tag. The workflow runs the gates,
+   publishes the images, and creates the release with the manifest and pinned
+   env example.
+5. Read the digests from `release-manifest.json` in that release.
+6. Deploy those exact digests to Dev, run the migrations and smoke-test.
+7. Only then pin the same digests in `.env.prod` and restart Prod.
+8. Record the release tag, digests, backup used and verification results.
 
 ## Rollback
 
-- Code only, schema compatible: point `.env.prod` back at the previous image IDs.
+- Code only, schema compatible: point `.env.prod` back at the previous
+  release's digests.
 - Schema changed: restore the matching database backup **and** the previous
   images, accepting loss of writes since that backup. Confirm schema
   compatibility before attempting an image-only rollback.
@@ -170,7 +195,7 @@ rehearsed in Dev first, with a copy of the Dev database taken beforehand.
 
 ## Moving Prod to another host
 
-Both instances currently run on the development desktop. To move Prod: build or
-export the images, copy the dump plus `instances/prod` media, and set up the
-target's `.env.prod` with its own ports. The old host's data stays until the new
-one is verified.
+Both instances currently run on the development desktop. To move Prod: copy the
+database dump plus `instances/prod` media, set up the target's `.env.prod` with
+the release digests and its own ports, and let Compose pull the images. The old
+host's data stays until the new one is verified.

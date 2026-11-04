@@ -168,21 +168,60 @@ decision to accept.
    `git worktree add -b release/1.55.1-fork.1 ../pokecollector-release fork/main`.
    No experimental branch merges after selection.
 2. Commit release fixes on the release branch, merge them back into `fork/main`,
-   and freeze an exact release SHA reachable from `fork/main`. No tag until the
-   final candidate is tested; a subsequent change invalidates affected evidence.
-3. Build our frontend/backend images once from that SHA, with source labels.
-   Pin sidecar images too. Use a registry/delivery mechanism chosen during
-   deployment implementation. Do not substitute upstream's prebuilt app images.
-4. Record upstream base SHA, fork SHA, full image references and digests, build
-   platforms, configuration version (not secrets), migration version and test
-   evidence in an immutable release manifest. Keep host-specific/secrets-bearing
-   deployment records outside public Git. Ensure architectures are supported.
-5. Temporarily run the **clean release candidate** in Dev, not Dev's extra
-   experimental combination. Use the same digests intended for Prod. Exercise
-   migrations on an approved copy of representative data and smoke-test the app.
-6. After acceptance, create an annotated tag such as `fork-v1.55.1-1` pointing
-   at the tested SHA and push that explicit tag with authorization. Never move
-   an existing release tag. A failed candidate gets fixes and renewed testing.
+   push `fork/main`, and freeze an exact release SHA reachable from the remote
+   `fork/main`. No tag until the final candidate is tested; a subsequent change
+   invalidates affected evidence.
+3. Push the release branch, then rehearse the pipeline from it before tagging:
+
+   ```sh
+   git push -u origin release/1.55.1-fork.1
+   gh workflow run fork-release.yml \
+     --ref release/1.55.1-fork.1 \
+     -f tag=fork-v1.55.1-1 \
+     -f publish=false
+   ```
+
+   The dry run runs the gates and builds both images; it pushes nothing and
+   creates no release. It needs the workflow on the repository's default branch
+   (`fork/main`; see the prerequisites below).
+4. Create the annotated tag on the frozen SHA and push only that tag, with
+   authorization. The tag push is the release commitment and is what publishes
+   the images and the GitHub release:
+
+   ```sh
+   git tag -a fork-v1.55.1-1 -m "Fork release 1.55.1-1" <frozen-sha>
+   git push origin refs/tags/fork-v1.55.1-1
+   ```
+
+   The workflow refuses a tag that is not annotated, not reachable from
+   `fork/main`, or whose version does not match `VERSION`. It never moves an
+   existing release and never rebuilds an image already built from the same
+   commit.
+5. The release carries `release-manifest.json` (upstream base SHA, fork SHA,
+   digests, platform, test evidence), a digest-pinned `pokecollector.env.example`
+   and `docker-compose.yml`. Images are `ghcr.io/<owner>/pokecollector-backend`
+   and `-frontend`, tagged with the release tag and labelled with the fork SHA.
+6. Temporarily run the **clean release candidate** in Dev, not Dev's extra
+   experimental combination, using the published digests. Exercise migrations
+   on an approved copy of representative data and smoke-test the app.
+7. After acceptance, pin the same digests in `.env.prod` and deploy to Prod
+   without rebuilding images on the server.
+
+Prerequisites, once per repository. These are repository settings, not commits:
+
+- Make `fork/main` the default branch. `workflow_dispatch` needs the workflow
+  on the default branch (or a previous run), and the upstream `main` mirror
+  cannot carry it.
+- Disable the inherited upstream `Release` workflow
+  (`gh workflow disable "Release"`), so it stops creating `v<version>` releases
+  that contain upstream images rather than fork builds.
+- Set both GHCR packages to public once, after the first push. They start
+  private, and the workflow's anonymous-access check fails with that
+  instruction until the visibility is changed.
+
+Fallback: a local build from the frozen SHA is acceptable only when the release
+workflow cannot be used. Record its image IDs or digests, and treat it as a
+different artifact with its own evidence, not as the published release.
 
 Minimum release checks: current required backend/frontend tests and build/CI
 checks, rendered Compose validation, startup/readiness and API checks, then

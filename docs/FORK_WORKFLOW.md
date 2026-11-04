@@ -62,9 +62,10 @@ Upstream branches must not depend on `fork/main` or merge `dev`/personal patches
 4. **Prepare a release:** branch `release/<upstream-version>-fork.<n>` from the
    stable fork, without adding experiments. Return release fixes to `fork/main`
    before freezing the final release commit.
-5. **Validate and promote:** build our images from that exact commit, deploy the
-   clean release candidate to Dev, then deploy the same pinned image digests to
-   Prod after approval and a verified backup.
+5. **Build and validate:** push the immutable annotated tag; the Fork Release
+   workflow builds our images from that exact commit, publishes them, and
+   writes the release manifest. Deploy the clean release candidate to Dev by
+   digest, then the same digests to Prod after approval and a verified backup.
 
 Prod uses immutable annotated tags, for example `fork-v1.55.1-1`. The upstream
 version is a reference point, not a claim that the fork equals upstream. Record
@@ -72,6 +73,12 @@ the exact upstream base SHA, fork SHA, image digests, platform and migration
 details in a release manifest. Rebuilds with different digests are different
 artifacts and require validation. Do not deploy stock upstream images in place
 of fork images: they do not contain our extras.
+
+Fork images are built and published by `.github/workflows/fork-release.yml` to
+`ghcr.io/<owner>/pokecollector-{backend,frontend}`, tagged with the release tag
+and pinned by digest. Upstream's `.github/workflows/release.yml` is inherited
+verbatim: it targets Git-Romer's namespace, reuses upstream images, and is not
+the fork's release pipeline. Do not push fork commits through it.
 
 When upstream squash-merges our PR, its SHA differs from our original commits.
 Reconcile overlapping code on the next `sync/*` branch; do not infer missing
@@ -81,9 +88,11 @@ resolved; keep release tags and stable history.
 
 ## Dev and Prod
 
-Both instances currently run locally on the development machine, with no image
-registry: images are built once and pinned by ID in `.env.prod`. Moving Prod to
-another host later requires exporting the images plus a database and media copy.
+Both instances run locally from this checkout. Fork images are published to
+GHCR by the release workflow and pinned by digest in `.env.prod`; a local build
+remains a fallback, but it is a different artifact and needs its own evidence.
+Moving Prod to another host requires a database and media copy plus the
+release's pinned digests.
 
 - Separate Compose projects, deployment directories, configuration, networks,
   databases, secrets, auth files, photos, uploads, caches and backups.

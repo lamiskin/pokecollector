@@ -32,6 +32,10 @@ intentionally excludes tests, documentation and translation catalogs.
 - `release/*` starts from stable; return release fixes to `fork/main`. Prod
   deploys an immutable `fork-v<upstream-version>-<n>` tag's tested fork images
   by digest. Never substitute upstream images or rebuild during promotion.
+- `.github/workflows/fork-release.yml` is the fork's release pipeline: it builds
+  from the tag, publishes to GHCR and writes the manifest. The inherited
+  upstream `release.yml` targets Git-Romer's namespace and is not ours; do not
+  release fork commits through it.
 - Branch names imply destination, not confidentiality. No secrets or unapproved
   personal data in Git. Never publish, commit, open PRs or deploy without the
   authorization required by the task and global guidance.
