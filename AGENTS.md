@@ -60,6 +60,17 @@ intentionally excludes tests, documentation and translation catalogs.
   `git log --format= --name-only <base>..HEAD | sort -u` then check for `.env`,
   `data/`, `backups/`, keys, dumps, photos and personal identifiers. The fork
   repository is **public**: `personal/*` is not private, only fork-scoped.
+- **Mandatory privacy gate:** Before any push, tag, release, or image/artifact
+  publication, inspect the exact outgoing refs and commits against the actual
+  remote, including full diffs, commit/tag metadata, generated assets, and image
+  build contexts. Scan for secrets, personal names/emails/usernames, private
+  hostnames/domains, real IP/MAC addresses, and VPN/WireGuard/NetBird/LAN
+  identifiers. Use the private global denylist; never copy it into this public
+  repository or its artifacts. Review and classify every hit; if a scan is
+  incomplete or any hit is unapproved or uncertain, stop and ask—do not push.
+  For a release tag, scan its annotation, all newly exposed reachable commits,
+  and release assets, not just the final tree. Report the exact refs/range and
+  scan outcome before publishing.
 - Never commit or push scanned card photos, `test-images/`, database dumps,
   `.env*` files (templates are fine), auth keys or collection exports. The
   ignores exist for this reason; never force-add around them.
