@@ -1840,6 +1840,12 @@ class DeterministicMatchingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(confident)
         self.assertEqual(decision, "artist_hp")
 
+    def test_artist_normalization_ignores_ocr_commas(self):
+        self.assertEqual(_normalize_artist("PLANETA, Mochizuki"), "planeta mochizuki")
+        self.assertEqual(_normalize_artist("PLANETA,Mochizuki"), "planeta mochizuki")
+        self.assertEqual(_normalize_artist("PLANETA Mochizuki"), "planeta mochizuki")
+        self.assertEqual(_normalize_artist("nagimiso"), "nagimiso")
+
     def test_number_and_set_metadata_resolve_ambiguous_reprints(self):
         recognized = normalize_recognized_card_info({
             "number_local": "52",

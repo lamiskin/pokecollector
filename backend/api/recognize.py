@@ -342,7 +342,9 @@ def _normalize_artist(value) -> str | None:
     if not value:
         return None
     stripped = _ARTIST_PREFIX.sub("", str(value))
-    collapsed = " ".join(stripped.split()).strip().casefold()
+    # Commas are OCR noise, not part of an illustrator credit, so a misread
+    # "PLANETA, Mochizuki" must still match the catalogue's "PLANETA Mochizuki".
+    collapsed = " ".join(re.split(r"[\s,]+", stripped)).strip().casefold()
     return collapsed or None
 
 
