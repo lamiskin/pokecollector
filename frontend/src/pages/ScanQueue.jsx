@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, Clock3, Loader2, ScanLine, Trash2 } from 'lucide-react'
+import { ArrowLeft, Clock3, Loader2, RefreshCw, ScanLine, Search, Trash2 } from 'lucide-react'
 import toast from 'react-hot-toast'
 import {
   deleteScanJob,
@@ -24,6 +24,7 @@ import {
   scanJobPollInterval,
 } from '../utils/scanJobs'
 import { formatRetryCountdown } from '../utils/retryCountdown'
+import { searchGoogleByPhoto } from '../utils/cardLookup'
 
 function useRetryClock(enabled) {
   const [now, setNow] = useState(() => Date.now())
@@ -114,7 +115,7 @@ function JobDetail({ jobId, onObscuredChange }) {
 
   const resolveMutation = useMutation({
     mutationFn: ({ item, cardId = null }) => resolveScanJobItem(jobId, item.id, cardId),
-    onSuccess: (_data, { item }) => {
+    onSuccess: (_data, { item, fromReview }) => {
       // Resolved items stay in job.items (collapsed, not removed — see
       // get_scan_job in backend/api/scan_jobs.py), so "nothing left to do"
       // means no *unresolved* item remains, not an empty list.
@@ -124,6 +125,10 @@ function JobDetail({ jobId, onObscuredChange }) {
       setConfirmation(null)
       invalidate()
       if (remaining.length === 0) navigate('/scans', { replace: true })
+      // A dismiss made from the full-screen walk advances to the next photo,
+      // matching how accepting a match does — otherwise dismissing a no-match
+      // photo strands the reviewer back at the list.
+      else if (fromReview) openNextReview(item.id)
     },
     onError: error => toast.error(error?.response?.data?.detail || t('scanner.actionFailed')),
   })
@@ -144,12 +149,12 @@ function JobDetail({ jobId, onObscuredChange }) {
     onError: error => toast.error(error?.response?.data?.detail || t('scanner.actionFailed')),
   })
 
-  const dismiss = item => setConfirmation({ type: 'dismiss', item })
+  const dismiss = (item, fromReview = false) => setConfirmation({ type: 'dismiss', item, fromReview })
 
   const discardJob = () => setConfirmation({ type: 'discard' })
 
   const confirmDestructiveAction = () => {
-    if (confirmation?.type === 'dismiss') resolveMutation.mutate({ item: confirmation.item })
+    if (confirmation?.type === 'dismiss') resolveMutation.mutate({ item: confirmation.item, fromReview: confirmation.fromReview })
     else if (confirmation?.type === 'discard') deleteMutation.mutate()
   }
 
@@ -162,15 +167,31 @@ function JobDetail({ jobId, onObscuredChange }) {
   const reviewPhoto = useScanItemPhoto(jobId, reviewItem)
 
   // Walk to the next photo still worth looking at, so a batch can be cleared
-  // without going back to the list between cards. Anything already
-  // resolved, failed, or without candidates is skipped — there is nothing to
-  // decide there.
+  // without going back to the list between cards. Anything already resolved or
+  // not yet finished is skipped; a `done` item with no matches is *not* skipped
+  // — the reviewer needs to reach those too, to retry or dismiss them.
   const openNextReview = fromItemId => {
     const start = items.findIndex(candidate => candidate.id === fromItemId)
     const ordered = [...items.slice(start + 1), ...items.slice(0, Math.max(0, start))]
     const next = ordered.find(candidate =>
-      !candidate.resolved && candidate.status === 'done' && (candidate.matches || []).length)
+      !candidate.resolved && candidate.status === 'done')
     setReview(next ? { itemId: next.id, matchIndex: 0 } : null)
+  }
+
+  // Retry triggered from the full-screen no-match surface. Advancing on success
+  // (rather than immediately) matches how accepting a match walks on: the item
+  // only leaves the walk once the retry has actually been accepted by the server.
+  const retryFromReview = item => {
+    retryMutation.mutateAsync(item)
+      .then(() => openNextReview(item.id))
+      .catch(() => {})
+  }
+
+  // Reverse image search on the photo behind the full-screen no-match surface.
+  const searchReviewPhoto = item => {
+    if (!reviewPhoto) return
+    searchGoogleByPhoto(reviewPhoto, `photo-${item.position + 1}`)
+    toast(t('scanner.searchByPhotoSaved'), { duration: 6000 })
   }
 
   if (isLoading) {
@@ -256,6 +277,45 @@ function JobDetail({ jobId, onObscuredChange }) {
             : card => setAddSelection({ item: reviewItem, match: card, fromReview: true })}
           onClose={() => setReview(null)}
           t={t}
+        />
+      )}
+
+      {/* Full-screen surface for a `done` item that came back with no matches.
+          The walk now lands here too (see openNextReview), so the reviewer gets
+          a clear, actionable message instead of being silently skipped. The
+          photo is the content — same frame and zoom as a matched item so the
+          walk feels continuous — with Retry / Dismiss / search-by-photo beneath. */}
+      {reviewItem && !reviewMatch && reviewItem.status === 'done' && !reviewItem.resolved && !addSelection && (
+        <CardZoomModal
+          card={null}
+          photoUrl={reviewPhoto}
+          onClose={() => setReview(null)}
+          t={t}
+          footer={(
+            <div className="space-y-3">
+              <p role="alert" className="rounded-xl border border-border bg-bg-card px-3 py-2 text-center text-sm text-text-muted">
+                {reviewItem.recovery_hint === 'recapture_sharper'
+                  ? t('scanner.tooBlurryRetake')
+                  : reviewItem.error || t('scanner.noMatches')}
+              </p>
+              <div className="flex flex-wrap items-center justify-center gap-2">
+                <button type="button" onClick={() => retryFromReview(reviewItem)} disabled={!reviewItem.has_image}
+                  className="btn-primary justify-center">
+                  <RefreshCw size={14} /> {reviewItem.batch_mode ? t('scanner.retryIndividually') : t('common.retry')}
+                </button>
+                <button type="button" onClick={() => dismiss(reviewItem, true)}
+                  className="btn-ghost border-brand-red/30 text-brand-red hover:bg-brand-red/10">
+                  <Trash2 size={14} /> {t('scanner.dismissScan')}
+                </button>
+                {reviewPhoto && (
+                  <button type="button" onClick={() => searchReviewPhoto(reviewItem)}
+                    className="btn-ghost">
+                    <Search size={14} /> {t('scanner.searchByPhoto')}
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
         />
       )}
 

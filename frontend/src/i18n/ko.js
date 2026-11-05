@@ -942,6 +942,7 @@ const ko = {
     matches: '일치 항목',
     noMatches: '일치 항목을 찾을 수 없습니다',
     noMatchTip: '팁: 더 밝은 조명과 선명한 사진이 도움이 됩니다',
+    tooBlurryRetake: '이 사진은 너무 흐려서 인식할 수 없습니다 – 더 선명한 사진을 다시 찍어 시도해 보세요.',
     scanAgain: '다시 스캔',
     purchasePriceLabel: '구매 가격 (선택 사항)',
     addToCollection: '컬렉션에 추가',

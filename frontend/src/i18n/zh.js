@@ -941,6 +941,7 @@ const zh = {
     matches: '匹配',
     noMatches: '未找到匹配',
     noMatchTip: '提示：更好的光线和清晰的照片有助于识别',
+    tooBlurryRetake: '这张照片太模糊，无法识别 – 请重新拍摄更清晰的照片再试一次。',
     scanAgain: '再次扫描',
     purchasePriceLabel: '购买价格 (可选)',
     addToCollection: '添加到收藏',

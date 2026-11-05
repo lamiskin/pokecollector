@@ -1640,6 +1640,7 @@ const en = {
     useSelectedMatch: 'Use selected match',
     noMatches: 'No matches found',
     noMatchTip: 'Tip: Better lighting and a sharp photo helps',
+    tooBlurryRetake: 'This photo is too blurry to recognize — retake a sharper photo and try again.',
     scanAgain: 'Scan again',
     purchasePriceLabel: 'Purchase price (optional)',
     addToCollection: 'Add to collection',

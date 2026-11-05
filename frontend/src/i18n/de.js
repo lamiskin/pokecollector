@@ -1554,6 +1554,7 @@ const de = {
     useSelectedMatch: 'Treffer verwenden',
     noMatches: 'Keine Treffer gefunden',
     noMatchTip: 'Tipp: Bessere Beleuchtung und scharfes Foto hilft',
+    tooBlurryRetake: 'Dieses Foto ist zu unscharf zum Erkennen – mach ein schärferes Foto und versuch es erneut.',
     scanAgain: 'Nochmal scannen',
     purchasePriceLabel: 'Kaufpreis (optional)',
     addToCollection: 'Zur Sammlung hinzufügen',

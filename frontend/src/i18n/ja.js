@@ -942,6 +942,7 @@ const ja = {
     matches: '一致',
     noMatches: '一致するものが見つかりません',
     noMatchTip: 'ヒント: 明るい場所で鮮明な写真を撮ると改善します',
+    tooBlurryRetake: 'この写真はぼやけていて認識できません – より鮮明な写真を撮り直してもう一度お試しください。',
     scanAgain: 'もう一度スキャン',
     purchasePriceLabel: '購入価格 (任意)',
     addToCollection: 'コレクションに追加',

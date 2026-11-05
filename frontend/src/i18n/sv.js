@@ -932,6 +932,7 @@ const sv = {
     matches: 'Träffar',
     noMatches: 'Inga träffar hittades',
     noMatchTip: 'Tips: Bättre ljusättning och ett skarpt foto hjälper',
+    tooBlurryRetake: 'Bilden är för suddig för att kännas igen – ta en skarpare bild och försök igen.',
     scanAgain: 'Skanna igen',
     purchasePriceLabel: 'Inköpspris (valfritt)',
     addToCollection: 'Lägg till i samlingen',

@@ -942,6 +942,7 @@ const it = {
     matches: 'Corrispondenze',
     noMatches: 'Nessuna corrispondenza trovata',
     noMatchTip: 'Suggerimento: una luce migliore e una foto nitida aiutano',
+    tooBlurryRetake: 'Questa foto è troppo sfocata per essere riconosciuta – scatta una foto più nitida e riprova.',
     scanAgain: 'Scansiona di nuovo',
     purchasePriceLabel: 'Prezzo di acquisto (opzionale)',
     addToCollection: 'Aggiungi alla collezione',

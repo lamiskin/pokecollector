@@ -939,6 +939,7 @@ const fr = {
     matches: 'Correspondances',
     noMatches: 'Aucune correspondance trouvée',
     noMatchTip: 'Astuce : Un bon éclairage et une photo nette peuvent aider',
+    tooBlurryRetake: 'Cette photo est trop floue pour être reconnue – reprenez une photo plus nette et réessayez.',
     scanAgain: 'Scanner à nouveau',
     purchasePriceLabel: 'Prix d\'achat (optionnel)',
     addToCollection: 'Ajouter à la collection',

@@ -941,6 +941,7 @@ const zhTw = {
     matches: '相符',
     noMatches: '未找到相符',
     noMatchTip: '提示：更好的光線和清晰的照片有助於辨識',
+    tooBlurryRetake: '這張照片太模糊，無法辨識 – 請重新拍攝更清晰的照片再試一次。',
     scanAgain: '再次掃描',
     purchasePriceLabel: '購買價格 (選填)',
     addToCollection: '新增到收藏',

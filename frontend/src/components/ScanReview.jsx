@@ -249,7 +249,7 @@ const zoomStyle = ({ scale, x, y }) => scale === 1 ? undefined : {
 }
 
 export function CardZoomModal({
-  card, photoUrl, onClose, t, matches, index = 0, onIndex, onAccept, jobId, itemId, nameEn,
+  card, photoUrl, onClose, t, matches, index = 0, onIndex, onAccept, jobId, itemId, nameEn, footer,
 }) {
   const canNavigate = Array.isArray(matches) && matches.length > 1 && onIndex
   const step = useCallback(delta => {
@@ -402,7 +402,10 @@ export function CardZoomModal({
     : card?.image)
   const cardWidth = photoUrl && card ? COMPARISON_CARD_WIDTH : SOLO_CARD_WIDTH
 
-  if (!card && !photoUrl) return null
+  // `footer` keeps the modal meaningful even without a card or a photo — the
+  // no-match review surface renders its message and actions there, and a scan
+  // item whose stored image is missing still needs those actions reachable.
+  if (!card && !photoUrl && !footer) return null
 
   return createPortal(
     // The backdrop closes the viewer. Card clicks deliberately stop here so
@@ -590,6 +593,14 @@ export function CardZoomModal({
         <p className="flex-shrink-0 pt-2 text-center text-sm text-white/70">
           {index + 1} / {matches.length} · {t('scanner.arrowKeyHint')} · {t('scanner.zoomHint')}
         </p>
+      )}
+      {footer && (
+        // stopPropagation so a mis-aimed tap next to an action doesn't dismiss
+        // the comparison, matching the accept bar above.
+        <div className="flex flex-shrink-0 cursor-default flex-col pt-3"
+          onClick={e => e.stopPropagation()}>
+          {footer}
+        </div>
       )}
     </div>,
     document.body

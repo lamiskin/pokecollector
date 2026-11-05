@@ -1580,6 +1580,7 @@ const da = {
     useSelectedMatch: 'Brug valgt match',
     noMatches: 'Ingen matches fundet',
     noMatchTip: 'Tip: Bedre lys og et skarpt foto hjælper',
+    tooBlurryRetake: 'Dette billede er for uskarpt til at genkende – tag et skarpere billede og prøv igen.',
     scanAgain: 'Scan igen',
     purchasePriceLabel: 'Købspris (valgfrit)',
     addToCollection: 'Tilføj til samling',

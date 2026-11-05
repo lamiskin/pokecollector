@@ -942,6 +942,7 @@ const es = {
     matches: 'Coincidencias',
     noMatches: 'No se encontraron coincidencias',
     noMatchTip: 'Consejo: ayuda tener mejor iluminación y una foto nítida',
+    tooBlurryRetake: 'Esta foto está demasiado borrosa para reconocerla – toma una foto más nítida e inténtalo de nuevo.',
     scanAgain: 'Escanear de nuevo',
     purchasePriceLabel: 'Precio de compra (opcional)',
     addToCollection: 'Añadir a la colección',

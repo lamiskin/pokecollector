@@ -942,6 +942,7 @@ const pl = {
     matches: 'Dopasowania',
     noMatches: 'Nie znaleziono dopasowań',
     noMatchTip: 'Wskazówka: lepsze oświetlenie i ostre zdjęcie pomagają',
+    tooBlurryRetake: 'To zdjęcie jest zbyt nieostre, by je rozpoznać – zrób ostrzejsze zdjęcie i spróbuj ponownie.',
     scanAgain: 'Skanuj ponownie',
     purchasePriceLabel: 'Cena zakupu (opcjonalnie)',
     addToCollection: 'Dodaj do kolekcji',

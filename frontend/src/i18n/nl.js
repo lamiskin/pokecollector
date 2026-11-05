@@ -939,6 +939,7 @@ const nl = {
     matches: 'Overeenkomsten',
     noMatches: 'Geen overeenkomsten gevonden',
     noMatchTip: 'Tip: Beter licht en een scherpe foto helpt',
+    tooBlurryRetake: 'Deze foto is te wazig om te herkennen – maak een scherpere foto en probeer opnieuw.',
     scanAgain: 'Opnieuw scannen',
     purchasePriceLabel: 'Aankoopprijs (optioneel)',
     addToCollection: 'Toevoegen aan collectie',

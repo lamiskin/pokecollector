@@ -943,6 +943,7 @@ const id = {
     matches: 'Cocok',
     noMatches: 'Tidak ada kecocokan ditemukan',
     noMatchTip: 'Tip: Pencahayaan lebih baik dan foto tajam membantu',
+    tooBlurryRetake: 'Foto ini terlalu buram untuk dikenali – ambil foto yang lebih tajam dan coba lagi.',
     scanAgain: 'Pindai lagi',
     purchasePriceLabel: 'Harga beli (opsional)',
     addToCollection: 'Tambahkan ke koleksi',
