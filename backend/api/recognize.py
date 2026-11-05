@@ -1618,6 +1618,7 @@ async def match_card_info(
                             api_key,
                             parts,
                             max_attempts=2,
+                            timeout_seconds=request_timeout_seconds,
                         )
                     pick_match = re.search(r"(\d+)", response_text)
                     selected_position = int(pick_match.group(1)) if pick_match else None
@@ -1770,6 +1771,7 @@ async def _recognize_with_provider(
                 api_key,
                 [text_part(RECOGNIZE_PROMPT), image_part(content_type, image_b64)],
                 think=think,
+                timeout_seconds=request_timeout_seconds,
             )
         response_text = response_text.strip()
         if trace:
@@ -2071,6 +2073,7 @@ async def recognize_composite_card_info(
                     text_part(COMPOSITE_PROMPT.format(count=count)),
                     image_part("image/jpeg", image_b64),
                 ],
+                timeout_seconds=request_timeout_seconds,
             )
         response_text = response_text.strip()
         for trace in traces or []:

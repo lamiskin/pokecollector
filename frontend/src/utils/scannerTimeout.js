@@ -1,4 +1,4 @@
-export const SCANNER_REQUEST_TIMEOUT_OPTIONS = [30, 60, 120, 180]
+export const SCANNER_REQUEST_TIMEOUT_OPTIONS = [30, 60, 120, 180, 300]
 export const DEFAULT_SCANNER_REQUEST_TIMEOUT_SECONDS = SCANNER_REQUEST_TIMEOUT_OPTIONS[0]
 
 const normalizedScannerRequestTimeout = (seconds) => (

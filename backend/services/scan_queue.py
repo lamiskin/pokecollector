@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import datetime
 import logging
-import threading
 import uuid
 from dataclasses import dataclass
 
@@ -15,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from models import ScanJob, ScanJobItem, ScanQueueUserState, User
 from services.gemini_rate_limit import gemini_priority_scope
+from services.scan_providers import ProcessWideAsyncSemaphore as _ProcessWideAsyncSemaphore
 from services.scan_storage import (
     ScanUploadError,
     delete_job_directory,
@@ -26,37 +26,16 @@ logger = logging.getLogger(__name__)
 
 MAX_RECOGNITION_ATTEMPTS = 3
 # The largest selectable AI-response timeout can be consumed by three initial
-# recognition attempts and two visual-verification attempts. Twenty minutes
-# leaves several minutes for retry backoff, bounded reference downloads, and
-# database work before another worker may reclaim the item.
-LEASE_SECONDS = 20 * 60
+# recognition attempts and two visual-verification attempts. With the 300s
+# option that is five full budgets, so thirty minutes leaves several minutes
+# for retry backoff, bounded reference downloads, and database work before
+# another worker may reclaim the item.
+LEASE_SECONDS = 30 * 60
 TRANSIENT_BACKOFF_SECONDS = (30, 120, 600, 1800, 3600, 21600)
 RECOGNITION_BACKOFF_SECONDS = (2, 10, 30)
 TERMINAL_ITEM_STATUSES = {"done", "failed"}
 
 MAX_CONCURRENT_SCAN_PROCESSING = 3
-_SCAN_PROCESSING_SLOT_POLL_SECONDS = 0.1
-
-
-class _ProcessWideAsyncSemaphore:
-    """Bound async work across the web and scheduler event loops in one process."""
-
-    def __init__(self, value: int):
-        self._semaphore = threading.BoundedSemaphore(value)
-
-    async def __aenter__(self):
-        # APScheduler drains the queue from a separate event loop, so an
-        # asyncio.Semaphore created at module import can become bound to the
-        # web loop and fail when the scheduler overlaps it. A non-blocking
-        # process-wide semaphore keeps the bound exact without blocking either
-        # loop's thread while all processing slots are occupied.
-        while not self._semaphore.acquire(blocking=False):
-            await asyncio.sleep(_SCAN_PROCESSING_SLOT_POLL_SECONDS)
-        return self
-
-    async def __aexit__(self, exc_type, exc, traceback):
-        self._semaphore.release()
-
 
 _scan_processing_semaphore = _ProcessWideAsyncSemaphore(
     MAX_CONCURRENT_SCAN_PROCESSING
@@ -723,6 +702,9 @@ async def process_claimed_scan_item(
     # Bounds how many of these run at once — see MAX_CONCURRENT_SCAN_PROCESSING
     # for why: the DB session opened just below stays checked out for the
     # entire recognition call, including the slow vision-model HTTP work.
+    # Requests to a single-slot local endpoint are additionally serialized
+    # inside the provider, so this bound covers database and download work
+    # rather than the model itself.
     async with _scan_processing_semaphore:
         db = SessionLocal()
         try:

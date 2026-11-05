@@ -18,6 +18,7 @@ Two rules shape the design:
   local scopes use the administrator-controlled endpoint.
 """
 
+import asyncio
 import base64
 import datetime
 import json
@@ -25,6 +26,7 @@ import logging
 import math
 import os
 import re
+import threading
 from contextlib import nullcontext
 from email.utils import parsedate_to_datetime
 
@@ -47,7 +49,7 @@ SCANNER_REQUEST_TIMEOUT_SETTINGS = {
     GEMINI: "scanner_request_timeout_gemini",
     OPENAI: "scanner_request_timeout_openai",
 }
-SCANNER_REQUEST_TIMEOUT_OPTIONS = (30, 60, 120, 180)
+SCANNER_REQUEST_TIMEOUT_OPTIONS = (30, 60, 120, 180, 300)
 DEFAULT_SCANNER_REQUEST_TIMEOUT_SECONDS = SCANNER_REQUEST_TIMEOUT_OPTIONS[0]
 MAX_SCANNER_REQUEST_TIMEOUT_SECONDS = SCANNER_REQUEST_TIMEOUT_OPTIONS[-1]
 SCANNER_CUSTOM_MODEL_SETTINGS = {
@@ -576,6 +578,43 @@ def image_part_from_bytes(mime_type: str | None, raw: bytes) -> dict:
     return image_part(mime_type, base64.b64encode(raw).decode())
 
 
+_SLOT_POLL_SECONDS = 0.1
+
+
+class ProcessWideAsyncSemaphore:
+    """Bound async work across the web and scheduler event loops in one process.
+
+    A plain asyncio.Semaphore created at import can bind to the first event loop
+    that uses it, and this service runs two (the web request loop and the queue
+    worker's loop). A threaded semaphore polled with asyncio.sleep keeps the
+    bound exact without blocking either loop's thread.
+    """
+
+    def __init__(self, value: int):
+        self._semaphore = threading.BoundedSemaphore(value)
+
+    async def __aenter__(self):
+        while not self._semaphore.acquire(blocking=False):
+            await asyncio.sleep(_SLOT_POLL_SECONDS)
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        self._semaphore.release()
+
+
+# A keyless, self-hosted endpoint is served by one model slot. A second
+# concurrent request waits inside that server, consuming the caller's entire
+# timeout budget, and is then reported as an unreachable endpoint. Serializing
+# here means every request gets its full budget once it reaches the model, no
+# matter how many scan workers are busy.
+_SINGLE_SLOT_ENDPOINT_GATE = ProcessWideAsyncSemaphore(1)
+
+
+def uses_single_slot_endpoint() -> bool:
+    """True when the configured endpoint is a keyless, self-hosted server."""
+    return not openai_requires_key()
+
+
 async def post_openai_chat(
     client: httpx.AsyncClient,
     url: str,
@@ -583,9 +622,9 @@ async def post_openai_chat(
     payload: dict,
     *,
     max_attempts: int = 3,
+    timeout_seconds: int | None = None,
 ) -> httpx.Response:
     """Call a compatible endpoint and normalize its errors for the shared queue."""
-    import asyncio
     from services.provider_rate_limit import (
         ProviderScopeBlockedError,
         penalize_provider_scope,
@@ -596,6 +635,8 @@ async def post_openai_chat(
 
     last_error = None
     scope = provider_scope_fingerprint(OPENAI, url, api_key)
+    # One in-flight request at a time against a single-slot local server.
+    gate = _SINGLE_SLOT_ENDPOINT_GATE if uses_single_slot_endpoint() else nullcontext()
     for attempt in range(max_attempts):
         try:
             try:
@@ -613,7 +654,8 @@ async def post_openai_chat(
                 headers["Authorization"] = f"Bearer {api_key}"
 
             request_started_at = datetime.datetime.utcnow()
-            resp = await client.post(url, headers=headers, json=payload)
+            async with gate:
+                resp = await client.post(url, headers=headers, json=payload)
 
             if resp.status_code == 429:
                 error_type, error_code = openai_error_code(resp)
@@ -698,6 +740,23 @@ async def post_openai_chat(
             return resp
         except HTTPException:
             raise
+        except httpx.TimeoutException:
+            # The request already consumed its whole budget. Retrying re-queues
+            # behind the same backlog and multiplies the wait, so report it once;
+            # the scan queue decides when to try the item again.
+            if timeout_seconds:
+                detail = (
+                    f"The scan took longer than the {timeout_seconds}s scanner "
+                    "timeout. The scanner model may still be busy with another "
+                    "photo; try again once it is free."
+                )
+            else:
+                detail = (
+                    "The scan took longer than the scanner timeout. The scanner "
+                    "model may still be busy with another photo; try again once "
+                    "it is free."
+                )
+            raise HTTPException(status_code=504, detail=detail) from None
         except httpx.RequestError as exc:
             last_error = exc
             if attempt < max_attempts - 1:
@@ -793,6 +852,7 @@ class ScanProvider:
         *,
         max_attempts: int = 3,
         think: bool = False,
+        timeout_seconds: int | None = None,
     ) -> tuple[str, dict | None]:
         """Run one multimodal request and return (text, usage).
 
@@ -833,6 +893,7 @@ class ScanProvider:
             api_key,
             openai_payload,
             max_attempts=max_attempts,
+            timeout_seconds=timeout_seconds,
         )
         try:
             payload = response.json()

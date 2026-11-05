@@ -598,6 +598,7 @@ async def test_scanner_configuration(
                     image_part("image/png", SCANNER_TEST_SECOND_IMAGE_B64),
                 ],
                 max_attempts=3,
+                timeout_seconds=request_timeout_seconds,
             )
         except HTTPException as exc:
             if not (
@@ -623,6 +624,7 @@ async def test_scanner_configuration(
                         image_part("image/png", SCANNER_TEST_IMAGE_B64),
                     ],
                     max_attempts=3,
+                    timeout_seconds=request_timeout_seconds,
                 )
             except HTTPException:
                 if multi_error is not None:

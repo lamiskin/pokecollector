@@ -4,6 +4,8 @@ import unittest
 from contextlib import nullcontext
 from unittest.mock import patch
 
+import httpx
+
 try:
     from fastapi import HTTPException
     from sqlalchemy import create_engine
@@ -193,10 +195,10 @@ class RequestTimeoutResolutionTests(_Fixture, unittest.TestCase):
                 )
 
     def test_normalizer_accepts_only_the_exposed_choices(self):
-        for value in (30, "60", 120, " 180 "):
+        for value in (30, "60", 120, " 180 ", 300):
             with self.subTest(value=value):
                 self.assertEqual(normalize_scanner_request_timeout(value), int(value))
-        for value in (None, True, 0, 29, 45, 181, "60.0"):
+        for value in (None, True, 0, 29, 45, 181, 240, "60.0"):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 normalize_scanner_request_timeout(value)
 
@@ -775,6 +777,134 @@ class TraceRedactionTests(unittest.TestCase):
 
         redacted = _redact_error("key AIzaSyABCDEFGHIJKLMNOPQRSTUVWXYZ0123 failed")
         self.assertNotIn("AIzaSyABCDEFGHIJKLMNOPQRSTUVWXYZ0123", redacted)
+
+
+@unittest.skipUnless(DEPS, "FastAPI/SQLAlchemy are not installed in this environment")
+class ScanTimeoutTests(unittest.TestCase):
+    """A timeout is reported once, with its budget, instead of being retried."""
+
+    def test_a_timeout_is_not_retried_and_names_the_budget(self):
+        attempts = []
+
+        class _TimeoutClient:
+            async def post(self, url, headers=None, json=None):
+                attempts.append(url)
+                raise httpx.ReadTimeout("the read operation timed out")
+
+        with patch("services.provider_rate_limit.raise_if_provider_blocked"), self.assertRaises(
+            HTTPException
+        ) as caught:
+            asyncio.run(
+                post_openai_chat(
+                    _TimeoutClient(),
+                    "http://x/chat/completions",
+                    "",
+                    {},
+                    max_attempts=3,
+                    timeout_seconds=180,
+                )
+            )
+
+        self.assertEqual(len(attempts), 1, "a timeout must not consume more attempts")
+        self.assertEqual(caught.exception.status_code, 504)
+        self.assertIn("180", str(caught.exception.detail))
+        self.assertNotIn("could not be reached", str(caught.exception.detail))
+
+    def test_a_connection_error_is_still_retried(self):
+        attempts = []
+
+        class _UnreachableClient:
+            async def post(self, url, headers=None, json=None):
+                attempts.append(url)
+                raise httpx.ConnectError("connection refused")
+
+        with patch("services.provider_rate_limit.raise_if_provider_blocked"), patch(
+            "asyncio.sleep", new=_noop_async
+        ), self.assertRaises(HTTPException) as caught:
+            asyncio.run(
+                post_openai_chat(
+                    _UnreachableClient(),
+                    "http://x/chat/completions",
+                    "",
+                    {},
+                    max_attempts=3,
+                )
+            )
+
+        self.assertEqual(len(attempts), 3)
+        self.assertEqual(caught.exception.status_code, 503)
+        self.assertIn("could not be reached", str(caught.exception.detail))
+
+
+@unittest.skipUnless(DEPS, "FastAPI/SQLAlchemy are not installed in this environment")
+class SingleSlotEndpointTests(unittest.IsolatedAsyncioTestCase):
+    """A keyless local endpoint must never receive two requests at once."""
+
+    def setUp(self):
+        blocked = patch("services.provider_rate_limit.raise_if_provider_blocked")
+        success = patch("services.provider_rate_limit.record_provider_scope_success")
+        blocked.start()
+        success.start()
+        self.addCleanup(blocked.stop)
+        self.addCleanup(success.stop)
+
+    async def test_a_local_endpoint_is_served_one_request_at_a_time(self):
+        active = 0
+        peak = 0
+
+        class _SlowClient:
+            async def post(self, url, headers=None, json=None):
+                nonlocal active, peak
+                active += 1
+                peak = max(peak, active)
+                try:
+                    await asyncio.sleep(0.05)
+                finally:
+                    active -= 1
+                return _FakeResponse(200, {"choices": [{"message": {"content": "{}"}}]})
+
+        env = {
+            "OPENAI_BASE_URL": LOCAL_URL,
+            "OPENAI_API_KEY_REQUIRED": "false",
+        }
+        with patch.dict(os.environ, env):
+            await asyncio.gather(
+                *[
+                    post_openai_chat(_SlowClient(), "http://x/chat/completions", "", {}, max_attempts=1)
+                    for _ in range(3)
+                ]
+            )
+
+        self.assertEqual(peak, 1)
+
+    async def test_a_hosted_endpoint_keeps_its_parallelism(self):
+        active = 0
+        peak = 0
+
+        class _SlowClient:
+            async def post(self, url, headers=None, json=None):
+                nonlocal active, peak
+                active += 1
+                peak = max(peak, active)
+                try:
+                    await asyncio.sleep(0.05)
+                finally:
+                    active -= 1
+                return _FakeResponse(200, {"choices": [{"message": {"content": "{}"}}]})
+
+        env = {
+            "OPENAI_BASE_URL": DEFAULT_OPENAI_BASE_URL,
+            "OPENAI_API_KEY_REQUIRED": "true",
+        }
+        with patch.dict(os.environ, env):
+            await asyncio.gather(
+                *[
+                    post_openai_chat(_SlowClient(), "http://x/chat/completions", "sk-x", {}, max_attempts=1)
+                    for _ in range(3)
+                ]
+            )
+
+        self.assertGreater(peak, 1)
 
 
 if __name__ == "__main__":
