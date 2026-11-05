@@ -281,6 +281,8 @@ def complete_claim(db: Session, claim: ClaimedScanItem, result: dict) -> bool:
     item.status = "done"
     item.recognized = result.get("recognized")
     item.matches = result.get("matches")
+    item.no_candidates = result.get("_no_candidates")
+    item.recovery_hint = result.get("_recovery_hint")
     item.error = None
     item.lease_token = None
     item.lease_expires_at = None
@@ -309,12 +311,16 @@ def complete_claim_group(
             item.batch_mode = False
             item.recognized = None
             item.matches = None
+            item.no_candidates = None
+            item.recovery_hint = None
             item.next_attempt_at = now
             item.retry_reason = None
         else:
             item.status = "done"
             item.recognized = result.get("recognized")
             item.matches = result.get("matches")
+            item.no_candidates = result.get("_no_candidates")
+            item.recovery_hint = result.get("_recovery_hint")
             item.next_attempt_at = None
             item.retry_reason = None
         item.error = None
@@ -870,6 +876,8 @@ def retry_scan_item(db: Session, item: ScanJobItem) -> ScanJobItem:
     item.lease_expires_at = None
     item.recognized = None
     item.matches = None
+    item.no_candidates = None
+    item.recovery_hint = None
     item.error = None
     item.batch_mode = False
     item.updated_at = now

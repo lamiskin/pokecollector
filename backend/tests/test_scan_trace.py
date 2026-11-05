@@ -153,6 +153,39 @@ class ScanTraceTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(path.with_suffix(".jpg").stat().st_mode), 0o600)
 
+    def test_quality_preflight_is_recorded_only_when_tracing(self):
+        self._enable(self.user)
+        trace = create_scan_trace(self.db, self.user.id, mode="single")
+        trace.record_quality(
+            orientation="rotated_90",
+            sharpness=812.5,
+            is_blurred=False,
+            rotation_applied=True,
+        )
+
+        path = trace.save()
+        payload = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertEqual(
+            payload["quality"],
+            {
+                "orientation": "rotated_90",
+                "sharpness": 812.5,
+                "is_blurred": False,
+                "rotation_applied": True,
+            },
+        )
+
+        disabled = create_scan_trace(self.db, self.other_user.id, mode="single")
+        disabled.record_quality(
+            orientation="upright",
+            sharpness=1900.0,
+            is_blurred=False,
+            rotation_applied=False,
+        )
+        self.assertIsNone(disabled.data["quality"])
+        self.assertIsNone(disabled.save())
+
     def test_errors_are_redacted_before_persistence(self):
         self._enable(self.user)
         trace = create_scan_trace(self.db, self.user.id, mode="single")

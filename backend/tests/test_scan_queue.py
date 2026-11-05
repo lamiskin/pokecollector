@@ -730,6 +730,76 @@ class ScanQueueTests(unittest.TestCase):
         )
         self.assertTrue(complete_claim(self.db, claim, {"recognized": {}, "matches": []}))
 
+    def test_complete_claim_persists_no_candidate_recovery_signal(self):
+        self._job(self.users[0])
+        claim = claim_next_scan_item(self.db)
+
+        self.assertTrue(complete_claim(
+            self.db,
+            claim,
+            {
+                "recognized": {"name": "Unknown"},
+                "matches": [],
+                "_no_candidates": True,
+                "_recovery_hint": "manual_review",
+            },
+        ))
+
+        self.db.expire_all()
+        item = self.db.get(ScanJobItem, claim.item_id)
+        self.assertTrue(item.no_candidates)
+        self.assertEqual(item.recovery_hint, "manual_review")
+
+    def test_complete_claim_clears_a_stale_recovery_signal(self):
+        self._job(self.users[0])
+        item = self.db.query(ScanJobItem).one()
+        item.no_candidates = True
+        item.recovery_hint = "recapture_sharper"
+        self.db.commit()
+        claim = claim_next_scan_item(self.db)
+
+        self.assertTrue(complete_claim(
+            self.db,
+            claim,
+            {"recognized": {"name": "Pikachu"}, "matches": [{"id": "card-25"}], "_no_candidates": False},
+        ))
+
+        self.db.expire_all()
+        item = self.db.get(ScanJobItem, claim.item_id)
+        self.assertFalse(item.no_candidates)
+        self.assertIsNone(item.recovery_hint)
+
+    def test_complete_claim_group_sets_and_resets_no_candidate_signal(self):
+        self._job(self.users[0], positions=(0, 1))
+        items = self.db.query(ScanJobItem).order_by(ScanJobItem.position).all()
+        for item in items:
+            item.batch_mode = True
+        self.db.commit()
+        claim = claim_next_scan_item(self.db)
+        self.assertTrue(claim.composite)
+
+        self.assertTrue(complete_claim_group(
+            self.db,
+            claim,
+            [
+                {
+                    "recognized": {"name": "Unknown"},
+                    "matches": [],
+                    "_no_candidates": True,
+                    "_recovery_hint": "recapture_sharper",
+                },
+                None,
+            ],
+        ))
+
+        self.db.expire_all()
+        items = self.db.query(ScanJobItem).order_by(ScanJobItem.position).all()
+        self.assertEqual([item.status for item in items], ["done", "pending"])
+        self.assertTrue(items[0].no_candidates)
+        self.assertEqual(items[0].recovery_hint, "recapture_sharper")
+        self.assertIsNone(items[1].no_candidates)
+        self.assertIsNone(items[1].recovery_hint)
+
     def test_expired_processing_lease_is_recovered(self):
         self._job(self.users[0])
         claim = claim_next_scan_item(self.db)
@@ -923,6 +993,22 @@ class ScanQueueTests(unittest.TestCase):
         self.assertFalse(item.batch_mode)
         self.assertEqual(job.status, "pending")
         self.assertIsNone(job.finished_at)
+
+    def test_retry_clears_no_candidate_recovery_signal(self):
+        job = self._job(self.users[0])
+        item = self.db.query(ScanJobItem).one()
+        job_dir = scan_storage.scan_upload_root() / str(job.id)
+        job_dir.mkdir()
+        (job_dir / "0.jpg").write_bytes(b"jpeg")
+        item.status = "done"
+        item.no_candidates = True
+        item.recovery_hint = "manual_review"
+        self.db.commit()
+
+        retry_scan_item(self.db, item)
+
+        self.assertIsNone(item.no_candidates)
+        self.assertIsNone(item.recovery_hint)
 
     def test_progress_counts_only_reviewable_items_as_attention(self):
         job = self._job(self.users[0], positions=(0, 1, 2, 3))

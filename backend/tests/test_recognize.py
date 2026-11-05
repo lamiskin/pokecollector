@@ -1,6 +1,7 @@
 import base64
 import asyncio
 import contextlib
+import io
 import unittest
 from unittest.mock import ANY, AsyncMock, Mock, patch
 
@@ -34,6 +35,7 @@ try:
         retain_ranked_candidates,
         select_search_candidates,
         _search_and_rank_candidates,
+        _recognize_with_provider,
     )
     from sqlalchemy import create_engine, text
     from sqlalchemy.exc import OperationalError
@@ -45,6 +47,17 @@ try:
 except ModuleNotFoundError:
     HTTPException = Exception
     API_TEST_DEPS_AVAILABLE = False
+
+# Quality preflight needs Pillow. Kept separate from the FastAPI guard above so
+# a lightweight environment still runs the rest of the recognize tests.
+try:
+    from PIL import Image, ImageDraw
+
+    from services.scan_quality import ScanQuality
+
+    QUALITY_TEST_DEPS_AVAILABLE = True
+except ModuleNotFoundError:  # pragma: no cover - Pillow is a backend dependency
+    QUALITY_TEST_DEPS_AVAILABLE = False
 
 
 # A decodable 1x1 PNG: visual verification only shows decodable references.
@@ -2084,6 +2097,142 @@ class DeterministicMatchingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(result["matches"]), 9)
         self.assertEqual(result["matches"][0]["id"], "late-match")
         self.assertIn("baseline-8", [card["id"] for card in result["matches"]])
+
+
+@unittest.skipUnless(
+    API_TEST_DEPS_AVAILABLE and QUALITY_TEST_DEPS_AVAILABLE,
+    "FastAPI/httpx/Pillow are not installed",
+)
+class ScanQualityRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    """Deterministic preflight feeds the matcher's empty-candidate signal."""
+
+    @staticmethod
+    def _quality(*, is_blurred: bool = False) -> "ScanQuality":
+        return ScanQuality(
+            orientation="upright",
+            sharpness=90.0 if is_blurred else 2000.0,
+            is_blurred=is_blurred,
+            width=600,
+            height=840,
+            aspect_ratio=600 / 840,
+        )
+
+    @staticmethod
+    def _card_bytes(width: int, height: int) -> bytes:
+        image = Image.new("RGB", (width, height), "white")
+        draw = ImageDraw.Draw(image)
+        draw.rectangle([2, 2, width - 3, height - 3], outline="black", width=4)
+        for y in range(10, height - 10, 24):
+            draw.line([10, y, width - 10, y + 8], fill=(30, 30, 30), width=2)
+        buffer = io.BytesIO()
+        image.save(buffer, format="JPEG", quality=95)
+        return buffer.getvalue()
+
+    async def _match(self, candidates, quality):
+        with patch(
+            "api.recognize._search_and_rank_candidates",
+            new=AsyncMock(return_value=(candidates, 0)),
+        ):
+            return await match_card_info(
+                object(), {"name": "Unknown"}, quality=quality
+            )
+
+    async def test_empty_candidates_are_signalled_with_a_manual_review_hint(self):
+        result = await self._match([], self._quality())
+
+        self.assertTrue(result["_no_candidates"])
+        self.assertEqual(result["_recovery_hint"], "manual_review")
+        self.assertEqual(result["_quality"]["orientation"], "upright")
+
+    async def test_blurred_empty_candidates_ask_for_a_sharper_recapture(self):
+        result = await self._match([], self._quality(is_blurred=True))
+
+        self.assertTrue(result["_no_candidates"])
+        self.assertEqual(result["_recovery_hint"], "recapture_sharper")
+
+    async def test_matches_are_never_flagged_as_no_candidates(self):
+        result = await self._match(
+            [{"id": "right", "number": "25", "image": "right.webp"}],
+            self._quality(),
+        )
+
+        self.assertFalse(result["_no_candidates"])
+        self.assertNotIn("_recovery_hint", result)
+
+    async def test_missing_quality_keeps_the_previous_result_shape(self):
+        result = await self._match([], None)
+
+        self.assertIsNone(result["_quality"])
+        self.assertEqual(result["_recovery_hint"], "manual_review")
+
+    async def test_preflight_rotates_a_sideways_photo_before_the_provider(self):
+        provider = Mock()
+        provider.name = "openai"
+        provider.model.return_value = "test-model"
+        provider.credential.return_value = ""
+        provider.requires_credential.return_value = False
+        provider.generate_text = AsyncMock(
+            return_value=('{"name":"Unknown Card","language":"en"}', None)
+        )
+        trace = Mock()
+
+        with patch(
+            "api.recognize.require_scanner_capability_mode", return_value="full"
+        ), patch(
+            "api.recognize.resolve_scanner_request_timeout", return_value=30
+        ), patch(
+            "api.recognize._search_and_rank_candidates",
+            new=AsyncMock(return_value=([], 0)),
+        ):
+            result = await _recognize_with_provider(
+                object(),
+                7,
+                self._card_bytes(840, 600),
+                "image/jpeg",
+                provider,
+                trace=trace,
+            )
+
+        self.assertTrue(result["_no_candidates"])
+        self.assertEqual(result["_quality"]["orientation"], "rotated_90")
+        trace.record_quality.assert_called_once_with(
+            orientation="rotated_90",
+            sharpness=ANY,
+            is_blurred=False,
+            rotation_applied=True,
+        )
+        parts = provider.generate_text.await_args.args[2]
+        sent = base64.b64decode(parts[1]["image"]["data"])
+        with Image.open(io.BytesIO(sent)) as sent_image:
+            width, height = sent_image.size
+        self.assertGreater(height, width)
+
+    async def test_preflight_leaves_an_upright_photo_untouched(self):
+        provider = Mock()
+        provider.name = "openai"
+        provider.model.return_value = "test-model"
+        provider.credential.return_value = ""
+        provider.requires_credential.return_value = False
+        provider.generate_text = AsyncMock(return_value=('{"name":"Unknown Card"}', None))
+        original = self._card_bytes(600, 840)
+
+        with patch(
+            "api.recognize.require_scanner_capability_mode", return_value="full"
+        ), patch(
+            "api.recognize.resolve_scanner_request_timeout", return_value=30
+        ), patch(
+            "api.recognize._search_and_rank_candidates",
+            new=AsyncMock(return_value=([], 0)),
+        ):
+            result = await _recognize_with_provider(
+                object(), 7, original, "image/jpeg", provider
+            )
+
+        self.assertEqual(result["_quality"]["orientation"], "upright")
+        parts = provider.generate_text.await_args.args[2]
+        self.assertEqual(
+            base64.b64decode(parts[1]["image"]["data"]), original
+        )
 
 
 @unittest.skipUnless(API_TEST_DEPS_AVAILABLE, "FastAPI/httpx are not installed in this lightweight test environment")

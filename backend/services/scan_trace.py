@@ -227,6 +227,7 @@ class ScanTrace:
             "search": {"tcgdex": [], "prefilter": None},
             "candidates": [],
             "decision": {"mechanism": None, "selected": None},
+            "quality": None,
             "ground_truth": None,
             "correct": None,
         }
@@ -354,6 +355,24 @@ class ScanTrace:
         if self.enabled and isinstance(self.data.get("phash"), dict):
             self.data["phash"]["accepted"] = None
             self.data["phash"]["reason"] = reason
+
+    def record_quality(
+        self,
+        *,
+        orientation: str,
+        sharpness: float,
+        is_blurred: bool,
+        rotation_applied: bool,
+    ) -> None:
+        """Record the deterministic preflight result for offline analysis."""
+        if not self.enabled:
+            return
+        self.data["quality"] = {
+            "orientation": orientation,
+            "sharpness": float(sharpness),
+            "is_blurred": bool(is_blurred),
+            "rotation_applied": bool(rotation_applied),
+        }
 
     def record_decision(self, mechanism: str, selected: str | None = None) -> None:
         if self.enabled:

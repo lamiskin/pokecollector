@@ -900,6 +900,8 @@ class ScanJobItem(Base):
     lease_expires_at = Column(DateTime, nullable=True, index=True)
     recognized = Column(JSON)
     matches = Column(JSON)
+    no_candidates = Column(Boolean, nullable=True)
+    recovery_hint = Column(String, nullable=True)
     error = Column(Text)
     created_at = Column(DateTime, default=func.now(), nullable=False)
     updated_at = Column(DateTime, default=func.now(), nullable=False)

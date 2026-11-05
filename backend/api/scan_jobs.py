@@ -92,6 +92,8 @@ def _item_payload(item: ScanJobItem) -> dict:
         "transient_failures": item.transient_failures,
         "recognized": item.recognized,
         "matches": item.matches,
+        "no_candidates": item.no_candidates,
+        "recovery_hint": item.recovery_hint,
         "error": item.error,
         "has_image": bool(item.image_path),
         "next_attempt_at": (

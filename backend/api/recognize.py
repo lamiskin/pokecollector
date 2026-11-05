@@ -24,6 +24,12 @@ from services.gemini_rate_limit import (
     record_gemini_success,
 )
 from services.scan_candidate_images import TRUSTED_REFERENCE_IMAGE_HOSTS, prewarm_candidate_images
+from services.scan_quality import (
+    ROTATION_ORIENTATIONS,
+    ScanQuality,
+    assess_image_quality,
+    correct_orientation,
+)
 from services.scan_storage import MAX_FILE_BYTES, ScanUploadError, read_limited_upload, sanitize_image_bytes
 from services.scan_trace import ScanTrace, create_scan_trace
 from services.text_search import accent_insensitive_contains, strip_diacritics
@@ -1527,6 +1533,7 @@ async def match_card_info(
     request_timeout_seconds: int = DEFAULT_SCANNER_REQUEST_TIMEOUT_SECONDS,
     prewarm_candidates: bool = False,
     catalogue_fallback_budget: CatalogueFallbackBudget | None = None,
+    quality: ScanQuality | None = None,
 ) -> dict:
     """Shared deterministic matcher for both individual and composite scans.
 
@@ -1696,6 +1703,22 @@ async def match_card_info(
         "_number_match_count": number_match_count,
         "_identity_confident": confident,
         "_identity_decision": decision,
+        # Retrieval produced nothing at all, so the review UI has nothing to
+        # show and the item would otherwise disappear silently. The hint is
+        # annotation only; the user still decides what to do with the photo.
+        "_no_candidates": not public_matches,
+        **(
+            {
+                "_recovery_hint": (
+                    "recapture_sharper"
+                    if quality is not None and quality.is_blurred
+                    else "manual_review"
+                )
+            }
+            if not public_matches
+            else {}
+        ),
+        "_quality": quality.as_dict() if quality is not None else None,
     }
 
 
@@ -1726,6 +1749,36 @@ async def _recognize_with_provider(
         raise HTTPException(
             status_code=400,
             detail=provider.missing_credential_message(),
+        )
+
+    # Deterministic preflight. Failure here must never block a scan that would
+    # otherwise have worked, so any decode problem simply skips the preflight.
+    quality = None
+    try:
+        quality = assess_image_quality(image_bytes)
+    except Exception as exc:
+        # The input was already decoded by sanitize_image_bytes, so this is an
+        # unexpected (and annotation-only) failure rather than a bad upload.
+        logger.info(
+            "Scan quality preflight unavailable: %s", type(exc).__name__
+        )
+
+    rotation_applied = False
+    if quality is not None and quality.orientation in ROTATION_ORIENTATIONS:
+        try:
+            image_bytes = correct_orientation(image_bytes, quality.orientation)
+            rotation_applied = True
+        except Exception as exc:
+            logger.warning(
+                "Orientation correction failed (non-blocking): %s",
+                type(exc).__name__,
+            )
+    if trace and quality is not None:
+        trace.record_quality(
+            orientation=quality.orientation,
+            sharpness=quality.sharpness,
+            is_blurred=quality.is_blurred,
+            rotation_applied=rotation_applied,
         )
 
     image_b64 = base64.b64encode(image_bytes).decode()
@@ -1776,6 +1829,7 @@ async def _recognize_with_provider(
             provider=provider,
             request_timeout_seconds=request_timeout_seconds,
             prewarm_candidates=prewarm_candidates,
+            quality=quality,
         )
     except HTTPException as exc:
         if trace:

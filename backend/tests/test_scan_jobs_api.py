@@ -121,6 +121,22 @@ class ScanJobsApiTests(unittest.TestCase):
         self.assertEqual(detail_item["next_attempt_at"], retry_at.isoformat())
         self.assertEqual(detail_item["retry_reason"], "daily_quota")
 
+    def test_item_payload_exposes_no_candidate_recovery_signal(self):
+        created = self._enqueue()
+        item = self.db.query(ScanJobItem).filter(ScanJobItem.job_id == created["id"]).one()
+        item.status = "done"
+        item.matches = []
+        item.no_candidates = True
+        item.recovery_hint = "manual_review"
+        self.db.commit()
+
+        detail_item = self.client.get(
+            f"/api/cards/recognize/jobs/{created['id']}"
+        ).json()["items"][0]
+
+        self.assertTrue(detail_item["no_candidates"])
+        self.assertEqual(detail_item["recovery_hint"], "manual_review")
+
     def test_other_user_cannot_access_job_or_photo(self):
         created = self._enqueue()
         item = self.db.query(ScanJobItem).filter(ScanJobItem.job_id == created["id"]).one()
