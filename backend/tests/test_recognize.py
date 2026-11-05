@@ -13,6 +13,7 @@ try:
         DEFAULT_GEMINI_MODEL,
         COMPOSITE_PROMPT,
         MAX_GEMINI_RETRY_SECONDS,
+        THINKING_FALLBACK_TIMEOUT_SECONDS,
         PHASH_CANDIDATE_LIMIT,
         RECOGNIZE_PROMPT,
         _apply_printed_total_mismatch,
@@ -508,6 +509,110 @@ class GeminiFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(primary_trace.data["fallback_trace_id"], "fallback-trace")
         fallback_trace.set_image.assert_called_once_with(b"image-bytes")
         fallback_trace.save.assert_called_once_with()
+
+
+@unittest.skipUnless(API_TEST_DEPS_AVAILABLE, "FastAPI/httpx are not installed in this lightweight test environment")
+class ThinkingFallbackTests(unittest.IsolatedAsyncioTestCase):
+    """recognize_sanitized_card retries an unconfident OpenAI-provider scan with
+    reasoning enabled when the user opted in (thinking_fallback_enabled)."""
+
+    @staticmethod
+    def _openai_provider():
+        provider = Mock()
+        provider.name = "openai"
+        provider.is_gemini = False
+        return provider
+
+    @staticmethod
+    def _result(confident, *, source):
+        return {
+            "recognized": {"name": source},
+            "matches": [{"id": source}],
+            "_identity_confident": confident,
+        }
+
+    @contextlib.contextmanager
+    def _patched(self, *, provider, enabled, recognizer):
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch("api.recognize.get_provider", return_value=provider))
+            stack.enter_context(
+                patch("api.recognize.thinking_fallback_enabled", return_value=enabled)
+            )
+            stack.enter_context(
+                patch("api.recognize.gemini_fallback_enabled", return_value=False)
+            )
+            stack.enter_context(
+                patch("api.recognize._recognize_with_provider", new=recognizer)
+            )
+            yield
+
+    async def test_retries_with_thinking_when_enabled_and_unconfident(self):
+        provider = self._openai_provider()
+        recognizer = AsyncMock(side_effect=[
+            self._result(False, source="openai"),
+            self._result(True, source="openai-thinking"),
+        ])
+        with self._patched(provider=provider, enabled=True, recognizer=recognizer):
+            result = await recognize_sanitized_card(
+                object(), 7, b"image-bytes", "image/jpeg"
+            )
+
+        self.assertEqual(recognizer.await_count, 2)
+        self.assertTrue(result["_identity_confident"])
+        self.assertEqual(result["matches"][0]["id"], "openai-thinking")
+        self.assertFalse(recognizer.await_args_list[0].kwargs.get("think"))
+        second = recognizer.await_args_list[1].kwargs
+        self.assertTrue(second.get("think"))
+        self.assertEqual(
+            second["request_timeout_seconds"], THINKING_FALLBACK_TIMEOUT_SECONDS
+        )
+
+    async def test_not_retried_when_disabled(self):
+        provider = self._openai_provider()
+        recognizer = AsyncMock(return_value=self._result(False, source="openai"))
+        with self._patched(provider=provider, enabled=False, recognizer=recognizer):
+            result = await recognize_sanitized_card(
+                object(), 7, b"image-bytes", "image/jpeg"
+            )
+
+        self.assertEqual(recognizer.await_count, 1)
+        self.assertEqual(result["matches"][0]["id"], "openai")
+
+    async def test_not_retried_when_already_confident(self):
+        provider = self._openai_provider()
+        recognizer = AsyncMock(return_value=self._result(True, source="openai"))
+        with self._patched(provider=provider, enabled=True, recognizer=recognizer):
+            await recognize_sanitized_card(object(), 7, b"image-bytes", "image/jpeg")
+
+        self.assertEqual(recognizer.await_count, 1)
+
+    async def test_marks_thinking_fallback_used_on_the_retry(self):
+        provider = self._openai_provider()
+        recognizer = AsyncMock(side_effect=[
+            self._result(False, source="openai"),
+            self._result(True, source="openai-thinking"),
+        ])
+        with self._patched(provider=provider, enabled=True, recognizer=recognizer):
+            result = await recognize_sanitized_card(
+                object(), 7, b"image-bytes", "image/jpeg"
+            )
+
+        self.assertTrue(result["recognized"]["_thinking_fallback_used"])
+
+    async def test_an_uncertain_retry_does_not_replace_the_original_result(self):
+        provider = self._openai_provider()
+        recognizer = AsyncMock(side_effect=[
+            self._result(False, source="openai"),
+            self._result(False, source="openai-thinking"),
+        ])
+        with self._patched(provider=provider, enabled=True, recognizer=recognizer):
+            result = await recognize_sanitized_card(
+                object(), 7, b"image-bytes", "image/jpeg"
+            )
+
+        self.assertEqual(recognizer.await_count, 2)
+        self.assertEqual(result["matches"][0]["id"], "openai")
+        self.assertFalse(result["_identity_confident"])
 
 
 @unittest.skipUnless(API_TEST_DEPS_AVAILABLE, "FastAPI/httpx are not installed in this lightweight test environment")

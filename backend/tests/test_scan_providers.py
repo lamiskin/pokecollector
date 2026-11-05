@@ -32,6 +32,7 @@ try:
         resolve_provider_name,
         resolve_scanner_request_timeout,
         text_part,
+        thinking_fallback_enabled,
     )
     DEPS = True
 except ModuleNotFoundError:
@@ -149,6 +150,14 @@ class ProviderResolutionTests(_Fixture, unittest.TestCase):
         self.assertEqual(provider.name, OPENAI)
         self.assertEqual(provider.credential(self.db, self.user.id), "sk-openai-value")
 
+    def test_thinking_fallback_is_off_by_default(self):
+        self.assertFalse(thinking_fallback_enabled(self.db, self.user.id))
+        self.assertFalse(thinking_fallback_enabled(self.db, None))
+
+    def test_thinking_fallback_reads_the_user_setting(self):
+        self._set("scanner_thinking_fallback", "true")
+        self.assertTrue(thinking_fallback_enabled(self.db, self.user.id))
+
 
 @unittest.skipUnless(DEPS, "FastAPI/SQLAlchemy are not installed in this environment")
 class RequestTimeoutResolutionTests(_Fixture, unittest.TestCase):
@@ -253,6 +262,19 @@ class ModelSelectionTests(_Fixture, unittest.TestCase):
         with patch.dict(os.environ, {"OPENAI_BASE_URL": LOCAL_URL, "OPENAI_MODEL": self.INSTALLATION}):
             asyncio.run(provider.generate_text(client, "", [text_part("hi")]))
         self.assertEqual(client.calls[0]["json"]["model"], self.CHOSEN)
+
+    def test_thinking_adds_the_think_field_to_the_openai_request(self):
+        self._set("scanner_provider", "openai")
+        self._set("scanner_model_openai", self.CHOSEN)
+        provider = get_provider(self.db, self.user.id)
+        client = _FakeClient([_FakeResponse(200, {"choices": [{"message": {"content": "ok"}}]})])
+        with patch.dict(os.environ, {"OPENAI_BASE_URL": LOCAL_URL, "OPENAI_MODEL": self.INSTALLATION}):
+            asyncio.run(provider.generate_text(client, "", [text_part("hi")], think=True))
+        self.assertTrue(client.calls[0]["json"]["think"])
+        client2 = _FakeClient([_FakeResponse(200, {"choices": [{"message": {"content": "ok"}}]})])
+        with patch.dict(os.environ, {"OPENAI_BASE_URL": LOCAL_URL, "OPENAI_MODEL": self.INSTALLATION}):
+            asyncio.run(provider.generate_text(client2, "", [text_part("hi")]))
+        self.assertNotIn("think", client2.calls[0]["json"])
 
     def test_the_chosen_model_reaches_the_gemini_request(self):
         # Gemini puts the model in the URL, so asserting provider.model() alone

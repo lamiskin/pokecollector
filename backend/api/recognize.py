@@ -39,6 +39,7 @@ from services.scan_providers import (
     SCANNER_CAPABILITY_DEGRADED,
     ScanProvider,
     gemini_fallback_enabled,
+    thinking_fallback_enabled,
     get_provider,
     image_part,
     image_part_from_bytes,
@@ -67,6 +68,9 @@ GEMINI_TRANSIENT_STATUS_CODES = {408, 425, 500, 502, 503, 504}
 DEFAULT_GEMINI_MODEL = "gemini-flash-latest"
 GEMINI_MODELS_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 MAX_GEMINI_RETRY_SECONDS = 14 * 24 * 60 * 60
+# Reasoning can take minutes on a hard photo, far beyond the normal scanner
+# timeout ceiling, so the thinking fallback uses its own bounded budget.
+THINKING_FALLBACK_TIMEOUT_SECONDS = 300
 PHASH_MAX_DISTANCE = 20
 PHASH_MIN_MARGIN = 5
 PHASH_CANDIDATE_LIMIT = 8
@@ -1706,11 +1710,14 @@ async def _recognize_with_provider(
     trace: ScanTrace | None = None,
     prewarm_candidates: bool = False,
     on_recognized: Callable[[dict], None] | None = None,
+    think: bool = False,
+    request_timeout_seconds: int | None = None,
 ) -> dict:
     """Recognize one already-sanitized image with an explicit provider."""
-    request_timeout_seconds = resolve_scanner_request_timeout(
-        db, user_id, provider.name
-    )
+    if request_timeout_seconds is None:
+        request_timeout_seconds = resolve_scanner_request_timeout(
+            db, user_id, provider.name
+        )
     capability_mode = require_scanner_capability_mode(
         db, user_id, provider.name, provider.model()
     )
@@ -1762,6 +1769,7 @@ async def _recognize_with_provider(
                 client,
                 api_key,
                 [text_part(RECOGNIZE_PROMPT), image_part(content_type, image_b64)],
+                think=think,
             )
         response_text = response_text.strip()
         if trace:
@@ -1859,6 +1867,41 @@ async def recognize_sanitized_card(
 
     if provider.is_gemini or result.get("_identity_confident"):
         return result
+
+    # Reasoning fallback (OpenAI-compatible providers only): the local model
+    # reads small identity text far more reliably while thinking, so a second
+    # pass with reasoning enabled can recover a low-quality photo the first
+    # pass could not identify. Gated by a per-user setting; only the extraction
+    # re-runs and the deterministic matcher is unchanged.
+    try:
+        if thinking_fallback_enabled(db, user_id):
+            def notify_thinking(card_info: dict) -> None:
+                card_info["_thinking_fallback_used"] = True
+                if on_recognized:
+                    on_recognized(card_info)
+
+            thinking_result = await _recognize_with_provider(
+                db,
+                user_id,
+                image_bytes,
+                content_type,
+                provider,
+                trace=trace,
+                prewarm_candidates=prewarm_candidates,
+                on_recognized=notify_thinking if on_recognized else None,
+                think=True,
+                request_timeout_seconds=THINKING_FALLBACK_TIMEOUT_SECONDS,
+            )
+            if thinking_result.get("recognized") is not None:
+                thinking_result["recognized"]["_thinking_fallback_used"] = True
+            if thinking_result.get("_identity_confident"):
+                return thinking_result
+    except Exception as exc:
+        logger.warning(
+            "Thinking fallback recognition failed (non-blocking): %s",
+            type(exc).__name__,
+        )
+
     fallback_trace = None
 
     def restore_primary_recognition() -> None:
