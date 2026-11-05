@@ -418,6 +418,7 @@ export default function Settings() {
   const [scanDiagnosticsSaving, setScanDiagnosticsSaving] = useState(false)
   const [scanDiagnosticsDeleting, setScanDiagnosticsDeleting] = useState(false)
   const [geminiFallbackSaving, setGeminiFallbackSaving] = useState(false)
+  const [thinkingFallbackSaving, setThinkingFallbackSaving] = useState(false)
   const [cardPhotosDeleting, setCardPhotosDeleting] = useState(false)
 
   // Recurring automatic full sync interval (days) and small price sync interval (minutes).
@@ -750,6 +751,18 @@ export default function Settings() {
     }
   }
 
+  const handleThinkingFallbackToggle = async (enabled) => {
+    setThinkingFallbackSaving(true)
+    try {
+      await updateSettings({ scanner_thinking_fallback: enabled ? 'true' : 'false' })
+      toast.success(t('settings.saved'))
+    } catch {
+      toast.error(t('settings.saveFailed'))
+    } finally {
+      setThinkingFallbackSaving(false)
+    }
+  }
+
   const handlePhotoPreferenceToggle = async (enabled) => {
     try {
       await updateSettings({ prefer_own_card_photos: enabled ? 'true' : 'false' })
@@ -877,6 +890,7 @@ export default function Settings() {
   const scanDiagnosticsAvailable = settings.scan_diagnostics_available === 'true'
   const scanDiagnosticsDeletionAvailable = settings.scan_diagnostics_deletion_available === 'true'
   const geminiFallbackEnabled = settings.scanner_gemini_fallback === 'true'
+  const thinkingFallbackEnabled = settings.scanner_thinking_fallback === 'true'
   const preferOwnCardPhotos = settings.prefer_own_card_photos === 'true'
 
   const usernameMutation = useMutation({
@@ -1427,6 +1441,17 @@ export default function Settings() {
                   label={t('settings.geminiFallback')}
                   onChange={handleGeminiFallbackToggle}
                   disabled={geminiFallbackSaving}
+                />
+              </SettingsRow>
+              <SettingsRow
+                label={t('settings.thinkingFallback')}
+                description={t('settings.thinkingFallbackDesc')}
+              >
+                <Toggle
+                  value={thinkingFallbackEnabled}
+                  label={t('settings.thinkingFallback')}
+                  onChange={handleThinkingFallbackToggle}
+                  disabled={thinkingFallbackSaving}
                 />
               </SettingsRow>
               <SettingsRow

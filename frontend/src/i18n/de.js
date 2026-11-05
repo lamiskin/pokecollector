@@ -1221,6 +1221,8 @@ const de = {
     geminiApiKeyDesc: 'Für die Kameraerkennung von Karten (kostenlos bei Google AI Studio)',
     geminiFallback: 'Bei Unsicherheit auf Gemini ausweichen',
     geminiFallbackDesc: 'Standardmäßig deaktiviert. Wenn dein Scanner-Anbieter auf einen OpenAI-kompatiblen Endpunkt eingestellt ist und eine Karte nicht sicher erkannt werden kann, wird es zusätzlich mit Gemini versucht, bevor aufgegeben wird. Erfordert einen oben konfigurierten Gemini-API-Schlüssel. Ohne Wirkung, wenn Gemini bereits dein primärer Anbieter ist.',
+    thinkingFallback: 'Bei Unsicherheit mit Reasoning erneut versuchen',
+    thinkingFallbackDesc: 'Standardmäßig deaktiviert. Wenn dein Scanner-Anbieter ein OpenAI-kompatibler Endpunkt mit einem reasoning-fähigen Modell ist, wird eine unsichere Erkennung einmal mit aktiviertem Reasoning wiederholt. Das stellt kleine aufgedruckte Details auf unscharfen Fotos wieder her, kostet aber einen langsameren Versuch. Ohne Wirkung, wenn Gemini dein primärer Anbieter ist.',
     scanDiagnostics: 'Scanner-Diagnosen teilen',
     scanDiagnosticsDesc: 'Standardmäßig deaktiviert. Wenn aktiviert, werden bereinigte Kartenfotos, Modellantworten, erkannte Felder, Kandidaten und Matching-Entscheidungen zur Genauigkeitsanalyse gespeichert. Das Deaktivieren stoppt künftige Aufzeichnungen, behält aber vorhandene Diagnosen.',
     scanDiagnosticsUnavailable: 'Neue Scanner-Diagnosen werden auf dieser Installation nicht aufgezeichnet. Bereits gespeicherte Daten können weiterhin gelöscht werden.',
