@@ -578,51 +578,23 @@ async def post_gemini_generate(
     raise HTTPException(status_code=500, detail=f"Gemini Anfrage fehlgeschlagen: {last_error}")
 
 
-RECOGNIZE_PROMPT = """Look at this Pokemon Trading Card Game card image.
+RECOGNIZE_PROMPT = """Read this photo of one Pokemon Trading Card Game card and transcribe the text printed on it into one JSON object.
 
-IMPORTANT ACCURACY RULES:
-- Only report text or symbols that are actually visible in this image.
-- number_local, number_total, set_code, regulation_mark, and artist are small printed
-  details. If any character is unclear, return null instead of guessing.
-- Only return set_code when printed alphanumeric characters are visible near the card
-  number. Do not infer a code from the artwork or from recognizing the set.
-- Some cards, especially older ones, print a "No. 0094" or "No.94"-style reference
-  near the artwork or flavor text. That is the species' National Pokedex number, not
-  this card's collector number, and must never be used as number_local. Only use
-  number_local for a small index printed for this specific card, usually alongside
-  a "/" and a set total (like "094/165") or next to a set code. If the only number
-  on the card is a "No." Pokedex reference, or you cannot find a distinct collector
-  number, return null for number_local rather than reusing it.
-- Copy letter prefixes exactly as printed in both number fields: gallery and subset
-  cards print numbers like "TG06/TG30", "GG52/GG70", "SV28/SV94" or "RC5/RC32", so
-  number_local is "TG06" and number_total is "TG30". Never drop such a prefix.
+Rules:
+- Report only text that is actually visible in the photo. If a detail is unclear or absent, use null - never guess.
+- number_local is the collector number printed in the small box in the bottom-left corner, for example "006" from "006/165". It is NOT the "No. 025" Pokedex number sometimes printed near the artwork or flavor text. If you only see a "No." number, set number_local to null.
+- number_total is the denominator printed after the "/" in that box, for example "165". Copy letter prefixes exactly: gallery and subset cards print numbers like "TG06/TG30" or "SV28/SV94", so number_local is "TG06" and number_total is "TG30". Never drop such a prefix.
+- set_code is the printed letter/number code right next to the card number, for example "MEW", "CEL", "SVI", "RCL". It is usually 2-4 uppercase letters printed immediately before the number. A single boxed letter (like "D" or "G") is the regulation mark, not the set code. If no code is printed, use null. Never invent one from the artwork.
+- regulation_mark is a single letter inside a small box near the bottom-left, for example "G" or "E". Use null when there is none.
+- card_type is exactly one of "Pokemon", "Trainer", or "Energy".
+- hp is the printed HP number, for Pokemon cards only. Use null for Trainer and Energy cards.
+- language is the card's language as a two-letter lowercase code: en, de, fr, it, es, pt, ja, ko, zh, or similar.
+- artist is the illustrator credit printed near the bottom, or null.
+- name is the card name exactly as printed, in the card's language.
+- name_en is the standard English card name. If the card is not English and you are unsure of the English name, copy the printed name instead.
 
-Extract:
-1. Card name exactly as printed, in the card's language
-2. English card name (same value when already English)
-3. Local collector number (never a "No." Pokedex reference), or null
-4. Printed set total/denominator, or null
-5. Printed set code/abbreviation, or null
-6. Regulation mark, or null
-7. Card type: Pokemon, Trainer, or Energy
-8. HP value, or null
-9. Two-letter ISO language code
-10. Artist/illustrator credit, or null
-
-Respond ONLY with this exact JSON:
-{
-  "name": "...",
-  "name_en": "...",
-  "number_local": null,
-  "number_total": null,
-  "set_code": null,
-  "regulation_mark": null,
-  "card_type": "Pokemon/Trainer/Energy",
-  "hp": null,
-  "language": "en",
-  "artist": null
-}
-Replace a null only when that exact value is clearly visible."""
+Return ONLY the JSON object, with no markdown fences and no other text before or after it. Example output:
+{"name": "Charizard ex", "name_en": "Charizard ex", "number_local": "006", "number_total": "165", "set_code": "MEW", "regulation_mark": "G", "card_type": "Pokemon", "hp": 330, "language": "en", "artist": "PLANETA Mochizuki"}"""
 
 
 _SUFFIXES = re.compile(
@@ -2001,32 +1973,31 @@ async def recognize_card(
         trace.save()
 
 
-COMPOSITE_PROMPT = """This image contains {count} separate Pokemon Trading Card Game cards.
-They are arranged left-to-right, then top-to-bottom, and each card has a white index number
-on a black square directly above it. Identify every card. Read that index label instead of
-relying on response order.
+COMPOSITE_PROMPT = """This image contains {count} separate Pokemon Trading Card Game cards,
+arranged left-to-right then top-to-bottom. Each card has a white index number on a black
+square directly above it. Read that index label instead of relying on response order.
 
-For each card return the same information as an individual scan:
-- index: the printed corner number
-- name: exact card name in the card's language
-- name_en: English card name
-- number_local: printed local collector number, or null (never a "No." Pokedex
-  reference near the artwork or flavor text — that is the species' National Pokedex
-  number, not this card's collector number)
-- number_total: printed set total/denominator, or null. Copy letter prefixes exactly
-  as printed in both number fields ("TG06/TG30", "SV28/SV94"); never drop them
-- set_code: printed alphanumeric set code near the number, or null
-- regulation_mark: boxed regulation letter, or null
-- card_type: Pokemon, Trainer, or Energy
-- hp: HP value or null
-- language: two-letter ISO language code
-- artist: printed illustrator credit, or null
+For each card, transcribe the text printed on it into one JSON object with these fields:
+- index: the printed corner number above that card
+- name: card name exactly as printed, in the card's language
+- name_en: standard English card name; if the card is not English and you are unsure,
+  copy the printed name
+- number_local: collector number from the bottom-left box, for example "006" from
+  "006/165". It is NOT the "No. 025" Pokedex number sometimes printed near the artwork
+  or flavor text. Copy letter prefixes exactly ("TG06/TG30", "SV28/SV94"), never drop them.
+- number_total: denominator printed after the "/" (for example "165"), keeping any
+  letter prefix
+- set_code: printed letter/number code next to the card number (for example "MEW",
+  "CEL", "SVI"), or null when absent. Never invent one from the artwork.
+- regulation_mark: a single letter inside a small box near the bottom-left, or null
+- card_type: exactly one of "Pokemon", "Trainer", "Energy"
+- hp: printed HP, for Pokemon cards only; null for Trainer and Energy cards
+- language: two-letter lowercase code (en, de, fr, it, es, pt, ja, ko, zh, or similar)
+- artist: illustrator credit printed near the bottom, or null
 
-Only report small identity text when every character is visible. Never infer set_code from
-the artwork or from recognizing the set. If a detail is unclear, or the only number visible
-is a "No." Pokedex reference rather than a distinct collector number, use null rather than
-guessing. Respond ONLY with a JSON array containing one object per card, without markdown
-or explanation.
+Report only text actually visible in the photo. Use null for any unclear or absent detail
+rather than guessing. Respond ONLY with a JSON array containing one object per card,
+without markdown fences or explanation.
 """
 
 
