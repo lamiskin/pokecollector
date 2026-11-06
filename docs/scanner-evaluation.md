@@ -110,7 +110,17 @@ distinguishes them.
 - **Naive bottom-strip crop.** Cropping the bottom 18% of the *photo* assumes
   the card fills the frame; on far, realistic and multi-card photos it reads
   nothing. Rectification or card detection must come first.
-- **Bottom-strip crop, measured properly.** On the 16 clean fresh cards, where the
+- **Set-symbol template matching for printing choice.** Tried and not adopted.
+  A reprint prints the same name, number and artwork as its original; only the set
+  symbol differs. Matching the symbol region against each candidate set's symbol
+  image gave 1/3 correct on the presence question and 0/1 on a two-symbol family,
+  with correlations of 0.24–0.56 and margins under 0.06 — indistinguishable from
+  noise. The symbol is roughly 15 px on a 640 px scan and the region also holds the
+  collector-number text, so this needs real symbol localisation (rectification plus
+  a fixed-scale crop) before the idea can be judged, not a bigger threshold.
+- **Catalogue symbol URLs are stale.** Every stored `images_symbol` uses an
+  `/univ/` path that returns 404; rewriting to the language path (`/en/base/base4/`)
+  works. Worth fixing independently of any matcher.
   card does fill the frame, the crop was upscaled to 1024 px and asked only for the
   small print. Result over the same images: collector number identical (16/16 both),
   regulation mark identical (6/7 both), illustrator slightly worse (6/16 cropped
