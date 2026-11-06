@@ -110,6 +110,13 @@ distinguishes them.
 - **Naive bottom-strip crop.** Cropping the bottom 18% of the *photo* assumes
   the card fills the frame; on far, realistic and multi-card photos it reads
   nothing. Rectification or card detection must come first.
+- **Bottom-strip crop, measured properly.** On the 16 clean fresh cards, where the
+  card does fill the frame, the crop was upscaled to 1024 px and asked only for the
+  small print. Result over the same images: collector number identical (16/16 both),
+  regulation mark identical (6/7 both), illustrator slightly worse (6/16 cropped
+  versus 7/16 full card). The crop is ten times faster (0.9 s against 2 s) but buys
+  no accuracy, so the small-print limit is the model, not resolution or token
+  allocation.
 - **Asking the model for `name_en` on Japanese cards.** 5 of 24 matched the
   English catalogue name; the native name was right 21 of 24. The local
   catalogue also contains no `ja` rows by default (`tcgdex_sync_languages` is
