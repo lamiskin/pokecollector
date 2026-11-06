@@ -73,18 +73,37 @@ newest promos and Japanese printings), which is why end-to-end matching looked
 broken on it while the field reading was accurate. Measure matching changes on
 cards the catalogue actually contains.
 
-### In-catalogue regression set
+### In-catalogue regression set (48 images, post-import)
 
-Local model: Qwen3.5-9B `UD-Q6_K_XL` (Ollama, `reasoning_effort: "none"`).
-| Run | sameCard | exact | accept | wrongCard | median |
-| --- | --- | --- | --- | --- | --- |
-| Baseline (prompt rewrite, artist-comma, kana/name-gate/marker/soft-signal fixes) | 48/48 | 31/48 | 36/48 | 0 | 5.1 s |
-| + collector-number retrieval when no name was read | 48/48 | 30/48 | 37/48 | 0 | — |
+Measured after the Japanese import, on the current code:
 
-Card-level identification is at the ceiling of this corpus, so it can no longer
-show improvement; the open problem is **printing selection** (`exact`), where
-reprints share artwork and only the set symbol, set code or regulation mark
-distinguishes them.
+| Measure | Result |
+| --- | --- |
+| Correct card | 32/48 |
+| Correct printing | 32/48 |
+| Auto-accepted | 37/48 |
+| Wrong card accepted | 8/37 accepted |
+| Median response | 7.9 s |
+
+**Correction:** an earlier version of this document reported 48/48 and
+31/48 for the same set. Those figures were produced by a scoring script that
+looked cards up by `cards.id` (which carries a language suffix) instead of
+`tcg_card_id`, so every comparison degenerated to `None == None` and counted as
+a match. The corrected figures below are the real ones; treat any earlier number
+in this file that came from that script as void.
+
+Error taxonomy of the 8 wrong accepts:
+
+- **6 are read errors, not matching errors.** The pipeline accepted a card that
+  genuinely matched what the model read: Pikachu 115 read as 025, Blaziken 3 as
+  146, Ampharos 1 as 111, Pineco 1 as 005, M Venusaur EX 2 as 141, and a blurred
+  Charizard read as "Charizard V #041". Fixing these needs better reading, not
+  better ranking.
+- **2 are a matcher bug.** A Flareon printed as `TG01` was read correctly as
+  `TG01` but matched to Flareon #3: the gallery prefix is lost somewhere between
+  retrieval and ranking.
+- The other 8 incorrect results were **not** accepted, so they reached review —
+  which is the designed behaviour.
 
 ### Model comparison (14-card sample)
 
