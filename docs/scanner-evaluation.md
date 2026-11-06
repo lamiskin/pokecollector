@@ -56,13 +56,22 @@ Conclusions:
 - **Reasoning on**: four images produced no record in ten minutes, at a 240 s
   budget each. Disabling reasoning is what makes the request finish.
 
-### Catalogue coverage dominates everything else
+### Catalogue coverage
 
-None of the 64 unused corpus cards exist in the Dev catalogue (`0/64`), because
-sync covers `en,de` and predates 2025–2026. New-card scans therefore depend on
-the live TCGdex lookup, which answers with an older printing of a related card:
-end-to-end matching looks wrong while the reading is correct. Measure matching
-changes only on cards the catalogue actually contains.
+Measured by `tcg_card_id` (note: `cards.id` carries a language suffix, so comparing
+against it reports every card as missing): **35 of the 64 unused corpus cards are
+present**. What is absent is systematic rather than general staleness:
+
+- **All Japanese printings** — the catalogue holds zero `ja` rows, because sync
+  languages are `en,de`. A Japanese card can only be matched through the live
+  TCGdex lookup.
+- **The `DLR` set entirely** (12 corpus cards), plus a few scattered cards from
+  `30C` and SV-era sets.
+
+The 16-image fresh sample happened to be weighted towards those two gaps (the
+newest promos and Japanese printings), which is why end-to-end matching looked
+broken on it while the field reading was accurate. Measure matching changes on
+cards the catalogue actually contains.
 
 ### In-catalogue regression set
 
