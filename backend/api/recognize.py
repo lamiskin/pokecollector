@@ -1387,6 +1387,59 @@ async def _search_and_rank_candidates(
                     if row.id not in present_ids
                 )
                 rows = rows[:SEARCH_CANDIDATE_QUERY_LIMIT + 4]
+                # Number-first retrieval, but only when the model read no name
+                # at all. A printed collector number is globally meaningful, so
+                # a blurred photo that yields "001" and nothing else should
+                # still produce a reviewable candidate list. It deliberately
+                # does not fire when a *different* name was read: ranking does
+                # not compare names, so admitting a number-collision row
+                # ("Mewtwo" for a scan of "Mew", both #4) could auto-file the
+                # wrong card.
+                if target_number and not expected_name:
+                    number_variants = {
+                        target_number,
+                        target_number.zfill(2),
+                        target_number.zfill(3),
+                    }
+                    number_filters = [
+                        Card.tcg_card_id.isnot(None),
+                        Card.is_custom.isnot(True),
+                        Card.is_digital.isnot(True),
+                        Card.lang == search_language,
+                        Card.number.in_(sorted(number_variants)),
+                    ]
+                    if digital_set_ids:
+                        number_filters.append(
+                            or_(Card.set_id.is_(None), ~Card.set_id.in_(digital_set_ids))
+                        )
+                    present_ids = {row.id for row in rows}
+                    seen_numbers = 0
+                    for row in (
+                        db.query(Card)
+                        .filter(*number_filters)
+                        .with_entities(
+                            Card.id,
+                            Card.tcg_card_id,
+                            Card.name,
+                            Card.supertype,
+                            Card.number,
+                            Card.images_small,
+                            Card.images_large,
+                            Card.rarity,
+                            Card.custom_image_url,
+                        )
+                        .order_by(Card.id)
+                        .yield_per(200)
+                    ):
+                        if row.id in present_ids:
+                            continue
+                        if normalize_scanner_card_number(row.number) != target_number:
+                            continue
+                        rows.append(row)
+                        present_ids.add(row.id)
+                        seen_numbers += 1
+                        if seen_numbers >= 12:
+                            break
                 # Gallery printings with the same digits stay available even
                 # when a plain printing matches: the prefix may be what the
                 # photo lost.
