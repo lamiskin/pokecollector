@@ -1720,7 +1720,16 @@ async def _reask_number_with_options(
     chosen = match.group(1).strip()
     if chosen.casefold() == "unreadable":
         return None
-    return chosen if chosen in numbers else None
+    # Models often answer in the printed form ("1/111") rather than with the
+    # bare option, so compare only the numerator and ignore separators.
+    chosen = chosen.split("/")[0].strip()
+    if chosen in numbers:
+        return chosen
+    folded = chosen.casefold()
+    for option in numbers:
+        if option.casefold() == folded:
+            return option
+    return None
 
 
 async def match_card_info(
