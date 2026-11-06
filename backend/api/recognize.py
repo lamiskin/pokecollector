@@ -722,6 +722,21 @@ def _identity_signal(target, candidate, matcher) -> int:
     return 0 if matcher(target, candidate) else 2
 
 
+def _first_json_value(text: str, opener: str):
+    """Parse the first JSON value in a model response.
+
+    Models sometimes repeat the object or append commentary. A greedy regex
+    spanning the first opener to the last closer then fails with "Extra data",
+    turning a usable read into an error, so decode exactly one value and ignore
+    whatever follows it.
+    """
+    start = text.find(opener)
+    if start == -1:
+        raise ValueError("No JSON found in the scanner response")
+    value, _ = json.JSONDecoder().raw_decode(text[start:])
+    return value
+
+
 def _candidate_rank_key(card_info: dict, candidate: dict) -> tuple[int, ...]:
     return (
         _identity_signal(card_info.get("number_local"), candidate.get("number"), _numbers_match),
@@ -1780,10 +1795,7 @@ async def _recognize_with_provider(
                 raw_response=response_text,
                 usage=usage,
             )
-        json_match = re.search(r"\{.*\}", response_text, re.DOTALL)
-        if not json_match:
-            raise ValueError("No JSON found in the scanner response")
-        card_info = normalize_recognized_card_info(json.loads(json_match.group()))
+        card_info = normalize_recognized_card_info(_first_json_value(response_text, "{"))
         if trace:
             trace.record_extraction(parsed=card_info)
     except HTTPException as exc:
@@ -2082,10 +2094,7 @@ async def recognize_composite_card_info(
                 raw_response=response_text,
                 usage=usage,
             )
-        array_match = re.search(r"\[.*\]", response_text, re.DOTALL)
-        if not array_match:
-            raise CompositeRecognitionError("The scanner returned no card list for the composite.")
-        rows = json.loads(array_match.group())
+        rows = _first_json_value(response_text, "[")
         if not isinstance(rows, list):
             raise CompositeRecognitionError("The scanner returned an invalid composite card list.")
     except HTTPException:

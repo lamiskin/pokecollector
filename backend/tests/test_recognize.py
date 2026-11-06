@@ -19,6 +19,7 @@ try:
         _apply_printed_total_mismatch,
         _candidate_rank_key,
         _download_candidate_images,
+        _first_json_value,
         _metadata_decision,
         _normalize_artist,
         _perceptual_hash,
@@ -2348,6 +2349,23 @@ class ScanQualityRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
 @unittest.skipUnless(API_TEST_DEPS_AVAILABLE, "FastAPI/httpx are not installed in this lightweight test environment")
 class RecognizeErrorTests(unittest.TestCase):
+    def test_reads_the_first_json_object_when_the_model_repeats_itself(self):
+        response = '{"name": "Pikachu"}\n{"name": "Pikachu"}'
+        self.assertEqual(_first_json_value(response, "{"), {"name": "Pikachu"})
+
+    def test_ignores_commentary_after_the_object(self):
+        response = 'Here is the data:\n{"name": "Horsea"}\nI hope that helps.'
+        self.assertEqual(_first_json_value(response, "{"), {"name": "Horsea"})
+
+    def test_reads_a_json_array_with_trailing_text(self):
+        response = '[{"index": 0}, {"index": 1}]\nDone.'
+        self.assertEqual(
+            _first_json_value(response, "["), [{"index": 0}, {"index": 1}]
+        )
+
+    def test_a_response_without_json_is_still_an_error(self):
+        with self.assertRaises(ValueError):
+            _first_json_value("I cannot read this card.", "{")
     def test_extracts_retry_delay_from_gemini_retry_info(self):
         response = httpx.Response(
             429,
