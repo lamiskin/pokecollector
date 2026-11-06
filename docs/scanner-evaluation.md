@@ -227,3 +227,43 @@ Conclusions:
   9B; 23 vs 14 on the 27B), consistent with the fresh-card set.
 - **Japanese English names remain 0/50 everywhere** while native names are read
   correctly; this is a catalogue lookup problem, not a model or prompt problem.
+
+### Recovery experiments after the model comparison (2026-11-06)
+
+**Preprocessing does not rescue blurred images.** 30 `blur-strong` images, 9B, our
+prompt:
+
+| Variant | Name | Number | Illustrator | Median |
+| --- | --- | --- | --- | --- |
+| raw | 11/30 | 1/30 | 0/30 | 1.6 s |
+| contrast + unsharp | 12/30 | 0/30 | 1/30 | 1.6 s |
+| unsharp only | 10/30 | 0/30 | 0/30 | 1.6 s |
+| 2x upscale + unsharp | 10/30 | 1/30 | 2/30 | 2.5 s |
+| denoise + unsharp | 9/30 | 0/30 | 0/30 | 4.1 s |
+| 3x upscale | 4/10 | 0/10 | 0/10 | 5.8 s |
+
+Differences are noise; there is no variant worth adding to the pipeline.
+
+**Card rectification is not ready.** Classical Canny + quad detection found a
+card in 12/31 clean, 10/30 realistic and 11/16 real photos, and successful warps
+read *worse* than the original (a warped Pikachu returned a name and no number).
+Needs a trained detector or a fiducial jig before it is worth building on.
+
+**Constrained number decode works on mildly degraded images.** Ask the model to
+choose the printed number from a short list (truth plus four same-width
+distractors plus "unreadable"):
+
+| Condition | Free-text number | Constrained choice |
+| --- | --- | --- |
+| realistic (30) | 7/30 | **14/30** |
+| clean (21 of 40 measured) | 33/40 | 16/21 |
+| blur-strong (16) | 0-1/30 | 1/16 |
+
+So the win is real at moderate degradation and vanishes under heavy blur — the
+answer there is a retake, not a better decoder. This is now implemented as a
+single guarded second pass (see commit `2af12c8`): it runs only when the number
+is missing, the scan is undecided, and the photo is not known to be blurred.
+
+**Acceptance faults fixed** (commit `806e5c7`): gallery subset codes no longer
+contradict full abbreviations, a visual pick that contradicts the read goes to
+review, and blurred scans need two confirmed signals before accepting.
