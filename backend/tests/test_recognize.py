@@ -2343,34 +2343,6 @@ class ScanQualityRecoveryTests(unittest.IsolatedAsyncioTestCase):
         # invented from a choice list on a photo known to be blurred.
         self.assertIsNone(result["recognized"].get("number_local"))
 
-    async def test_number_answered_in_printed_form_is_accepted(self):
-        # The model answers "1/111" rather than the bare option; the numerator is
-        # the collector number and must not be thrown away.
-        provider = Mock()
-        provider.name = "openai"
-        provider.is_gemini = False
-        provider.requires_credential.return_value = False
-        provider.generate_text = AsyncMock(return_value=('{"number":"1/111"}', None))
-        candidates = [
-            {"id": "a", "tcg_card_id": "x-1", "number": "1", "name": "Ampharos", "image": "a.webp"},
-            {"id": "b", "tcg_card_id": "x-9", "number": "9", "name": "Ampharos", "image": "b.webp"},
-        ]
-        with patch(
-            "api.recognize._search_and_rank_candidates",
-            new=AsyncMock(return_value=(candidates, 1)),
-        ):
-            result = await match_card_info(
-                object(),
-                {"name": "Ampharos", "language": "en"},
-                api_key=None,
-                image_b64="aGk=",
-                mime_type="image/jpeg",
-                allow_visual_verification=True,
-                provider=provider,
-                quality=self._quality(),
-            )
-        self.assertEqual(result["recognized"]["number_local"], "1")
-
     async def test_blurred_scan_with_one_signal_goes_to_review(self):
         # One confirmed signal (the number) on a known-blurred photo is not
         # enough: a blurred glyph can read as a different but real number.

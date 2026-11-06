@@ -264,13 +264,14 @@ answer there is a retake, not a better decoder. This is now implemented as a
 single guarded second pass (see commit `2af12c8`): it runs only when the number
 is missing, the scan is undecided, and the photo is not known to be blurred.
 
-**The live-style options are much harder, and the first implementation was
-broken.** Re-running the experiment with the catalogue's real printings as
-options instead of random distractors: 5 images asked, 0 recovered — but three of
-those "failures" were the model answering in printed form ("1/111") while the
-parser expected a bare option, so the answer was discarded. With numerator
-parsing, 2 of 5 recover. That bug is fixed (commit `1b0f7d0`); the real recovery
-rate on live options is still unknown and needs a larger sample.
+**Caveat on the end-to-end evidence.** The 14/30 figure comes from the offline
+experiment, where the option list held the true number plus four *random*
+same-width distractors. In the live pipeline the options are the catalogue's
+printings, which are far more confusable, and a 6-image spot check of the shipped
+path read 0 of 6 numbers correctly (181 for 1, 68 for 1, 04 for 046, and three
+nulls). That is too small and too slow to be conclusive — each live scan also
+falls back to TCGdex over the network — but it means the shipped re-ask is
+**unproven in situ** and should be measured properly before being trusted.
 
 **Acceptance faults fixed** (commit `806e5c7`): gallery subset codes no longer
 contradict full abbreviations, a visual pick that contradicts the read goes to
