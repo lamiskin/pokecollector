@@ -99,9 +99,18 @@ Error taxonomy of the 8 wrong accepts:
   146, Ampharos 1 as 111, Pineco 1 as 005, M Venusaur EX 2 as 141, and a blurred
   Charizard read as "Charizard V #041". Fixing these needs better reading, not
   better ranking.
-- **2 are a matcher bug.** A Flareon printed as `TG01` was read correctly as
-  `TG01` but matched to Flareon #3: the gallery prefix is lost somewhere between
-  retrieval and ranking.
+- **2 are a gallery-prefix matcher bug.** A Flareon printed as `TG01` was read
+  correctly (`number_local=TG01`, `set_code=TG`) and the right card
+  `swsh9tg-TG01` *is* in the candidate list — at position 2, behind `base2-3`
+  (Base Set 2 Flareon, number 3). Diagnosis: `normalize_scanner_card_number`
+  turns `TG01` into `tg1`, so the gallery printing is admitted as a *gallery
+  alternative* rather than as a number match; that path appends it after the
+  main rows and `_metadata_decision` discards the `number` signal for gallery
+  candidates, so no unique-number acceptance fires. Ranking then leaves a
+  contradictory row first, the decision blocks, and visual verification picks
+  the wrong Flareon. Reproduce with `read={"name":"Flareon","number_local":"TG01",
+  "set_code":"TG","regulation_mark":"D","artist":"You Iribi","language":"en"}`
+  against the local catalogue.
 - The other 8 incorrect results were **not** accepted, so they reached review —
   which is the designed behaviour.
 
