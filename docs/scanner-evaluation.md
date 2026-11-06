@@ -249,29 +249,23 @@ card in 12/31 clean, 10/30 realistic and 11/16 real photos, and successful warps
 read *worse* than the original (a warped Pikachu returned a name and no number).
 Needs a trained detector or a fiducial jig before it is worth building on.
 
-**Constrained number decode works on mildly degraded images.** Ask the model to
-choose the printed number from a short list (truth plus four same-width
-distractors plus "unreadable"):
+**Constrained number decode does not survive real candidates.** Asking the model
+to choose the printed number from a short list looked promising offline (14/30
+vs 7/30 on `realistic`) — but that list held the truth plus four *random*
+same-width distractors. With the catalogue's real printings as options, on 23
+`realistic` images:
 
-| Condition | Free-text number | Constrained choice |
-| --- | --- | --- |
-| realistic (30) | 7/30 | **14/30** |
-| clean (21 of 40 measured) | 33/40 | 16/21 |
-| blur-strong (16) | 0-1/30 | 1/16 |
+| Measure | Result |
+| --- | --- |
+| free-text number correct | 8/23 |
+| re-asked with real printings | 12 asked |
+| recovered by the choice list | **1** |
+| answered "unreadable" | 7 |
 
-So the win is real at moderate degradation and vanishes under heavy blur — the
-answer there is a retake, not a better decoder. This is now implemented as a
-single guarded second pass (see commit `2af12c8`): it runs only when the number
-is missing, the scan is undecided, and the photo is not known to be blurred.
-
-**Caveat on the end-to-end evidence.** The 14/30 figure comes from the offline
-experiment, where the option list held the true number plus four *random*
-same-width distractors. In the live pipeline the options are the catalogue's
-printings, which are far more confusable, and a 6-image spot check of the shipped
-path read 0 of 6 numbers correctly (181 for 1, 68 for 1, 04 for 046, and three
-nulls). That is too small and too slow to be conclusive — each live scan also
-falls back to TCGdex over the network — but it means the shipped re-ask is
-**unproven in situ** and should be measured properly before being trusted.
+The model honestly declines when the printings are genuinely confusable, so the
+choice list adds a model call for no gain. Implemented in `2af12c8`, measured,
+**reverted in `1b2af99`/`e627067`**. The lesson: an option list of plausible
+distractors flatters the method; only real candidate sets are evidence.
 
 **Acceptance faults fixed** (commit `806e5c7`): gallery subset codes no longer
 contradict full abbreviations, a visual pick that contradicts the read goes to
