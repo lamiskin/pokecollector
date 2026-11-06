@@ -1663,6 +1663,66 @@ async def _search_and_rank_candidates(
     return deduped, number_match_count
 
 
+CONSTRAINED_NUMBER_LIMIT = 6
+_NUMBER_REPLY = re.compile(r'"number"\s*:\s*"([^"]{1,12})"')
+
+
+def _distinct_candidate_numbers(candidates: list[dict], limit: int = CONSTRAINED_NUMBER_LIMIT) -> list[str]:
+    """Collect the collector numbers the catalogue already offers for this card."""
+    numbers: list[str] = []
+    for candidate in candidates:
+        number = str(candidate.get("number") or "").strip()
+        if number and number not in numbers:
+            numbers.append(number)
+        if len(numbers) >= limit:
+            break
+    return numbers
+
+
+async def _reask_number_with_options(
+    provider: "ScanProvider",
+    api_key: str | None,
+    image_b64: str,
+    mime_type: str,
+    numbers: list[str],
+    timeout_seconds: int,
+    trace: "ScanTrace | None" = None,
+) -> str | None:
+    """Ask the model to choose the printed number from the candidates it can be.
+
+    A blurred digit string is useless as free text but can still discriminate
+    between a handful of known numbers, which is a much easier question.
+    """
+    listing = "\n".join(f"- {number}" for number in numbers)
+    parts = [
+        {"text": (
+            "This is a Pokemon Trading Card Game card. The collector number printed "
+            "near the bottom, in the form NNN/NNN, is one of these options or it is "
+            "unreadable:\n" + listing + "\n- unreadable\n"
+            'Answer with JSON only: {"number": "<the option you can read, or '
+            'unreadable>"}'
+        )},
+        image_part(mime_type, image_b64),
+    ]
+    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+        response_text, _usage = await provider.generate_text(
+            client,
+            api_key,
+            parts,
+            max_attempts=1,
+            timeout_seconds=timeout_seconds,
+        )
+    if trace:
+        trace.record_error(f"constrained number reply: {response_text[:120]}")
+    match = _NUMBER_REPLY.search(response_text or "")
+    if not match:
+        return None
+    chosen = match.group(1).strip()
+    if chosen.casefold() == "unreadable":
+        return None
+    return chosen if chosen in numbers else None
+
+
 async def match_card_info(
     db: Session,
     card_info: dict,
@@ -1695,6 +1755,48 @@ async def match_card_info(
     confident, decision = _metadata_decision(card_info, candidates)
 
     top_candidates = retain_ranked_candidates(candidates)
+
+    # The catalogue often offers the same card in a handful of printings, so a
+    # number the model could not read as free text may still be identifiable as
+    # a choice among known numbers. This runs only when the number is missing and
+    # the photo is not known to be blurred (blurred digits are not recoverable).
+    constrained_reask = (
+        not confident
+        and not card_info.get("number_local")
+        and allow_visual_verification
+        and (bool(api_key) or not provider.requires_credential())
+        and bool(image_b64)
+        and bool(mime_type)
+        and (quality is None or not quality.is_blurred)
+    )
+    if constrained_reask:
+        options = _distinct_candidate_numbers(top_candidates)
+        if len(options) >= 2:
+            try:
+                chosen = await _reask_number_with_options(
+                    provider,
+                    api_key,
+                    image_b64,
+                    mime_type,
+                    options,
+                    request_timeout_seconds,
+                    trace,
+                )
+            except Exception as exc:
+                logger.warning("Constrained number re-ask failed (non-blocking): %s", exc)
+                chosen = None
+            if chosen:
+                card_info["number_local"] = chosen
+                candidates, number_match_count = await _search_and_rank_candidates(
+                    db,
+                    card_info,
+                    trace,
+                    catalogue_fallback_budget=catalogue_fallback_budget,
+                )
+                confident, decision = _metadata_decision(card_info, candidates)
+                if confident:
+                    decision = decision or "constrained_number"
+                top_candidates = retain_ranked_candidates(candidates)
     can_compare = sum(1 for card in top_candidates if card.get("image")) >= 2
     if photo_bytes is None and image_b64:
         try:
