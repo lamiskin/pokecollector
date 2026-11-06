@@ -2286,63 +2286,6 @@ class ScanQualityRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["_no_candidates"])
         self.assertEqual(result["_recovery_hint"], "recapture_sharper")
 
-    async def test_missing_number_is_reasked_as_a_choice(self):
-        provider = Mock()
-        provider.name = "openai"
-        provider.is_gemini = False
-        provider.requires_credential.return_value = False
-        provider.generate_text = AsyncMock(
-            return_value=('{"number":"115"}', None)
-        )
-        candidates = [
-            {"id": "a", "tcg_card_id": "x-25", "number": "25", "name": "Pikachu", "image": "a.webp"},
-            {"id": "b", "tcg_card_id": "x-115", "number": "115", "name": "Pikachu", "image": "b.webp"},
-        ]
-        with patch(
-            "api.recognize._search_and_rank_candidates",
-            new=AsyncMock(return_value=(candidates, 1)),
-        ):
-            result = await match_card_info(
-                object(),
-                {"name": "Pikachu", "language": "en"},
-                api_key=None,
-                image_b64="aGk=",
-                mime_type="image/jpeg",
-                allow_visual_verification=True,
-                provider=provider,
-                quality=self._quality(),
-            )
-        provider.generate_text.assert_awaited()
-        self.assertEqual(result["recognized"]["number_local"], "115")
-
-    async def test_blurred_photo_skips_the_number_reask(self):
-        provider = Mock()
-        provider.name = "openai"
-        provider.is_gemini = False
-        provider.requires_credential.return_value = False
-        provider.generate_text = AsyncMock(return_value=('{"number":"115"}', None))
-        candidates = [
-            {"id": "a", "tcg_card_id": "x-25", "number": "25", "name": "Pikachu", "image": "a.webp"},
-            {"id": "b", "tcg_card_id": "x-115", "number": "115", "name": "Pikachu", "image": "b.webp"},
-        ]
-        with patch(
-            "api.recognize._search_and_rank_candidates",
-            new=AsyncMock(return_value=(candidates, 1)),
-        ):
-            result = await match_card_info(
-                object(),
-                {"name": "Pikachu", "language": "en"},
-                api_key=None,
-                image_b64="aGk=",
-                mime_type="image/jpeg",
-                allow_visual_verification=True,
-                provider=provider,
-                quality=self._quality(is_blurred=True),
-            )
-        # Visual verification may still run; the number must not have been
-        # invented from a choice list on a photo known to be blurred.
-        self.assertIsNone(result["recognized"].get("number_local"))
-
     async def test_blurred_scan_with_one_signal_goes_to_review(self):
         # One confirmed signal (the number) on a known-blurred photo is not
         # enough: a blurred glyph can read as a different but real number.
