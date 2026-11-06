@@ -596,7 +596,7 @@ Rules:
 - hp is the printed HP number, for Pokemon cards only. Use null for Trainer and Energy cards.
 - language is the card's language as a two-letter lowercase code: en, de, fr, it, es, pt, ja, ko, zh, or similar.
 - artist is the illustrator credit printed near the bottom, or null.
-- name is the card name exactly as printed, in the card's language.
+- name is the card name exactly as printed, in the card's language. Keep every prefix and suffix the card prints (ヒスイ, ガラル, オリジン, アローラ, M, V, VMAX, VSTAR, ex, EX): dropping a prefix names a different card.
 - name_en is the standard English card name. If the card is not English and you are unsure of the English name, copy the printed name instead.
 
 Return ONLY the JSON object, with no markdown fences and no other text before or after it. Example output:

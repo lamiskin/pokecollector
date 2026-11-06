@@ -138,6 +138,23 @@ docker compose exec ollama ollama pull qwen3-vl:8b
 
 The Ollama port does not need to be published to the host when only PokéCollector uses it on the Compose network.
 
+### Choosing a local vision model
+
+Card reading is a fixed extraction task, so a small model at a high quantization usually beats a large model squeezed into fewer bits. Measured on 48 card photographs (24 clean, 24 deliberately degraded) with the bundled prompt:
+
+| Model | Card names read | Median response | Notes |
+| --- | --- | --- | --- |
+| `qwen3.5:9b` at `UD-Q6_K_XL` (~9.7 GB) | 24/24 clean, 20/24 degraded | ~2 s | Recommended: fastest and most accurate here. |
+| Larger 27B at `Q3_K_XL` (~14 GB) | 21/21 clean, 16/24 degraded | ~44 s | Slower, and its per-request time approached the default timeout. |
+| `gemma4:12b-it-qat` (~7.2 GB) | 6/14 on the same subset | ~32 s | Weaker on card text; not recommended. |
+
+Two behaviours shape local model configuration:
+
+- **Reasoning must be off for a local reasoning model.** Left to itself, a reasoning model can spend its whole response budget on reasoning and return an empty message with HTTP 200, which looks like a parse failure rather than a timeout. PokéCollector therefore sends `reasoning_effort: "none"` to keyless endpoints; hosted APIs never receive the field. The opt-in thinking escalation removes it again.
+- **Reasoning helps some models and hurts others.** Thinking enabled the 27B to read more cards but cost about twenty times the latency, and it made the 9B return empty responses on six of fourteen cards. Measure before enabling the escalation.
+
+Run the model on a machine with enough memory for the quantization plus its context, and keep `OLLAMA_NUM_PARALLEL=1` for a single GPU: PokéCollector serializes requests to a keyless endpoint so a photo waits its turn instead of timing out inside the server.
+
 ### Other OpenAI-compatible providers
 
 The same integration can work with llama.cpp, LM Studio, vLLM, or another hosted/local server when all of these are true:

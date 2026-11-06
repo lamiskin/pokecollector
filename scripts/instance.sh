@@ -26,6 +26,10 @@ esac
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 env_file="$root/.env.$instance"
 compose_file="$root/docker-compose.yml"
+# Optional per-instance override. It lives under the gitignored instances/
+# directory because it carries host-specific settings (resolvers, extra binds)
+# that must not be committed.
+override_file="$root/instances/$instance/compose.override.yml"
 
 if [ ! -f "$env_file" ]; then
   echo "missing $env_file — copy .env.$instance.example and fill it in" >&2
@@ -33,9 +37,13 @@ if [ ! -f "$env_file" ]; then
 fi
 
 compose_bin=${COMPOSE_BIN:-podman-compose}
+compose_files=(-f "$compose_file")
+if [ -f "$override_file" ]; then
+  compose_files+=(-f "$override_file")
+fi
 
 exec "$compose_bin" \
   --project-name "pokecollector-$instance" \
   --env-file "$env_file" \
-  -f "$compose_file" \
+  "${compose_files[@]}" \
   "$@"
