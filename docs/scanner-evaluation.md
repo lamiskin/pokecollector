@@ -143,3 +143,26 @@ E2E_TAG=baseline python /tmp/e2e/e2e.py
 
 Each run appends to `/tmp/e2e/results-<tag>.jsonl`; the re-scoring step joins
 candidate ids back to the catalogue so both `sameCard` and `exact` are reported.
+
+### Japanese import, and what it changed
+
+Japanese sets were added to the sync languages and 12,507 `ja` cards were
+imported (the sync was stopped in its slow per-card tail, with the corpus
+covered). Effect on a 7-card end-to-end sample of catalogue cards:
+
+| Measure | Result |
+| --- | --- |
+| Correct card | 5/7 |
+| Correct printing | 5/7 |
+| Auto-accepted | 6/7 |
+| Wrong card accepted | 1/7 |
+
+The two Japanese cards matched exactly (`ストライク #001`, `ガラル ニャース #063`),
+which the catalogue could not do before the import. The wrong accept was an
+English Pikachu: number 115 was read as 25, so a different printing won.
+
+**Throughput caveat:** that sample took ~15 minutes for 7 images (2–19 s each,
+but gaps of minutes between some), while an identical run earlier averaged 5 s
+per image. The cause was not identified before stopping; it needs a trace-level
+look, and every timing number above should be read as "measured under whatever
+else was running".
