@@ -38,13 +38,34 @@ def _escape_like(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+def _is_kana(character: str) -> bool:
+    """True for hiragana, katakana, and their half-width forms."""
+    code = ord(character)
+    return 0x3040 <= code <= 0x30FF or 0xFF66 <= code <= 0xFF9F
+
+
 def strip_diacritics(value: str | None) -> str:
-    """Return a case-folded, accent-insensitive representation of text."""
+    """Return a case-folded, accent-insensitive representation of text.
+
+    Accents are dropped for Latin text ("Pokémon" matches "Pokemon"), but kana
+    keep their dakuten and handakuten: those marks change the syllable, so
+    dropping them would merge ガ/カ, ダ/タ, ボ/ホ — and Japanese card names do
+    differ by exactly that. The kana marks are recombined rather than discarded,
+    which also keeps this consistent with the SQL-side normalisation, where only
+    Latin letters are replaced.
+    """
     if value is None:
         return ""
     normalized = unicodedata.normalize("NFKD", str(value))
-    stripped = "".join(char for char in normalized if not unicodedata.combining(char))
-    return stripped.casefold()
+    kept: list[str] = []
+    for char in normalized:
+        if unicodedata.combining(char) and kept and _is_kana(kept[-1]):
+            kept[-1] = unicodedata.normalize("NFC", kept[-1] + char)
+            continue
+        if unicodedata.combining(char):
+            continue
+        kept.append(char)
+    return "".join(kept).casefold()
 
 
 def _portable_unaccent_expr(column):

@@ -619,6 +619,44 @@ def _normalized_scanner_name(name: object) -> str:
 
 
 _TRAILING_QUALIFIER = re.compile(r"\s*\(([^()]*)\)\s*$")
+# Printed form markers that name a variant of the same card. A model that
+# misses one has read a prefix of the right name, not a different card, so the
+# compatibility check must still admit the catalogue row; ranking and the
+# uniqueness gate below decide whether the variant is the right one. The
+# direction matters: a read may omit a marker the catalogue prints, but a read
+# must never add one the catalogue does not.
+_FORM_PREFIX_WORDS = frozenset({
+    "m", "radiant", "shining", "hisuian", "galarian", "alolan", "paldean",
+})
+_FORM_PREFIX_PHRASES = (("origin", "forme"), ("origin", "form"))
+_FORM_PREFIX_GLUED = ("ヒスイ", "ガラル", "アローラ", "オリジン", "パルデア")
+_FORM_SUFFIX_WORDS = frozenset({"ex", "gx", "v", "vmax", "vstar", "v-union"})
+
+
+def _split_name_form(name: str) -> tuple[str, frozenset[str]]:
+    """Split a printed name into its base and its variant markers."""
+    tokens = name.split()
+    markers: set[str] = set()
+    while tokens and tokens[-1].lower() in _FORM_SUFFIX_WORDS:
+        markers.add(tokens.pop().lower())
+    if tokens:
+        for phrase in _FORM_PREFIX_PHRASES:
+            if tuple(token.lower() for token in tokens[:len(phrase)]) == phrase:
+                markers.add(" ".join(phrase))
+                tokens = tokens[len(phrase):]
+                break
+        else:
+            if tokens and tokens[0].lower() in _FORM_PREFIX_WORDS:
+                markers.add(tokens[0].lower())
+                tokens = tokens[1:]
+    base = " ".join(tokens)
+    for glued in _FORM_PREFIX_GLUED:
+        if base.startswith(glued) and len(base) > len(glued) + 1:
+            markers.add(glued)
+            base = base[len(glued):].lstrip()
+            break
+    return base, frozenset(markers)
+
 # Separators and punctuation the model and the catalogue write
 # inconsistently: spaces, hyphens/dashes, apostrophes and periods. Symbols
 # that carry identity (gender signs, delta, star) are not included.
@@ -702,7 +740,21 @@ def _scanner_names_compatible(expected: object, candidate: object) -> bool:
         if candidate_qualifier else candidate_name
     )
     if _SEPARATORS.sub("", expected_base) != _SEPARATORS.sub("", candidate_base):
-        return False
+        # A dropped variant marker is the failure this model actually makes
+        # ("Venusaur EX" for "M Venusaur EX", "ハリーセン" for "ヒスイ ハリーセン").
+        # Admit the catalogue row when the read's markers are a subset of the
+        # candidate's; never when the read claims a marker the candidate lacks.
+        expected_form_base, expected_markers = _split_name_form(expected_base)
+        candidate_form_base, candidate_markers = _split_name_form(candidate_base)
+        if not (
+            _SEPARATORS.sub("", expected_form_base)
+            == _SEPARATORS.sub("", candidate_form_base)
+            and candidate_markers
+            and expected_markers < candidate_markers
+        ):
+            return False
+        # The read named the base card and dropped a marker the catalogue prints.
+        return True
     if not expected_qualifier or not candidate_qualifier:
         return True
     expected_text = _SEPARATORS.sub("", expected_qualifier.group(1))
@@ -720,6 +772,20 @@ def _identity_signal(target, candidate, matcher) -> int:
     if target in (None, "") or candidate in (None, ""):
         return 1
     return 0 if matcher(target, candidate) else 2
+
+
+def _soft_identity_signal(target, candidate, matcher) -> int:
+    """Agreement counts as evidence; disagreement counts as nothing.
+
+    A credit or HP printed in tiny type is misread precisely when it is hardest
+    to read, and the failure is a fluent substitution (a common illustrator on
+    someone else's card), so a mismatch is far more likely to be an OCR error
+    than a real contradiction. Treating it as contradiction lets a misread veto
+    a card whose number is correct, so it only ever ranks.
+    """
+    if target in (None, "") or candidate in (None, ""):
+        return 1
+    return 0 if matcher(target, candidate) else 1
 
 
 def _first_json_value(text: str, opener: str):
@@ -760,8 +826,8 @@ def _candidate_rank_key(card_info: dict, candidate: dict) -> tuple[int, ...]:
             str(candidate.get("regulation_mark") or "").strip().casefold() or None,
             lambda left, right: left == right,
         ),
-        _identity_signal(card_info.get("artist"), candidate.get("artist"), _artists_match),
-        _identity_signal(card_info.get("hp"), candidate.get("hp"), _numbers_match),
+        _soft_identity_signal(card_info.get("artist"), candidate.get("artist"), _artists_match),
+        _soft_identity_signal(card_info.get("hp"), candidate.get("hp"), _numbers_match),
     )
 
 
@@ -837,6 +903,17 @@ def _metadata_decision(card_info: dict, candidates: list[dict]) -> tuple[bool, s
 
 _REFERENCE_IMAGE_TYPES = {"PNG": "image/png", "JPEG": "image/jpeg", "WEBP": "image/webp", "GIF": "image/gif"}
 
+# Visual verification answers with a label rather than a number. A digit is the
+# most ambiguous token available here: the prompt already prints collector
+# numbers, and answers like "2" cannot be told apart from "the second card" or
+# from a misread number. Letters cannot collide with either.
+_CANDIDATE_LABELS = "ABCDEFGH"
+_CANDIDATE_PICK = re.compile(r"(?:^|\b)([A-H])(?:\b|$)", re.IGNORECASE)
+
+
+def _candidate_labels(count: int) -> str:
+    return _CANDIDATE_LABELS[:max(0, count)]
+
 
 def _reference_image_mime(data: bytes | None) -> str | None:
     """MIME type of downloaded reference artwork, or None when it is not a
@@ -864,7 +941,9 @@ async def _download_candidate_images(
 
     async def fetch(candidate: dict) -> tuple[str, bytes] | None:
         candidate_id = str(candidate.get("id") or "")
-        image_url = candidate.get("image")
+        # Prefer the large reference: the comparison decides ambiguous scans, and
+        # the thumbnail throws away exactly the small print it is meant to read.
+        image_url = candidate.get("image_hd") or candidate.get("image")
         if not candidate_id or not image_url or candidate_id in downloaded:
             return None
         parsed_url = urlparse(str(image_url))
@@ -1606,13 +1685,14 @@ async def match_card_info(
                         image_part(mime_type, image_b64),
                         {"text": (
                             "Choose the matching candidate using artwork and printed "
-                            "identity details. Respond with only its number, or 0 if "
+                            "identity details. Respond with only its letter, or 0 if "
                             "none match.\n"
                         )},
                     ]
-                    for index, candidate in enumerate(top_candidates, start=1):
+                    labels = _candidate_labels(len(top_candidates))
+                    for label, candidate in zip(labels, top_candidates):
                         parts.append({"text": (
-                            f"\nCandidate {index}: {candidate.get('name', '?')} "
+                            f"\nCandidate {label}: {candidate.get('name', '?')} "
                             f"#{candidate.get('number', '?')}"
                         )})
                         candidate_bytes = candidate_images.get(
@@ -1635,8 +1715,11 @@ async def match_card_info(
                             max_attempts=2,
                             timeout_seconds=request_timeout_seconds,
                         )
-                    pick_match = re.search(r"(\d+)", response_text)
-                    selected_position = int(pick_match.group(1)) if pick_match else None
+                    pick_match = _CANDIDATE_PICK.search(response_text)
+                    selected_position = (
+                        _CANDIDATE_LABELS.index(pick_match.group(1).upper()) + 1
+                        if pick_match else None
+                    )
                     if trace:
                         trace.record_visual_verification(
                             raw_response=response_text,

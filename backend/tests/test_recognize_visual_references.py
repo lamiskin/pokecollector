@@ -51,7 +51,7 @@ class UnseenCandidateTests(unittest.IsolatedAsyncioTestCase):
         provider = Mock()
         provider.name, provider.is_gemini = "openai", False
         provider.requires_credential.return_value = False
-        provider.generate_text = AsyncMock(return_value=("2", None))
+        provider.generate_text = AsyncMock(return_value=("B", None))
         self.provider = provider
         with patch("api.recognize._search_and_rank_candidates", new=AsyncMock(return_value=(candidates, 0))), \
                 patch("api.recognize._download_candidate_images", new=AsyncMock(return_value=images)), \

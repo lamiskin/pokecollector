@@ -60,7 +60,11 @@ class NameCompatibilityTests(unittest.TestCase):
     def test_trailing_qualifier_is_ignored_on_either_side(self):
         self.assertTrue(_scanner_names_compatible("Boss's Orders", "Boss's Orders (Giovanni)"))
         self.assertTrue(_scanner_names_compatible("Boss's Orders (Giovanni)", "Boss's Orders"))
-        self.assertFalse(_scanner_names_compatible("Pikachu", "Pikachu V"))
+        # A dropped variant marker still reaches the row: retrieval is recall,
+        # and ranking plus the uniqueness gate decide. See
+        # RecognizeErrorTests.test_a_dropped_variant_prefix_still_reaches_the_catalogue_row.
+        self.assertTrue(_scanner_names_compatible("Pikachu", "Pikachu V"))
+        self.assertFalse(_scanner_names_compatible("Pikachu V", "Pikachu"))
         self.assertFalse(_scanner_names_compatible("Orders", "Boss's Orders"))
         self.assertFalse(_scanner_names_compatible("", "Boss's Orders"))
 
@@ -78,7 +82,8 @@ class NameCompatibilityTests(unittest.TestCase):
         self.assertTrue(_scanner_names_compatible("Ho-Oh", "Ho\u2014Oh"))
         self.assertTrue(_scanner_names_compatible("Mr. Mime", "Mr Mime"))
         self.assertTrue(_scanner_names_compatible("Ho Oh", "Ho-Oh"))
-        self.assertFalse(_scanner_names_compatible("Ho-Oh", "Ho-Oh GX"))
+        self.assertTrue(_scanner_names_compatible("Ho-Oh", "Ho-Oh GX"))
+        self.assertFalse(_scanner_names_compatible("Ho-Oh GX", "Ho-Oh"))
         self.assertFalse(_scanner_names_compatible("Nidoran\u2640", "Nidoran\u2642"))
 
     def test_search_terms(self):

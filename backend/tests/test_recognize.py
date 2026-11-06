@@ -23,6 +23,7 @@ try:
         _metadata_decision,
         _normalize_artist,
         _perceptual_hash,
+        _scanner_names_compatible,
         _phash_best_match,
         build_gemini_generate_url,
         get_gemini_model,
@@ -1789,7 +1790,7 @@ class PhashMatchingTests(unittest.IsolatedAsyncioTestCase):
         ]
         gemini_response = Mock()
         gemini_response.json.return_value = {
-            "candidates": [{"content": {"parts": [{"text": "2"}]}}]
+            "candidates": [{"content": {"parts": [{"text": "B"}]}}]
         }
         visual_call = AsyncMock(return_value=gemini_response)
         with patch(
@@ -1827,7 +1828,7 @@ class PhashMatchingTests(unittest.IsolatedAsyncioTestCase):
         provider.name = "openai"
         provider.is_gemini = False
         provider.requires_credential.return_value = False
-        provider.generate_text = AsyncMock(return_value=("2", None))
+        provider.generate_text = AsyncMock(return_value=("B", None))
         client_timeouts = []
 
         class CapturingClient:
@@ -2349,6 +2350,33 @@ class ScanQualityRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
 @unittest.skipUnless(API_TEST_DEPS_AVAILABLE, "FastAPI/httpx are not installed in this lightweight test environment")
 class RecognizeErrorTests(unittest.TestCase):
+    def test_a_dropped_variant_prefix_still_reaches_the_catalogue_row(self):
+        self.assertTrue(_scanner_names_compatible("Venusaur EX", "M Venusaur EX"))
+        self.assertTrue(_scanner_names_compatible("ハリーセン", "ヒスイ ハリーセン"))
+        self.assertTrue(_scanner_names_compatible("ニャース", "ガラル ニャース"))
+        self.assertTrue(_scanner_names_compatible("Charizard", "Charizard ex"))
+
+    def test_a_read_may_not_add_a_marker_the_catalogue_lacks(self):
+        # The reverse direction would let a hallucinated form override the card.
+        self.assertFalse(_scanner_names_compatible("M Venusaur EX", "Venusaur EX"))
+        self.assertFalse(_scanner_names_compatible("ヒスイ ハリーセン", "ハリーセン"))
+
+    def test_a_leading_letter_is_only_a_marker_when_it_is_a_separate_word(self):
+        self.assertFalse(_scanner_names_compatible("Mew", "Mewtwo"))
+        # Dropping the suffix is the same directional case, so it is allowed.
+        self.assertTrue(_scanner_names_compatible("Mew", "Mew ex"))
+        self.assertTrue(_scanner_names_compatible("Mew", "Mew VMAX"))
+
+    def test_unrelated_names_stay_incompatible(self):
+        self.assertFalse(_scanner_names_compatible("Pikachu", "Raichu"))
+        self.assertFalse(_scanner_names_compatible("Venusaur EX", "M Blastoise EX"))
+
+    def test_an_artist_mismatch_is_not_a_contradiction(self):
+        info = {"artist": "PLANETA Mochizuki", "hp": None}
+        card = {"artist": "Mitsuhiro Arita", "hp": "120"}
+        key = _candidate_rank_key(info, card)
+        self.assertNotIn(2, key[-2:], "artist/hp must not veto on a mismatch")
+
     def test_reads_the_first_json_object_when_the_model_repeats_itself(self):
         response = '{"name": "Pikachu"}\n{"name": "Pikachu"}'
         self.assertEqual(_first_json_value(response, "{"), {"name": "Pikachu"})
