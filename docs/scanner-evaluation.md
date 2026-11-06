@@ -32,8 +32,41 @@ when the card is right. Score what the product decides.
 
 ## Results
 
-Local model: Qwen3.5-9B `UD-Q6_K_XL` (Ollama, `reasoning_effort: "none"`).
+### Fresh images (2025–2026 cards, unseen in training)
 
+16 images: promos, Japanese printings, Trainers and Energy from the newest sets,
+plus blurred and badly framed copies. Scored at field level (the model is called
+directly, so no catalogue is involved).
+
+| Prompt | Name | English name (ja) | Collector no. | Illustrator | HP | Reg. mark | Language | Median |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Upstream prompt | 14/16 | 0/6 | 16/16 | 6/16 | 12/16 | 5/16 | 16/16 | 3.9 s |
+| Our rewritten prompt | 13/16 | 0/6 | 16/16 | 7/16 | 11/16 | 6/16 | 16/16 | 2.0 s |
+| Transcribe first, then parse | 10/16 | 0/6 | 12/16 | 7/16 | 12/16 | 5/16 | 9/16 | 2.4 s |
+| Evidence first, name last | 12/16 | 0/6 | 16/16 | 6/16 | 12/16 | 5/16 | 15/16 | 2.4 s |
+
+Conclusions:
+
+- The rewrite buys **speed**, not accuracy, on new cards. Its earlier gains were
+  measured on older printings where the fields were already readable.
+- **Transcribing first is worse**: name, number and language all drop, so a
+  transcription prompt invites paraphrase rather than copying.
+- **English-name translation fails universally** for Japanese cards (0/6 in every
+  variant), while the native name is read correctly. This is a lookup problem.
+- **Reasoning on**: four images produced no record in ten minutes, at a 240 s
+  budget each. Disabling reasoning is what makes the request finish.
+
+### Catalogue coverage dominates everything else
+
+None of the 64 unused corpus cards exist in the Dev catalogue (`0/64`), because
+sync covers `en,de` and predates 2025–2026. New-card scans therefore depend on
+the live TCGdex lookup, which answers with an older printing of a related card:
+end-to-end matching looks wrong while the reading is correct. Measure matching
+changes only on cards the catalogue actually contains.
+
+### In-catalogue regression set
+
+Local model: Qwen3.5-9B `UD-Q6_K_XL` (Ollama, `reasoning_effort: "none"`).
 | Run | sameCard | exact | accept | wrongCard | median |
 | --- | --- | --- | --- | --- | --- |
 | Baseline (prompt rewrite, artist-comma, kana/name-gate/marker/soft-signal fixes) | 48/48 | 31/48 | 36/48 | 0 | 5.1 s |
