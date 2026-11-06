@@ -288,6 +288,25 @@ def _gallery_number_match(row_number, target_number) -> bool:
     )
 
 
+def _set_codes_compatible(left, right) -> bool:
+    """Whether a printed set code and a catalogue abbreviation can be one set.
+
+    Gallery subsets print only the subset code (TG, GG, RC) while the catalogue
+    stores the full abbreviation (SWSH9TG). For these, one being a suffix of the
+    other is agreement rather than contradiction; requiring equality would veto a
+    correct card on the strength of a correctly read subset code.
+    """
+    left = str(left or "").strip().casefold()
+    right = str(right or "").strip().casefold()
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    if min(len(left), len(right)) < 2:
+        return False
+    return left.endswith(right) or right.endswith(left)
+
+
 def _numbers_match(left, right) -> bool:
     normalized_left = _normalize_number(left)
     normalized_right = _normalize_number(right)
@@ -819,7 +838,7 @@ def _candidate_rank_key(card_info: dict, candidate: dict) -> tuple[int, ...]:
         _identity_signal(
             str(card_info.get("set_code") or "").strip().casefold() or None,
             str(candidate.get("set_abbreviation") or "").strip().casefold() or None,
-            lambda left, right: left == right,
+            _set_codes_compatible,
         ),
         _identity_signal(
             str(card_info.get("regulation_mark") or "").strip().casefold() or None,
@@ -1785,10 +1804,22 @@ async def match_card_info(
                         if 1 <= pick <= len(top_candidates) and (
                             str(top_candidates[pick - 1].get("id") or "") in shown_candidate_ids
                         ):
-                            winner = top_candidates[pick - 1]
-                            candidates.remove(winner)
-                            candidates.insert(0, winner)
-                            confident = True
+                            picked = top_candidates[pick - 1]
+                            # A visual comparison of near-identical artwork must not
+                            # overrule metadata the model already read: if the pick
+                            # contradicts the printed number, set, total or
+                            # regulation mark, keep it for review instead of
+                            # accepting a card the evidence contradicts.
+                            if 2 in _candidate_rank_key(card_info, picked):
+                                if trace:
+                                    trace.record_error(
+                                        "visual pick contradicted read metadata"
+                                    )
+                            else:
+                                winner = picked
+                                candidates.remove(winner)
+                                candidates.insert(0, winner)
+                                confident = True
                             # Unchanged for Gemini: this value is persisted in
                             # diagnostics and asserted by the existing tests.
                             decision = (
@@ -1797,6 +1828,14 @@ async def match_card_info(
                             )
         except Exception as exc:
             logger.warning("Visual matching failed (non-blocking): %s", exc)
+
+    # A blurred photo can carry one confidently misread digit, and a single
+    # confirmed signal is not enough to accept on when the image itself is known
+    # to be degraded: such scans go to review with a retake hint instead.
+    if confident and candidates and quality is not None and quality.is_blurred:
+        if len(_confirmed_identity_signals(card_info, candidates[0])) < 2:
+            confident = False
+            decision = None
 
     public_matches = [
         {

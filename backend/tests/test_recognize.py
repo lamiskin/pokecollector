@@ -1885,6 +1885,29 @@ class DeterministicMatchingTests(unittest.IsolatedAsyncioTestCase):
             for unused in ("rarity_symbol", "holo_foil_visible", "is_promo", "first_edition"):
                 self.assertNotIn(unused, prompt)
 
+    def test_gallery_subset_code_agrees_with_full_abbreviation(self):
+        recognized = normalize_recognized_card_info(
+            {"number_local": "TG01", "set_code": "TG", "language": "en"}
+        )
+        candidate = {"number": "TG01", "set_abbreviation": "SWSH9TG"}
+        key = _candidate_rank_key(recognized, candidate)
+        self.assertEqual(key[0], 0, "gallery number should match")
+        self.assertEqual(key[3], 0, "subset code should agree with the full abbreviation")
+
+    def test_unrelated_set_codes_still_contradict(self):
+        recognized = normalize_recognized_card_info(
+            {"number_local": "25", "set_code": "SV", "language": "en"}
+        )
+        candidate = {"number": "25", "set_abbreviation": "SWSH1"}
+        self.assertEqual(_candidate_rank_key(recognized, candidate)[3], 2)
+
+    def test_single_letter_set_code_never_suffix_matches(self):
+        recognized = normalize_recognized_card_info(
+            {"number_local": "4", "set_code": "D", "language": "en"}
+        )
+        candidate = {"number": "4", "set_abbreviation": "BASE4"}
+        self.assertEqual(_candidate_rank_key(recognized, candidate)[3], 2)
+
     def test_unknown_is_neutral_and_contradiction_is_demoted(self):
         recognized = normalize_recognized_card_info({
             "number_local": "25",
@@ -2241,13 +2264,13 @@ class ScanQualityRecoveryTests(unittest.IsolatedAsyncioTestCase):
         image.save(buffer, format="JPEG", quality=95)
         return buffer.getvalue()
 
-    async def _match(self, candidates, quality):
+    async def _match(self, candidates, quality, card_info=None):
         with patch(
             "api.recognize._search_and_rank_candidates",
             new=AsyncMock(return_value=(candidates, 0)),
         ):
             return await match_card_info(
-                object(), {"name": "Unknown"}, quality=quality
+                object(), card_info or {"name": "Unknown"}, quality=quality
             )
 
     async def test_empty_candidates_are_signalled_with_a_manual_review_hint(self):
@@ -2262,6 +2285,37 @@ class ScanQualityRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result["_no_candidates"])
         self.assertEqual(result["_recovery_hint"], "recapture_sharper")
+
+    async def test_blurred_scan_with_one_signal_goes_to_review(self):
+        # One confirmed signal (the number) on a known-blurred photo is not
+        # enough: a blurred glyph can read as a different but real number.
+        result = await self._match(
+            [{"id": "right", "number": "25", "image": "right.webp"}],
+            self._quality(is_blurred=True),
+            card_info={"name": "Pikachu", "number_local": "25"},
+        )
+        self.assertFalse(result["_identity_confident"])
+
+    async def test_blurred_scan_with_two_signals_still_accepts(self):
+        result = await self._match(
+            [{"id": "right", "number": "25", "printed_total": 100, "image": "right.webp"}],
+            self._quality(is_blurred=True),
+            card_info={
+                "name": "Pikachu",
+                "number_local": "25",
+                "number_total": "100",
+                "language": "en",
+            },
+        )
+        self.assertTrue(result["_identity_confident"])
+
+    async def test_sharp_scan_still_accepts_on_one_signal(self):
+        result = await self._match(
+            [{"id": "right", "number": "25", "image": "right.webp"}],
+            self._quality(),
+            card_info={"name": "Pikachu", "number_local": "25", "language": "en"},
+        )
+        self.assertTrue(result["_identity_confident"])
 
     async def test_matches_are_never_flagged_as_no_candidates(self):
         result = await self._match(
