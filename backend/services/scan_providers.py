@@ -883,10 +883,21 @@ class ScanProvider:
             "model": self.model(),
             "messages": [{"role": "user", "content": _openai_content(parts)}],
         }
+        if uses_single_slot_endpoint():
+            # A self-hosted reasoning model answers a fixed extraction without
+            # benefit from a chain of thought, and left to itself it can spend
+            # the whole context on reasoning and emit no content at all
+            # (measured: 6 of 14 cards returned empty after ~118s). Disabling it
+            # is both far faster and more reliable. Only sent to keyless local
+            # endpoints, since a hosted API may reject an unknown field.
+            openai_payload["reasoning_effort"] = "none"
         if think:
             # Ollama's OpenAI-compatible endpoint returns reasoning in a separate
             # message field, so content stays the bare JSON the parser expects.
+            # Dropping the default above restores the model's own reasoning, which
+            # is what the opt-in escalation path is asking for.
             openai_payload["think"] = True
+            openai_payload.pop("reasoning_effort", None)
         response = await post_openai_chat(
             client,
             openai_chat_completions_url(),

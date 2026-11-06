@@ -907,5 +907,42 @@ class SingleSlotEndpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(peak, 1)
 
 
+@unittest.skipUnless(DEPS, "FastAPI/SQLAlchemy are not installed in this environment")
+class ReasoningEffortTests(_Fixture, unittest.TestCase):
+    """A local reasoning model must be asked not to reason on a fixed extraction."""
+
+    def _payload_for(self, env, think=False):
+        client = _FakeClient([
+            _FakeResponse(200, {"choices": [{"message": {"content": '{"name": "X"}'}}]})
+        ])
+        with patch.dict(os.environ, env):
+            asyncio.run(
+                ScanProvider(OPENAI, "chosen-model").generate_text(
+                    client, "", [text_part("hi")], think=think
+                )
+            )
+        return client.calls[0]["json"]
+
+    def test_a_local_endpoint_is_asked_not_to_reason(self):
+        payload = self._payload_for(
+            {"OPENAI_BASE_URL": LOCAL_URL, "OPENAI_API_KEY_REQUIRED": "false"}
+        )
+        self.assertEqual(payload.get("reasoning_effort"), "none")
+        self.assertNotIn("think", payload)
+
+    def test_a_hosted_endpoint_is_not_sent_the_local_field(self):
+        payload = self._payload_for(
+            {"OPENAI_BASE_URL": DEFAULT_OPENAI_BASE_URL, "OPENAI_API_KEY_REQUIRED": "true"}
+        )
+        self.assertNotIn("reasoning_effort", payload)
+
+    def test_the_escalation_path_restores_reasoning(self):
+        payload = self._payload_for(
+            {"OPENAI_BASE_URL": LOCAL_URL, "OPENAI_API_KEY_REQUIRED": "false"}, think=True
+        )
+        self.assertNotIn("reasoning_effort", payload)
+        self.assertTrue(payload.get("think"))
+
+
 if __name__ == "__main__":
     unittest.main()
