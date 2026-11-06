@@ -194,3 +194,36 @@ but gaps of minutes between some), while an identical run earlier averaged 5 s
 per image. The cause was not identified before stopping; it needs a trace-level
 look, and every timing number above should be read as "measured under whatever
 else was running".
+
+### Model and prompt comparison at scale (100 images, 400 requests)
+
+Same 100 images per run: 40 clean, 30 `blur-strong`, 30 `realistic`; 50 English,
+50 Japanese. Field-level scoring, no catalogue.
+
+| Run | Name | English name (ja) | No. | Illustrator | HP | Reg. | Lang | Median |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Qwen3.8-27B · our prompt | 75/100 | 0/50 | 40/100 | 22/100 | 69/100 | 23/100 | 97/100 | 4.3 s |
+| Qwen3.8-27B · upstream prompt | 71/100 | 0/50 | 41/100 | 30/100 | 67/100 | 14/100 | 92/100 | 4.2 s |
+| Qwen3.5-9B · our prompt | 73/100 | 0/50 | 41/100 | 31/100 | 64/100 | 26/100 | 99/100 | 2.0 s |
+| Qwen3.5-9B · upstream prompt | 72/100 | 0/50 | 43/100 | 30/100 | 65/100 | 16/100 | 98/100 | 2.5 s |
+
+Card-name accuracy by condition:
+
+| Condition | 27B ours | 27B upstream | 9B ours | 9B upstream |
+| --- | --- | --- | --- | --- |
+| clean (40) | 37 | 38 | 37 | 35 |
+| realistic (30) | 26 | 25 | 27 | 26 |
+| blur-strong (30) | 12 | 8 | 9 | 11 |
+
+Conclusions:
+
+- **The 27B does not justify its latency.** Name 75 vs 73 and number 40 vs 41 are
+  inside the noise for n=100, at more than twice the response time. It is *worse*
+  on illustrator (22 vs 31), which is the field where fluency fabricates.
+- **Heavy blur is a wall.** Under `blur-strong`, both models read ~1/3 of names
+  and essentially zero collector numbers (0–1 of 30). Such scans cannot be
+  matched to a printing regardless of ranking.
+- **The prompt rewrite's durable win is the regulation mark** (26 vs 16 on the
+  9B; 23 vs 14 on the 27B), consistent with the fresh-card set.
+- **Japanese English names remain 0/50 everywhere** while native names are read
+  correctly; this is a catalogue lookup problem, not a model or prompt problem.
