@@ -50,7 +50,7 @@ from services.scan_providers import (
 )
 import logging
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
-from sqlalchemy import func, or_
+from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 from api.auth import get_current_user
 from database import get_db
@@ -718,6 +718,87 @@ _NAME_SEARCH_SQL_PUNCTUATION = (
 )
 
 
+def _edit_distance_at_most_one(left: str, right: str) -> bool:
+    """Whether two normalized names differ by a single insertion/deletion/substitution."""
+    if abs(len(left) - len(right)) > 1:
+        return False
+    if left == right:
+        return True
+    if len(left) == len(right):
+        return sum(1 for a, b in zip(left, right) if a != b) == 1
+    short, long_ = (left, right) if len(left) < len(right) else (right, left)
+    i = j = 0
+    skipped = False
+    while i < len(short) and j < len(long_):
+        if short[i] == long_[j]:
+            i += 1
+            j += 1
+            continue
+        if skipped:
+            return False
+        skipped = True
+        j += 1
+    return True
+
+
+def _qualifiers_compatible(left, right) -> bool:
+    """Whether two printed names agree on a parenthetical qualifier.
+
+    ``_scanner_names_compatible`` allows either side to omit the qualifier,
+    which is right for a read that simply dropped it. It is wrong for the
+    number-first path, where retrieval already failed: two different named
+    printings of the same card share a number and must stay distinguishable.
+    """
+    left_match = _TRAILING_QUALIFIER.search(str(left or ""))
+    right_match = _TRAILING_QUALIFIER.search(str(right or ""))
+    if not left_match or not right_match:
+        return True
+    return (
+        _SEPARATORS.sub("", left_match.group(1)).casefold()
+        == _SEPARATORS.sub("", right_match.group(1)).casefold()
+    )
+
+
+def _name_tokens(value) -> list[str]:
+    return [t.casefold() for t in re.findall(r"[^\W_]+", str(value or ""), flags=re.UNICODE)]
+
+
+def _names_token_superset(short, long_) -> bool:
+    """Whether every word of `short` appears in `long_` and they share a real word.
+
+    Catalogue names carry words the card does not print in the read name
+    ("Growing Grass Energy" for a read of "Growing Energy"), because the colour
+    word sits inside the printed name. This is recall only; the decision layer
+    still requires a unique collector number.
+    """
+    short_tokens = _name_tokens(short)
+    long_tokens = _name_tokens(long_)
+    # A single word is not evidence: "Energy" would otherwise admit every
+    # energy card in the catalogue.
+    if len(short_tokens) < 2 or len(long_tokens) <= len(short_tokens):
+        return False
+    if not set(short_tokens) <= set(long_tokens):
+        return False
+    return any(len(token) >= 4 for token in short_tokens)
+
+
+def _fuzzy_names_compatible(left, right) -> bool:
+    """One-character tolerance for a name that was read with a single typo.
+
+    ``Latos`` and ``Latios`` are the same card; a single transposed letter is an
+    OCR error, not a different species. Only applied together with an exact
+    collector-number match, and only for names long enough that one edit cannot
+    turn one species into another.
+    """
+    left_key = _name_search_key(left).casefold()
+    right_key = _name_search_key(right).casefold()
+    if not left_key or not right_key:
+        return False
+    if min(len(left_key), len(right_key)) < 5:
+        return False
+    return _edit_distance_at_most_one(left_key, right_key)
+
+
 def _name_search_key(name: str) -> str:
     """Remove separators while retaining identity-bearing symbols."""
     base = _TRAILING_QUALIFIER.sub("", str(name or "")).strip() or str(name or "").strip()
@@ -835,7 +916,7 @@ def _candidate_rank_key(card_info: dict, candidate: dict) -> tuple[int, ...]:
         _printed_total_signal(
             card_info.get("number_total"), candidate.get("printed_total")
         ),
-        _identity_signal(
+        _soft_identity_signal(
             str(card_info.get("set_code") or "").strip().casefold() or None,
             str(candidate.get("set_abbreviation") or "").strip().casefold() or None,
             _set_codes_compatible,
@@ -1338,6 +1419,18 @@ async def _search_and_rank_candidates(
             )
             if normalized_name_filter is not None:
                 name_filters.append(normalized_name_filter)
+            # A catalogue name can carry extra words the card shows as part of
+            # the name: the read "Growing Energy" is printed as "Growing Grass
+            # Energy". Requiring every read token is a recall-only relaxation;
+            # ranking and the uniqueness decision still do the accepting.
+            tokens = re.findall(r"[^\W_]+", search_name, flags=re.UNICODE)
+            if len(tokens) >= 2 and all(len(token) >= 3 for token in tokens):
+                token_conditions = [
+                    accent_insensitive_contains(db, Card.name, token)
+                    for token in tokens
+                ]
+                if all(condition is not None for condition in token_conditions):
+                    name_filters.append(and_(*token_conditions))
             name_filter = or_(*name_filters) if name_filters else None
             if name_filter is None:
                 rows = []
@@ -1374,8 +1467,23 @@ async def _search_and_rank_candidates(
                     Card.custom_image_url,
                 ).order_by(Card.id)
                 for row in projected_rows.yield_per(200):
-                    if not _scanner_names_compatible(expected_name, row.name):
+                    # Two differently-named printings of one card share a name
+                    # base and a collector number; the qualifier is the only
+                    # thing separating them, so it must agree when both print one.
+                    if not _qualifiers_compatible(card_name, row.name):
                         continue
+                    if not _scanner_names_compatible(expected_name, row.name):
+                        # A single misread character ("Latos" for "Latios") must
+                        # not hide the card when the collector number is exact.
+                        if not (
+                            target_number
+                            and normalize_scanner_card_number(row.number) == target_number
+                            and (
+                                _fuzzy_names_compatible(expected_name, row.name)
+                                or _names_token_superset(expected_name, row.name)
+                            )
+                        ):
+                            continue
                     if len(rows) < SEARCH_CANDIDATE_QUERY_LIMIT:
                         rows.append(row)
                     if (
@@ -1414,7 +1522,12 @@ async def _search_and_rank_candidates(
                 # not compare names, so admitting a number-collision row
                 # ("Mewtwo" for a scan of "Mew", both #4) could auto-file the
                 # wrong card.
-                if target_number and not expected_name:
+                # Fires when nothing was read, and also when a read name found
+                # no candidate at all: a single misread letter ("Latos" for
+                # "Latios") must not hide a card whose collector number is exact.
+                # In that case the row must still be name-plausible, so a
+                # number collision with a different species stays out.
+                if target_number and (not expected_name or not rows):
                     number_variants = {
                         target_number,
                         target_number.zfill(2),
@@ -1453,6 +1566,19 @@ async def _search_and_rank_candidates(
                         if row.id in present_ids:
                             continue
                         if normalize_scanner_card_number(row.number) != target_number:
+                            continue
+                        # Compare against the full read name here, not the
+                        # qualifier-stripped one: "Professor's Research
+                        # (Professor Oak)" must not match another named printing
+                        # just because both reduce to "Professor's Research".
+                        if expected_name and not (
+                            _qualifiers_compatible(card_name, row.name)
+                            and (
+                                _scanner_names_compatible(search_name, row.name)
+                                or _fuzzy_names_compatible(search_name, row.name)
+                                or _names_token_superset(search_name, row.name)
+                            )
+                        ):
                             continue
                         rows.append(row)
                         present_ids.add(row.id)

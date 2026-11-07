@@ -18,6 +18,8 @@ try:
         RECOGNIZE_PROMPT,
         _apply_printed_total_mismatch,
         _candidate_rank_key,
+    _names_token_superset,
+    _fuzzy_names_compatible,
         _download_candidate_images,
         _first_json_value,
         _metadata_decision,
@@ -1885,6 +1887,19 @@ class DeterministicMatchingTests(unittest.IsolatedAsyncioTestCase):
             for unused in ("rarity_symbol", "holo_foil_visible", "is_promo", "first_edition"):
                 self.assertNotIn(unused, prompt)
 
+    def test_single_letter_typo_still_reaches_the_card(self):
+        # "Latos" for "Latios": retrieval failed on the name, but the collector
+        # number and printed total are exact, so the row must be reachable.
+        self.assertTrue(_fuzzy_names_compatible("Latos", "Latios"))
+        self.assertFalse(_fuzzy_names_compatible("Mew", "Mewtwo"))
+        self.assertFalse(_fuzzy_names_compatible("Ekans", "Arbok"))
+
+    def test_extra_word_in_the_catalogue_name_is_reachable(self):
+        # "Growing Energy" is printed as "Growing Grass Energy".
+        self.assertTrue(_names_token_superset("Growing Energy", "Growing Grass Energy"))
+        self.assertFalse(_names_token_superset("Mew", "Mewtwo ex"))
+        self.assertFalse(_names_token_superset("Energy", "Growing Grass Energy"))
+
     def test_gallery_subset_code_agrees_with_full_abbreviation(self):
         recognized = normalize_recognized_card_info(
             {"number_local": "TG01", "set_code": "TG", "language": "en"}
@@ -1894,19 +1909,21 @@ class DeterministicMatchingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(key[0], 0, "gallery number should match")
         self.assertEqual(key[3], 0, "subset code should agree with the full abbreviation")
 
-    def test_unrelated_set_codes_still_contradict(self):
+    def test_unrelated_set_codes_do_not_agree(self):
+        # Set codes are three or four characters in tiny print and are misread
+        # fluently ("FUS" for "FST"), so a mismatch ranks but never vetoes.
         recognized = normalize_recognized_card_info(
             {"number_local": "25", "set_code": "SV", "language": "en"}
         )
         candidate = {"number": "25", "set_abbreviation": "SWSH1"}
-        self.assertEqual(_candidate_rank_key(recognized, candidate)[3], 2)
+        self.assertNotEqual(_candidate_rank_key(recognized, candidate)[3], 0)
 
     def test_single_letter_set_code_never_suffix_matches(self):
         recognized = normalize_recognized_card_info(
             {"number_local": "4", "set_code": "D", "language": "en"}
         )
         candidate = {"number": "4", "set_abbreviation": "BASE4"}
-        self.assertEqual(_candidate_rank_key(recognized, candidate)[3], 2)
+        self.assertNotEqual(_candidate_rank_key(recognized, candidate)[3], 0)
 
     def test_unknown_is_neutral_and_contradiction_is_demoted(self):
         recognized = normalize_recognized_card_info({
