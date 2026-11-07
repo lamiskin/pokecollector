@@ -74,6 +74,7 @@ THINKING_FALLBACK_TIMEOUT_SECONDS = 300
 PHASH_MAX_DISTANCE = 20
 PHASH_MIN_MARGIN = 5
 PHASH_CANDIDATE_LIMIT = 8
+NUMBER_FIRST_ROW_LIMIT = 12
 # Deliberately generous relative to select_search_candidates' baseline_limit=8.
 # Exact collector-number matches are retained separately, so this cap bounds the
 # non-number baseline without risking that a heavily reprinted card name hides
@@ -739,6 +740,23 @@ def _edit_distance_at_most_one(left: str, right: str) -> bool:
         skipped = True
         j += 1
     return True
+
+
+_GENERIC_NAME_TOKENS = {"basic", "special", "energy", "card"}
+
+
+def _name_is_generic(value) -> bool:
+    """Whether a read name carries no identity beyond the card's class.
+
+    "Basic Energy" is how players describe a Fire Energy; the printed name is
+    just "Fire Energy" and the type word is what the model lost. Such a read is
+    treated as no name at all, so the collector number decides.
+    """
+    tokens = _name_tokens(value)
+    if not tokens or not all(token in _GENERIC_NAME_TOKENS for token in tokens):
+        return False
+    # A bare "Basic" is not a card; require the class word itself.
+    return any(token in {"energy", "card"} for token in tokens)
 
 
 def _qualifiers_compatible(left, right) -> bool:
@@ -1507,6 +1525,12 @@ async def _search_and_rank_candidates(
                     ):
                         break
 
+                if _name_is_generic(card_name):
+                    # "Basic Energy" identifies no particular card; let the
+                    # number and set decide instead of the class words.
+                    rows = []
+                    matching_rows = []
+                    gallery_rows = []
                 present_ids = {row.id for row in rows}
                 rows.extend(
                     row
@@ -1540,6 +1564,22 @@ async def _search_and_rank_candidates(
                         Card.lang == search_language,
                         Card.number.in_(sorted(number_variants)),
                     ]
+                    # A read set code picks the right printing before the row
+                    # limit can drop it; without it, "018" collects a dozen
+                    # unrelated cards and the real one may never be fetched.
+                    read_code = str(card_info.get("set_code") or "").strip().casefold()
+                    if read_code:
+                        set_ids = [
+                            row.id for row in db.query(Set).filter(
+                                func.lower(Set.abbreviation) == read_code
+                            ).all()
+                        ]
+                        # Card rows and set rows do not always share an id
+                        # ("sve" vs "sve_en"), so match the TCGdex id prefix too.
+                        number_filters.append(or_(
+                            Card.set_id.in_(set_ids) if set_ids else None,
+                            func.lower(Card.tcg_card_id).startswith(f"{read_code}-"),
+                        ))
                     if digital_set_ids:
                         number_filters.append(
                             or_(Card.set_id.is_(None), ~Card.set_id.in_(digital_set_ids))
@@ -1571,7 +1611,7 @@ async def _search_and_rank_candidates(
                         # qualifier-stripped one: "Professor's Research
                         # (Professor Oak)" must not match another named printing
                         # just because both reduce to "Professor's Research".
-                        if expected_name and not (
+                        if expected_name and not _name_is_generic(card_name) and not (
                             _qualifiers_compatible(card_name, row.name)
                             and (
                                 _scanner_names_compatible(search_name, row.name)
@@ -1583,8 +1623,20 @@ async def _search_and_rank_candidates(
                         rows.append(row)
                         present_ids.add(row.id)
                         seen_numbers += 1
-                        if seen_numbers >= 12:
+                        if seen_numbers >= NUMBER_FIRST_ROW_LIMIT:
                             break
+                # TCGdex ids are "{set}-{number}", so a read set code often
+                # says which of several same-number rows is meant. Keep that
+                # shortlist when it is non-empty; the uniqueness gate still
+                # decides whether anything is accepted.
+                read_set_code = str(card_info.get("set_code") or "").strip().casefold()
+                if read_set_code and len(rows) > 1:
+                    same_set = [
+                        row for row in rows
+                        if str(row.tcg_card_id or "").casefold().startswith(read_set_code)
+                    ]
+                    if same_set:
+                        rows = same_set
                 # Gallery printings with the same digits stay available even
                 # when a plain printing matches: the prefix may be what the
                 # photo lost.

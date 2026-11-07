@@ -18,6 +18,7 @@ try:
         RECOGNIZE_PROMPT,
         _apply_printed_total_mismatch,
         _candidate_rank_key,
+    _name_is_generic,
     _names_token_superset,
     _fuzzy_names_compatible,
         _download_candidate_images,
@@ -1886,6 +1887,14 @@ class DeterministicMatchingTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn(field, prompt)
             for unused in ("rarity_symbol", "holo_foil_visible", "is_promo", "first_edition"):
                 self.assertNotIn(unused, prompt)
+
+    def test_class_words_carry_no_identity(self):
+        # "Basic Energy" is how the card is described; the printed name is
+        # "Fire Energy", and the number has to decide.
+        self.assertTrue(_name_is_generic("Basic Energy"))
+        self.assertTrue(_name_is_generic("Special Energy"))
+        self.assertFalse(_name_is_generic("Fire Energy"))
+        self.assertFalse(_name_is_generic("Basic"))
 
     def test_single_letter_typo_still_reaches_the_card(self):
         # "Latos" for "Latios": retrieval failed on the name, but the collector
