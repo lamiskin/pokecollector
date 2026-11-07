@@ -1568,6 +1568,7 @@ async def _search_and_rank_candidates(
                     # limit can drop it; without it, "018" collects a dozen
                     # unrelated cards and the real one may never be fetched.
                     read_code = str(card_info.get("set_code") or "").strip().casefold()
+                    set_filter = None
                     if read_code:
                         set_ids = [
                             row.id for row in db.query(Set).filter(
@@ -1576,55 +1577,63 @@ async def _search_and_rank_candidates(
                         ]
                         # Card rows and set rows do not always share an id
                         # ("sve" vs "sve_en"), so match the TCGdex id prefix too.
-                        number_filters.append(or_(
+                        set_filter = or_(
                             Card.set_id.in_(set_ids) if set_ids else None,
                             func.lower(Card.tcg_card_id).startswith(f"{read_code}-"),
-                        ))
+                        )
                     if digital_set_ids:
                         number_filters.append(
                             or_(Card.set_id.is_(None), ~Card.set_id.in_(digital_set_ids))
                         )
-                    present_ids = {row.id for row in rows}
-                    seen_numbers = 0
-                    for row in (
-                        db.query(Card)
-                        .filter(*number_filters)
-                        .with_entities(
-                            Card.id,
-                            Card.tcg_card_id,
-                            Card.name,
-                            Card.supertype,
-                            Card.number,
-                            Card.images_small,
-                            Card.images_large,
-                            Card.rarity,
-                            Card.custom_image_url,
-                        )
-                        .order_by(Card.id)
-                        .yield_per(200)
-                    ):
-                        if row.id in present_ids:
-                            continue
-                        if normalize_scanner_card_number(row.number) != target_number:
-                            continue
-                        # Compare against the full read name here, not the
-                        # qualifier-stripped one: "Professor's Research
-                        # (Professor Oak)" must not match another named printing
-                        # just because both reduce to "Professor's Research".
-                        if expected_name and not _name_is_generic(card_name) and not (
-                            _qualifiers_compatible(card_name, row.name)
-                            and (
-                                _scanner_names_compatible(search_name, row.name)
-                                or _fuzzy_names_compatible(search_name, row.name)
-                                or _names_token_superset(search_name, row.name)
+                    def _number_rows(filters):
+                        found = []
+                        for row in (
+                            db.query(Card)
+                            .filter(*filters)
+                            .with_entities(
+                                Card.id,
+                                Card.tcg_card_id,
+                                Card.name,
+                                Card.supertype,
+                                Card.number,
+                                Card.images_small,
+                                Card.images_large,
+                                Card.rarity,
+                                Card.custom_image_url,
                             )
+                            .order_by(Card.id)
+                            .yield_per(200)
                         ):
-                            continue
+                            if row.id in present_ids:
+                                continue
+                            if normalize_scanner_card_number(row.number) != target_number:
+                                continue
+                            if expected_name and not _name_is_generic(card_name) and not (
+                                _qualifiers_compatible(card_name, row.name)
+                                and (
+                                    _scanner_names_compatible(search_name, row.name)
+                                    or _fuzzy_names_compatible(search_name, row.name)
+                                    or _names_token_superset(search_name, row.name)
+                                )
+                            ):
+                                continue
+                            found.append(row)
+                            if len(found) >= NUMBER_FIRST_ROW_LIMIT:
+                                break
+                        return found
+
+                    present_ids = {row.id for row in rows}
+                    if set_filter is not None:
+                        number_rows = _number_rows(number_filters + [set_filter])
+                        # A misread set code must not hide the card: fall back to
+                        # the unfiltered number search when the filter finds none.
+                        if not number_rows:
+                            number_rows = _number_rows(number_filters)
+                    else:
+                        number_rows = _number_rows(number_filters)
+                    for row in number_rows:
                         rows.append(row)
                         present_ids.add(row.id)
-                        seen_numbers += 1
-                        if seen_numbers >= NUMBER_FIRST_ROW_LIMIT:
-                            break
                 # TCGdex ids are "{set}-{number}", so a read set code often
                 # says which of several same-number rows is meant. Keep that
                 # shortlist when it is non-empty; the uniqueness gate still
