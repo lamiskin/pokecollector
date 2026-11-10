@@ -349,18 +349,20 @@ Two gallery sizes are now measured on the 27 real photos that have a catalogue i
 | 3,043 (17 sets, hand-picked) | centre crop | 24/26 (92%) | 25/26 |
 | 4,352 (test-card sets first, then random distractors) | centre crop | 24/27 (89%) | 25/27 (93%) |
 | 7,424 | centre crop | 23/27 (85%) | 25/27 (93%) |
-| **11,520** | centre crop | **23/27 (85%)** | **25/27 (93%)** |
-| 11,520 | whole frame | 13/27 (48%) | 21/27 (78%) |
+| 11,520 | centre crop | 23/27 (85%) | 25/27 (93%) |
+| 18,432 | centre crop | 23/27 (85%) | 25/27 (93%) |
+| **21,986 (full English catalogue)** | centre crop | **23/27 (85%)** | **25/27 (93%)** |
+| 21,986 | whole frame | 12/27 (44%) | 20/27 (74%) |
 
 Two conclusions that hold at both sizes:
 
 1. **Cropping to the card matters far more than gallery size.** Whole-frame queries
    lose ~33 points; the centre crop is worth more than any embedding choice. This
    matches the literature (rectification 13% → 74% in the Armanet ablation).
-2. **Recall plateaus**: top-1 92% → 89% → 85% → 85% at 3.0k → 4.4k → 7.4k → 11.5k,
-   with **top-5 flat at 93% throughout**. The curve has flattened by 7.4k, so gallery
-   size is no longer the limiting factor; at 11.5k (52% of the English catalogue) the
-   candidate-channel promise holds.
+2. **Recall plateaus and stays there**: top-1 92% → 89% → 85% and then flat at 85%
+   for 7.4k, 11.5k, 18.4k and the **full 21,986-card catalogue**; top-5 is 93% at
+   every size from 4.4k on. Gallery size is not the limiting factor — six-fold growth
+   from 3k to 22k costs 7 points of top-1 and nothing on top-5.
 
 **Full 22k measurement blocked by host capacity, not by the method.** Embedding ran at
 36 images/s on an idle machine but collapsed to ~1/s with the host at load average
