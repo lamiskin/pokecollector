@@ -347,22 +347,25 @@ Two gallery sizes are now measured on the 27 real photos that have a catalogue i
 | Gallery | Query | top-1 | top-5 |
 | --- | --- | --- | --- |
 | 3,043 (17 sets, hand-picked) | centre crop | 24/26 (92%) | 25/26 |
-| **4,352 (test-card sets first, then random distractors)** | centre crop | **24/27 (89%)** | **25/27 (93%)** |
-| 4,352 | whole frame | 15/27 (56%) | 22/27 (81%) |
+| 4,352 (test-card sets first, then random distractors) | centre crop | 24/27 (89%) | 25/27 (93%) |
+| **7,424** | centre crop | **23/27 (85%)** | **25/27 (93%)** |
+| 7,424 | whole frame | 13/27 (48%) | 21/27 (81%) |
 
 Two conclusions that hold at both sizes:
 
 1. **Cropping to the card matters far more than gallery size.** Whole-frame queries
    lose ~33 points; the centre crop is worth more than any embedding choice. This
    matches the literature (rectification 13% → 74% in the Armanet ablation).
-2. **No measurable degradation between 3k and 4.4k**, so the channel is not obviously
-   fragile to realistic distractor counts.
+2. **Recall drifts only slowly with gallery size**: 92% → 89% → 85% top-1 at 3.0k →
+   4.4k → 7.4k, while **top-5 stays at 93%**. With n=27 the 7-point spread is inside
+   noise, but the direction is consistent and top-5 is the number that matters for a
+   candidate channel.
 
 **Full 22k measurement blocked by host capacity, not by the method.** Embedding ran at
 36 images/s on an idle machine but collapsed to ~1/s with the host at load average
 14–16 on 16 cores, and shard jobs stalled for minutes at a time (decode was measured
 at 0.2 s for 244 images, so the stall is CPU contention, not I/O). Rather than grind
-for hours, the run was stopped at 20 of 86 shards.
+for hours, the run was stopped at 30 of 86 shards.
 
 Everything is resumable and deterministic:
 - reference images: `/tmp/opencode/straightening/refs22k` (21,986 files)
