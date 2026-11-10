@@ -348,18 +348,19 @@ Two gallery sizes are now measured on the 27 real photos that have a catalogue i
 | --- | --- | --- | --- |
 | 3,043 (17 sets, hand-picked) | centre crop | 24/26 (92%) | 25/26 |
 | 4,352 (test-card sets first, then random distractors) | centre crop | 24/27 (89%) | 25/27 (93%) |
-| **7,424** | centre crop | **23/27 (85%)** | **25/27 (93%)** |
-| 7,424 | whole frame | 13/27 (48%) | 21/27 (81%) |
+| 7,424 | centre crop | 23/27 (85%) | 25/27 (93%) |
+| **11,520** | centre crop | **23/27 (85%)** | **25/27 (93%)** |
+| 11,520 | whole frame | 13/27 (48%) | 21/27 (78%) |
 
 Two conclusions that hold at both sizes:
 
 1. **Cropping to the card matters far more than gallery size.** Whole-frame queries
    lose ~33 points; the centre crop is worth more than any embedding choice. This
    matches the literature (rectification 13% → 74% in the Armanet ablation).
-2. **Recall drifts only slowly with gallery size**: 92% → 89% → 85% top-1 at 3.0k →
-   4.4k → 7.4k, while **top-5 stays at 93%**. With n=27 the 7-point spread is inside
-   noise, but the direction is consistent and top-5 is the number that matters for a
-   candidate channel.
+2. **Recall plateaus**: top-1 92% → 89% → 85% → 85% at 3.0k → 4.4k → 7.4k → 11.5k,
+   with **top-5 flat at 93% throughout**. The curve has flattened by 7.4k, so gallery
+   size is no longer the limiting factor; at 11.5k (52% of the English catalogue) the
+   candidate-channel promise holds.
 
 **Full 22k measurement blocked by host capacity, not by the method.** Embedding ran at
 36 images/s on an idle machine but collapsed to ~1/s with the host at load average
