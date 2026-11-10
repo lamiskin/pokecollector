@@ -335,3 +335,40 @@ candidate retrieval behind `ARTWORK_CANDIDATES_ENABLED` (default off), appending
 the channel can only widen the candidate set — it cannot make an unconfirmed match
 easier to accept. Absent index, absent photo bytes or any error leaves behaviour
 unchanged.
+
+### Artwork index at catalogue scale (2026-11-11)
+
+The 3k-gallery result was measured on a hand-picked 17-set index. To test whether it
+survives a realistic gallery, 21,986 English reference images were downloaded
+(`low.webp`, 445 MB) and embedded with DINOv2 ViT-S/14 at 224 px.
+
+Two gallery sizes are now measured on the 27 real photos that have a catalogue id:
+
+| Gallery | Query | top-1 | top-5 |
+| --- | --- | --- | --- |
+| 3,043 (17 sets, hand-picked) | centre crop | 24/26 (92%) | 25/26 |
+| **4,352 (test-card sets first, then random distractors)** | centre crop | **24/27 (89%)** | **25/27 (93%)** |
+| 4,352 | whole frame | 15/27 (56%) | 22/27 (81%) |
+
+Two conclusions that hold at both sizes:
+
+1. **Cropping to the card matters far more than gallery size.** Whole-frame queries
+   lose ~33 points; the centre crop is worth more than any embedding choice. This
+   matches the literature (rectification 13% → 74% in the Armanet ablation).
+2. **No measurable degradation between 3k and 4.4k**, so the channel is not obviously
+   fragile to realistic distractor counts.
+
+**Full 22k measurement blocked by host capacity, not by the method.** Embedding ran at
+36 images/s on an idle machine but collapsed to ~1/s with the host at load average
+14–16 on 16 cores, and shard jobs stalled for minutes at a time (decode was measured
+at 0.2 s for 244 images, so the stall is CPU contention, not I/O). Rather than grind
+for hours, the run was stopped at 20 of 86 shards.
+
+Everything is resumable and deterministic:
+- reference images: `/tmp/opencode/straightening/refs22k` (21,986 files)
+- fixed embedding order (test-card sets first): `/tmp/opencode/straightening/order.json`
+- shards: `/tmp/opencode/straightening/chunks2/emb_*.npy` + `ids_*.json`
+- scripts: `embed_small.py` (256-image shards, `EMB_THREADS=4`), `merge_query.py`
+
+To finish: run `embed_small.py` on an idle machine (≈10 min at 36/s, ~45 min at 10/s),
+then `merge_query.py` — it prints top-1/top-5 for whatever shards exist.
