@@ -270,3 +270,111 @@ distractors flatters the method; only real candidate sets are evidence.
 **Acceptance faults fixed** (commit `806e5c7`): gallery subset codes no longer
 contradict full abbreviations, a visual pick that contradicts the read goes to
 review, and blurred scans need two confirmed signals before accepting.
+
+## Card straightening (2026-11-10)
+
+Goal: a prerequisite for set-symbol matching and a fixed-scale bottom-strip crop.
+
+**Corpus counts corrected.** The real figures are **88** clean renders, **1,056**
+augmented (88 × 12 variants) and **44** photos (16 original + 28 session) — earlier
+text here said 60/720/16. The augmenter lives in a separate worktree
+(`card-image-corpus/scripts/augment_test_card_corpus.py`), not this checkout.
+
+**Ground truth is free for the synthetic set.** The augmenter is deterministic
+(seeded by `card_id:variant`), so replaying a transform on a magenta-filled card and
+recovering the quad yields exact corners: visible corners matched the generator's own
+numbers to **0.5–1.5 px** (0.14% of the diagonal); corners the generator placed
+outside the frame are clipped and recorded as `null`. 1,144 rows exported, 0 skipped,
+198 with at least one clipped corner. The 44 photos were hand-annotated (see
+`corners-photos.jsonl`; all verify against the corpus SHA-256 manifest).
+
+**Classical detection is not viable.** Scored-quad detector (multi-scale Canny +
+adaptive threshold, area/convexity/right-angle/aspect≈0.716 scoring):
+
+| Split | detect @2% diag | NMCE mean | IoU |
+| --- | --- | --- | --- |
+| far | 96.6% | 2.58% | 0.956 |
+| sleeve | 37.5% | 2.89% | 0.888 |
+| realistic | 30.9% | 14.14% | 0.666 |
+| clutter | 26.4% | 17.72% | 0.660 |
+| tilt | 17.7% | 4.00% | 0.881 |
+| finger | 10.1% | 21.84% | 0.459 |
+| **real photos (39 cards)** | **5.1%** | 16.3% | 0.57 |
+| naive largest-quad (photos) | 2.5% | 38.7% | 0.10 |
+
+Where it fires the geometry is right; it rarely fires, and it **never declines** —
+so it cannot be used as a gate.
+
+**But straightening is worth having, if the geometry is roughly right.** Using the
+hand-placed corners (no detector), 28 photos with known numbers:
+
+| Corner error | Number correct |
+| --- | --- |
+| 0% | 28/28 |
+| 2% of diagonal | 28/28 |
+| 5% of diagonal | 26/28 |
+| 10% of diagonal | 20/28 |
+| full-frame control | 26/28 |
+
+So the requirement is **≤2–5% of the diagonal**, not pixel accuracy. The bottom strip
+alone loses nothing (28/28) — it is not a lossy crop — which makes it the cheap path
+for number/set re-reads. Set codes remain unreadable in every arm (`POR` → `PQR`,
+`Porsche`, `PBI`), so no arm fixes set-code reading.
+
+**Set-symbol matching parked.** Whole-band multi-scale NCC over set symbols: **top-1
+1/27** (4/27 top-3), degenerate (one template wins nearly everything at a constant
+score). Stored symbol URLs are also stale — they end `.webp` under `/univ/` and 404;
+the working pattern varies by series and must be `.png`. A localised, aligned crop
+with a shape metric would be needed.
+
+**Artwork channel (new, off by default).** `services/artwork_index.py` embeds a photo
+with an ONNX DINOv2 ViT-S/14 (384-d, ~145 ms CPU) and cosine-matches a prebuilt
+catalogue index; `scripts/build_artwork_index.py` builds it offline. Wired into
+candidate retrieval behind `ARTWORK_CANDIDATES_ENABLED` (default off), appending up to
+5 hits before ranking. Added candidates obey the same ranking and uniqueness rules, so
+the channel can only widen the candidate set — it cannot make an unconfirmed match
+easier to accept. Absent index, absent photo bytes or any error leaves behaviour
+unchanged.
+
+### Artwork index at catalogue scale (2026-11-11)
+
+The 3k-gallery result was measured on a hand-picked 17-set index. To test whether it
+survives a realistic gallery, 21,986 English reference images were downloaded
+(`low.webp`, 445 MB) and embedded with DINOv2 ViT-S/14 at 224 px.
+
+Two gallery sizes are now measured on the 27 real photos that have a catalogue id:
+
+| Gallery | Query | top-1 | top-5 |
+| --- | --- | --- | --- |
+| 3,043 (17 sets, hand-picked) | centre crop | 24/26 (92%) | 25/26 |
+| 4,352 (test-card sets first, then random distractors) | centre crop | 24/27 (89%) | 25/27 (93%) |
+| 7,424 | centre crop | 23/27 (85%) | 25/27 (93%) |
+| 11,520 | centre crop | 23/27 (85%) | 25/27 (93%) |
+| 18,432 | centre crop | 23/27 (85%) | 25/27 (93%) |
+| **21,986 (full English catalogue)** | centre crop | **23/27 (85%)** | **25/27 (93%)** |
+| 21,986 | whole frame | 12/27 (44%) | 20/27 (74%) |
+
+Two conclusions that hold at both sizes:
+
+1. **Cropping to the card matters far more than gallery size.** Whole-frame queries
+   lose ~33 points; the centre crop is worth more than any embedding choice. This
+   matches the literature (rectification 13% → 74% in the Armanet ablation).
+2. **Recall plateaus and stays there**: top-1 92% → 89% → 85% and then flat at 85%
+   for 7.4k, 11.5k, 18.4k and the **full 21,986-card catalogue**; top-5 is 93% at
+   every size from 4.4k on. Gallery size is not the limiting factor — six-fold growth
+   from 3k to 22k costs 7 points of top-1 and nothing on top-5.
+
+**Full 22k measurement blocked by host capacity, not by the method.** Embedding ran at
+36 images/s on an idle machine but collapsed to ~1/s with the host at load average
+14–16 on 16 cores, and shard jobs stalled for minutes at a time (decode was measured
+at 0.2 s for 244 images, so the stall is CPU contention, not I/O). Rather than grind
+for hours, the run was stopped at 30 of 86 shards.
+
+Everything is resumable and deterministic:
+- reference images: `/tmp/opencode/straightening/refs22k` (21,986 files)
+- fixed embedding order (test-card sets first): `/tmp/opencode/straightening/order.json`
+- shards: `/tmp/opencode/straightening/chunks2/emb_*.npy` + `ids_*.json`
+- scripts: `embed_small.py` (256-image shards, `EMB_THREADS=4`), `merge_query.py`
+
+To finish: run `embed_small.py` on an idle machine (≈10 min at 36/s, ~45 min at 10/s),
+then `merge_query.py` — it prints top-1/top-5 for whatever shards exist.

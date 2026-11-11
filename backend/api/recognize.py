@@ -12,6 +12,7 @@ from collections.abc import Callable
 from email.utils import parsedate_to_datetime
 from functools import lru_cache
 from urllib.parse import urlparse
+from services.artwork_index import is_available as artwork_index_available, search as artwork_search
 from services.tcgdex_languages import (
     is_supported_tcgdex_language,
     normalize_tcgdex_language,
@@ -1374,6 +1375,90 @@ def _digital_set_ids(db: Session) -> set[str]:
     return result
 
 
+ARTWORK_CANDIDATES_ENABLED = os.environ.get("ARTWORK_CANDIDATES_ENABLED", "0").strip().lower() in {
+    "1", "true", "yes", "on"
+}
+ARTWORK_CANDIDATE_LIMIT = 5
+
+
+def _artwork_candidates_enabled() -> bool:
+    return ARTWORK_CANDIDATES_ENABLED
+
+
+async def _append_artwork_candidates(
+    db: Session,
+    candidates: list[dict],
+    photo_bytes: bytes | None,
+    card_info: dict,
+    *,
+    limit: int = ARTWORK_CANDIDATE_LIMIT,
+) -> int:
+    """Add candidates from the artwork channel, if it is enabled and present.
+
+    A second, text-free source: the photo is embedded and matched against catalogue
+    images. It exists because a single misread character can empty the name search,
+    and no amount of name handling recovers a card whose name was not read at all.
+
+    Added candidates are ordinary candidates: ranking, uniqueness and acceptance
+    rules decide what becomes of them, so this cannot make an unconfirmed match
+    easier to accept — it only widens the candidate set.
+    """
+    if not photo_bytes:
+        return 0
+    if not artwork_index_available():
+        return 0
+    try:
+        hits = await asyncio.to_thread(artwork_search, photo_bytes, limit=limit)
+    except Exception:
+        return 0
+    if not hits:
+        return 0
+
+    existing = {card.get("id") for card in candidates}
+    wanted = [card_id for card_id, _score in hits if card_id not in existing]
+    if not wanted:
+        return 0
+    rows = (
+        db.query(Card)
+        .filter(Card.tcg_card_id.in_(wanted))
+        .with_entities(
+            Card.id, Card.tcg_card_id, Card.name, Card.supertype, Card.number,
+            Card.images_small, Card.images_large, Card.rarity, Card.lang,
+        )
+        .all()
+    )
+    by_card_id = {row.tcg_card_id: row for row in rows}
+    added: list[dict] = []
+    for card_id, _score in hits:
+        row = by_card_id.get(card_id)
+        if row is None or row.id in existing:
+            continue
+        existing.add(row.id)
+        added.append(
+            {
+                "id": row.id,
+                "tcg_card_id": row.tcg_card_id,
+                "name": row.name,
+                "card_type": row.supertype,
+                "set": None,
+                "number": row.number,
+                "image": row.images_small,
+                "image_hd": row.images_large,
+                "rarity": row.rarity,
+                "lang": row.lang,
+                "_lang": row.lang,
+                "_number_extra": False,
+                "_gallery_alternative": False,
+                "_artwork_candidate": True,
+            }
+        )
+    if not added:
+        return 0
+    await _fill_candidate_details(db, added, card_info)
+    candidates.extend(added)
+    return len(added)
+
+
 async def _search_and_rank_candidates(
     db: Session,
     card_info: dict,
@@ -1879,6 +1964,8 @@ async def match_card_info(
         trace,
         catalogue_fallback_budget=catalogue_fallback_budget,
     )
+    if _artwork_candidates_enabled() and photo_bytes:
+        await _append_artwork_candidates(db, candidates, photo_bytes, card_info)
     confident, decision = _metadata_decision(card_info, candidates)
 
     top_candidates = retain_ranked_candidates(candidates)
