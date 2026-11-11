@@ -68,6 +68,8 @@ services:
       SCAN_UPLOAD_DIR: /app/data/scan-uploads
       SCAN_TRACE_DIR: ${SCAN_TRACE_DIR:-}
       SCAN_TRACE_STORAGE_DIR: /app/data/scan-traces
+      ARTWORK_INDEX_DIR: /app/data/artwork-index
+      ARTWORK_CANDIDATES_ENABLED: ${ARTWORK_CANDIDATES_ENABLED:-0}
       BYPARR_URL: http://byparr:8191/v1
     depends_on:
       postgres:
@@ -82,6 +84,7 @@ services:
       - ${POKEDEX_IMAGE_DIR:-./data/pokedex-images}:/app/data/pokedex-images
       - ${SCAN_UPLOAD_HOST_DIR:-./data/scan-uploads}:/app/data/scan-uploads
       - ${SCAN_TRACE_HOST_DIR:-./data/scan-traces}:/app/data/scan-traces
+      - ${ARTWORK_INDEX_HOST_DIR:-./data/artwork-index}:/app/data/artwork-index
     ports:
       - "${BACKEND_PORT:-8000}:8000"
 
