@@ -930,6 +930,21 @@ class ReasoningEffortTests(_Fixture, unittest.TestCase):
         self.assertEqual(payload.get("reasoning_effort"), "none")
         self.assertNotIn("think", payload)
 
+    def test_a_local_endpoint_is_asked_for_a_repeatable_read(self):
+        payload = self._payload_for(
+            {"OPENAI_BASE_URL": LOCAL_URL, "OPENAI_API_KEY_REQUIRED": "false"}
+        )
+        # 7.5% of images flipped between identical runs before these were pinned.
+        self.assertEqual(payload.get("temperature"), 0)
+        self.assertEqual(payload.get("seed"), 0)
+
+    def test_a_hosted_endpoint_is_not_sent_sampling_fields(self):
+        payload = self._payload_for(
+            {"OPENAI_BASE_URL": DEFAULT_OPENAI_BASE_URL, "OPENAI_API_KEY_REQUIRED": "true"}
+        )
+        self.assertNotIn("temperature", payload)
+        self.assertNotIn("seed", payload)
+
     def test_a_hosted_endpoint_is_not_sent_the_local_field(self):
         payload = self._payload_for(
             {"OPENAI_BASE_URL": DEFAULT_OPENAI_BASE_URL, "OPENAI_API_KEY_REQUIRED": "true"}

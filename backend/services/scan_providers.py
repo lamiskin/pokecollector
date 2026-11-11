@@ -891,6 +891,12 @@ class ScanProvider:
             # is both far faster and more reliable. Only sent to keyless local
             # endpoints, since a hosted API may reject an unknown field.
             openai_payload["reasoning_effort"] = "none"
+            # Identical input should give an identical read: without these, 3 of
+            # 40 images flipped between runs (7.5%), which is larger than most of
+            # the differences we are trying to measure. Only sent to keyless local
+            # endpoints, since a hosted API may reject unknown fields.
+            openai_payload["temperature"] = 0
+            openai_payload["seed"] = 0
         if think:
             # Ollama's OpenAI-compatible endpoint returns reasoning in a separate
             # message field, so content stays the bare JSON the parser expects.
