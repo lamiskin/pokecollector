@@ -75,6 +75,7 @@ from services.scan_providers import (
 router = APIRouter()
 logger = logging.getLogger(__name__)
 PHOTO_PREFERENCE_SETTING_KEY = "prefer_own_card_photos"
+HOLO_EFFECTS_SETTING_KEY = "holo_effects_enabled"
 
 PER_USER_KEYS = {
     "language", "currency", "price_primary", "price_display",
@@ -88,6 +89,7 @@ PER_USER_KEYS = {
     *SCANNER_CUSTOM_MODEL_SETTINGS.values(),
     *SCANNER_CAPABILITY_SETTINGS.values(),
     SCAN_DIAGNOSTICS_SETTING_KEY, PHOTO_PREFERENCE_SETTING_KEY,
+    HOLO_EFFECTS_SETTING_KEY,
     SCANNER_GEMINI_FALLBACK_SETTING_KEY,
     SCANNER_THINKING_FALLBACK_SETTING_KEY,
 }
@@ -184,6 +186,7 @@ DEFAULT_SETTINGS = {
     PUBLIC_PROFILES_SETTING_KEY: "false",
     SCAN_DIAGNOSTICS_SETTING_KEY: "false",
     PHOTO_PREFERENCE_SETTING_KEY: "false",
+    HOLO_EFFECTS_SETTING_KEY: "false",
     SCANNER_GEMINI_FALLBACK_SETTING_KEY: "false",
     SCANNER_THINKING_FALLBACK_SETTING_KEY: "false",
 }
@@ -203,8 +206,8 @@ def _coerce_setting_value(key: str, value) -> str:
         "debug_mode", "cross_language_price_fallback",
         "cross_language_image_fallback", DIGITAL_SETS_SETTING_KEY,
         PUBLIC_PROFILES_SETTING_KEY, SCAN_DIAGNOSTICS_SETTING_KEY,
-        PHOTO_PREFERENCE_SETTING_KEY, SCANNER_GEMINI_FALLBACK_SETTING_KEY,
-        SCANNER_THINKING_FALLBACK_SETTING_KEY,
+        PHOTO_PREFERENCE_SETTING_KEY, HOLO_EFFECTS_SETTING_KEY,
+        SCANNER_GEMINI_FALLBACK_SETTING_KEY, SCANNER_THINKING_FALLBACK_SETTING_KEY,
     }:
         return "true" if str(value).lower() in {"true", "1", "yes", "on"} else "false"
     if key == "portfolio_display_mode":

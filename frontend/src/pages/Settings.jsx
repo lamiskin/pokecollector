@@ -773,6 +773,15 @@ export default function Settings() {
     }
   }
 
+  const handleHoloEffectsToggle = async (enabled) => {
+    try {
+      await updateSettings({ holo_effects_enabled: enabled ? 'true' : 'false' })
+      toast.success(t('settings.saved'))
+    } catch {
+      toast.error(t('settings.saveFailed'))
+    }
+  }
+
   const handleDeleteCardPhotos = async () => {
     const confirmed = await confirmDialog({
       title: t('common.delete'),
@@ -892,6 +901,7 @@ export default function Settings() {
   const geminiFallbackEnabled = settings.scanner_gemini_fallback === 'true'
   const thinkingFallbackEnabled = settings.scanner_thinking_fallback === 'true'
   const preferOwnCardPhotos = settings.prefer_own_card_photos === 'true'
+  const holoEffectsEnabled = settings.holo_effects_enabled === 'true'
 
   const usernameMutation = useMutation({
     mutationFn: (username) => changeUsername(username),
@@ -1407,6 +1417,16 @@ export default function Settings() {
                   value={preferOwnCardPhotos}
                   label={t('settings.preferOwnCardPhotos')}
                   onChange={handlePhotoPreferenceToggle}
+                />
+              </SettingsRow>
+              <SettingsRow
+                label={t('settings.holoEffects')}
+                description={t('settings.holoEffectsDesc')}
+              >
+                <Toggle
+                  value={holoEffectsEnabled}
+                  label={t('settings.holoEffects')}
+                  onChange={handleHoloEffectsToggle}
                 />
               </SettingsRow>
               <SettingsRow
