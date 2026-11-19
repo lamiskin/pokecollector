@@ -1630,7 +1630,7 @@
     "webcamDone": "Done",
     "webcamCaptured": "Photo captured",
     "destinationLabel": "File cards into",
-    "destinationHint": "Optional. Confirmed cards are filed into this card list whenever copies are free.",
+    "destinationHint": "Optional. Each confirmed card is added to this list too.",
     "destinationNone": "No card list — collection only",
     "destinationBinders": "Binders",
     "destinationRealDecks": "Real Decks",
