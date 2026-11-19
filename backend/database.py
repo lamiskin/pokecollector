@@ -579,6 +579,9 @@ def _run_migrations(conn):
         "CREATE INDEX IF NOT EXISTS ix_scan_queue_user_state_last_dispatched_at ON scan_queue_user_state(last_dispatched_at)",
         "CREATE INDEX IF NOT EXISTS ix_gemini_quota_state_next_request_at ON gemini_quota_state(next_request_at)",
         "CREATE INDEX IF NOT EXISTS ix_scanner_provider_limit_state_blocked_until ON scanner_provider_limit_state(blocked_until)",
+        # Optional physical card list destination for a batch scan job.
+        "ALTER TABLE scan_jobs ADD COLUMN IF NOT EXISTS binder_id INTEGER REFERENCES binders(id) ON DELETE SET NULL",
+        "CREATE INDEX IF NOT EXISTS ix_scan_jobs_binder_id ON scan_jobs(binder_id)",
         # v59: User-owned manual cards and copy-only shared templates.
         "ALTER TABLE cards ADD COLUMN IF NOT EXISTS custom_owner_id INTEGER",
         "ALTER TABLE cards ADD COLUMN IF NOT EXISTS is_shared_template BOOLEAN NOT NULL DEFAULT FALSE",

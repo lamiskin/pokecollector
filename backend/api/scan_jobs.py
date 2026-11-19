@@ -13,8 +13,13 @@ from sqlalchemy.orm import Session
 
 from api.auth import get_current_user
 from database import get_db
-from models import ScanJob, ScanJobItem, User
+from models import Binder, BinderCard, CollectionItem, ScanJob, ScanJobItem, User
 from schemas import CollectionItemCreate, CollectionItemResponse
+from services.binder_allocations import (
+    collection_item_available_quantity,
+    lock_user_card_allocations,
+    stored_binder_quantity,
+)
 from services.scan_candidate_images import fetch_and_cache_candidate_image
 from services.scan_queue import (
     drain_scan_queue,
@@ -32,6 +37,9 @@ from services.scan_storage import (
 
 router = APIRouter()
 
+# Card List types that hold exact owned copies and can be fed by a scan.
+ALLOCATABLE_SCAN_BINDER_TYPES = frozenset({"collection", "physical_deck"})
+
 
 class ResolveScanItemRequest(BaseModel):
     card_id: str | None = None
@@ -44,6 +52,130 @@ class ResolveAndAddScanItemRequest(CollectionItemCreate):
 class ResolveAndAddScanItemResponse(BaseModel):
     item: dict
     collection_item: CollectionItemResponse
+    binder_allocation: dict | None = None
+
+
+def _binder_type(binder: Binder) -> str:
+    # Legacy rows predate the column default and represent physical Binders.
+    return binder.binder_type or "collection"
+
+
+def _binder_payload(binder: Binder) -> dict:
+    return {"id": binder.id, "name": binder.name, "binder_type": _binder_type(binder)}
+
+
+def _job_payload(db: Session, job: ScanJob) -> dict:
+    """Progress payload with the optional destination Card List attached."""
+    binder = None
+    if job.binder_id is not None:
+        binder_row = db.query(Binder).filter(Binder.id == job.binder_id).first()
+        if binder_row is not None:
+            binder = _binder_payload(binder_row)
+    return {**job_progress(db, job), "binder": binder}
+
+
+def _get_scan_destination(db: Session, user: User, binder_id: int) -> Binder:
+    """Validate the optional destination Card List chosen at enqueue time."""
+    binder = (
+        db.query(Binder)
+        .filter(Binder.id == binder_id, Binder.user_id == user.id)
+        .first()
+    )
+    if binder is None:
+        raise HTTPException(status_code=404, detail="Card list not found.")
+    if _binder_type(binder) not in ALLOCATABLE_SCAN_BINDER_TYPES:
+        raise HTTPException(
+            status_code=422,
+            detail="Scanned cards can only be filed into a Binder or Real Deck.",
+        )
+    return binder
+
+
+def _allocate_scan_item_to_binder(
+    db: Session,
+    user: User,
+    binder_id: int | None,
+    collection_item: CollectionItem,
+    requested: int,
+) -> dict | None:
+    """Best-effort allocation of the copies just added into the job's list.
+
+    Runs inside the caller's transaction, so the collection add still commits
+    when the list was deleted or has no free copies. Capacity is capped by the
+    item's remaining unallocated quantity and by the binder-card 1..99 range.
+    """
+    if binder_id is None:
+        return None
+
+    binder = (
+        db.query(Binder)
+        .filter(Binder.id == binder_id, Binder.user_id == user.id)
+        .first()
+    )
+    allocation = {
+        "binder_id": binder_id,
+        "binder_name": None,
+        "requested": requested,
+        "allocated": 0,
+        "reason": "list_unavailable",
+    }
+    if binder is None or _binder_type(binder) not in ALLOCATABLE_SCAN_BINDER_TYPES:
+        return allocation
+
+    allocation["binder_name"] = binder.name
+    available = collection_item_available_quantity(db, user.id, collection_item)
+    existing = db.query(BinderCard).filter(
+        BinderCard.binder_id == binder.id,
+        BinderCard.collection_item_id == collection_item.id,
+    ).first()
+    current_quantity = stored_binder_quantity(existing.required_quantity) if existing else 0
+    allocated = max(min(requested, available, 99 - current_quantity), 0)
+
+    if allocated > 0:
+        if existing is not None:
+            existing.required_quantity = current_quantity + allocated
+        else:
+            db.add(
+                BinderCard(
+                    binder_id=binder.id,
+                    card_id=collection_item.card_id,
+                    collection_item_id=collection_item.id,
+                    required_quantity=allocated,
+                    added_at=datetime.datetime.utcnow(),
+                )
+            )
+        # A Real Deck keeps its planned requirement in step with the exact
+        # copies it now owns, so it never reports unallocated demand.
+        if _binder_type(binder) == "physical_deck":
+            plan_entry = db.query(BinderCard).filter(
+                BinderCard.binder_id == binder.id,
+                BinderCard.card_id == collection_item.card_id,
+                BinderCard.collection_item_id.is_(None),
+            ).first()
+            if plan_entry is not None:
+                plan_entry.required_quantity = min(
+                    stored_binder_quantity(plan_entry.required_quantity) + allocated,
+                    99,
+                )
+            else:
+                db.add(
+                    BinderCard(
+                        binder_id=binder.id,
+                        card_id=collection_item.card_id,
+                        collection_item_id=None,
+                        required_quantity=min(allocated, 99),
+                        added_at=datetime.datetime.utcnow(),
+                    )
+                )
+
+    allocation["allocated"] = allocated
+    if allocated >= requested:
+        allocation["reason"] = None
+    elif allocated > 0:
+        allocation["reason"] = "partial"
+    else:
+        allocation["reason"] = "no_unallocated_copies"
+    return allocation
 
 
 def _get_own_job(db: Session, job_id: int, current_user: User) -> ScanJob:
@@ -108,6 +240,7 @@ async def enqueue_scan_job(
     background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(...),
     individual_positions: str | None = Form(None),
+    binder_id: str | None = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -127,6 +260,18 @@ async def enqueue_scan_job(
             status_code=400,
             detail=provider.missing_credential_message(),
         )
+
+    # Validate the optional destination before any upload bytes are read or a
+    # job row exists, so a rejected list leaves no trace.
+    destination_id: int | None = None
+    raw_binder_id = (binder_id or "").strip()
+    if raw_binder_id:
+        try:
+            destination_id = int(raw_binder_id)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="Invalid card list.")
+        _get_scan_destination(db, current_user, destination_id)
+
     try:
         requested_individual = json.loads(individual_positions or "[]")
         if (
@@ -159,12 +304,13 @@ async def enqueue_scan_job(
             current_user.id,
             files,
             batch_modes=batch_modes,
+            binder_id=destination_id,
         )
     except ScanUploadError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
     background_tasks.add_task(drain_scan_queue, max_items=len(files))
-    return job_progress(db, job)
+    return _job_payload(db, job)
 
 
 @router.get("/recognize/jobs")
@@ -185,7 +331,7 @@ def list_scan_jobs(
         .limit(50)
         .all()
     )
-    return {"jobs": [job_progress(db, job) for job in jobs]}
+    return {"jobs": [_job_payload(db, job) for job in jobs]}
 
 
 @router.get("/recognize/jobs/{job_id}")
@@ -210,7 +356,10 @@ def get_scan_job(
         .order_by(ScanJobItem.position.asc())
         .all()
     )
-    return {**job_progress(db, job), "items": [_item_payload(item) for item in items]}
+    return {
+        **_job_payload(db, job),
+        "items": [_item_payload(item) for item in items],
+    }
 
 
 @router.get("/recognize/jobs/{job_id}/items/{item_id}/image")
@@ -367,6 +516,30 @@ def resolve_and_add_scan_job_item(
         collection_data,
         ensure_catalogue_card=False,
     )
+    # The upsert stages the collection change. Take the user allocation lock
+    # before flushing, so the collection row is never locked ahead of it (the
+    # documented ordering for every physical-list allocation), then flush and
+    # re-read the current owned count.
+    with db.no_autoflush:
+        lock_user_card_allocations(db, current_user.id)
+    db.flush()
+    collection_item = (
+        db.query(CollectionItem)
+        .filter(
+            CollectionItem.id == collection_item.id,
+            CollectionItem.user_id == current_user.id,
+        )
+        .with_for_update()
+        .populate_existing()
+        .one()
+    )
+    binder_allocation = _allocate_scan_item_to_binder(
+        db,
+        current_user,
+        item.job.binder_id,
+        collection_item,
+        int(collection_data.quantity or 1),
+    )
     relative_path = item.image_path
     item.resolved = True
     item.image_path = None
@@ -379,6 +552,7 @@ def resolve_and_add_scan_job_item(
     return {
         "item": _item_payload(item),
         "collection_item": _annotate_collection_item(db, current_user, collection_item),
+        "binder_allocation": binder_allocation,
     }
 
 

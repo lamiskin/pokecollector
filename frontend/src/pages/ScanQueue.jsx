@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, Clock3, Loader2, ScanLine, Trash2 } from 'lucide-react'
+import { ArrowLeft, BookOpen, Clock3, Loader2, PackageCheck, ScanLine, Trash2 } from 'lucide-react'
 import toast from 'react-hot-toast'
 import {
   deleteScanJob,
@@ -24,6 +24,7 @@ import {
   scanJobPollInterval,
 } from '../utils/scanJobs'
 import { formatRetryCountdown } from '../utils/retryCountdown'
+import { allocationNotice } from '../utils/scanAllocationNotice'
 
 function useRetryClock(enabled) {
   const [now, setNow] = useState(() => Date.now())
@@ -43,8 +44,26 @@ function expiryLabel(job, t) {
   return `${t('scanner.expiresOn')} ${new Date(job.expires_at).toLocaleDateString()}`
 }
 
+function destinationIcon(binder) {
+  return binder?.binder_type === 'physical_deck' ? PackageCheck : BookOpen
+}
+
+function DestinationChip({ binder, t }) {
+  const Icon = destinationIcon(binder)
+  return (
+    <span className="mt-1.5 inline-flex max-w-full items-center gap-1.5 rounded-full border border-border bg-bg-card px-2 py-0.5 text-[11px] text-text-secondary">
+      <Icon size={11} className="flex-shrink-0 text-brand-red" aria-hidden />
+      <span className="truncate">{t('scanner.filingInto').replace('{name}', binder.name)}</span>
+    </span>
+  )
+}
+
+// Auto-filing is best effort: see utils/scanAllocationNotice.js for the
+// message rules. The chosen destination is copied onto the selection so it
+// stays known while the add form is open, even if a poll clears job.binder.
 function JobRow({ job, onOpen, retryNow, t }) {
   const waitingOnly = Number(job.retrying || 0) > 0 && Number(job.active || 0) === Number(job.retrying || 0)
+  const DestinationIcon = destinationIcon(job.binder)
   return (
     <button type="button" onClick={() => onOpen(job.id)}
       className="w-full rounded-2xl border border-border bg-bg-surface p-4 text-left transition-colors hover:border-brand-red/40">
@@ -58,6 +77,12 @@ function JobRow({ job, onOpen, retryNow, t }) {
             {job.attention > 0 && job.failed_attention > 0 && ' · '}
             {job.failed_attention > 0 && `${job.failed_attention} ${t('scanner.failed')}`}
           </p>
+          {job.binder && (
+            <p className="mt-1 flex items-center gap-1 text-[11px] text-text-muted">
+              <DestinationIcon size={11} className="flex-shrink-0" aria-hidden />
+              <span className="truncate">{job.binder.name}</span>
+            </p>
+          )}
           <p className="mt-1 flex items-center gap-1 text-[11px] text-text-muted">
             <Clock3 size={11} /> {expiryLabel(job, t)}
           </p>
@@ -94,6 +119,10 @@ function JobDetail({ jobId, onObscuredChange }) {
   // see past its own item, so the page has to be the thing that remembers
   // where the reviewer is in the batch.
   const [review, setReview] = useState(null) // { itemId, matchIndex }
+  // The add modal only needs to know the add succeeded. The full response also
+  // carries the best-effort filing result, kept here so this page can explain
+  // a shortfall without making the modal aware of allocation at all.
+  const allocationRef = useRef(null)
 
   useEffect(() => {
     onObscuredChange(Boolean(addSelection || confirmation || itemModalOpen || review))
@@ -200,8 +229,9 @@ function JobDetail({ jobId, onObscuredChange }) {
 
       <div className="rounded-2xl border border-border bg-bg-surface p-4">
         <div className="flex items-center justify-between gap-3">
-          <div>
+          <div className="min-w-0">
             <p className="font-bold text-text-primary">{job.processed}/{job.total} {t('scanner.processed')}</p>
+            {job.binder && <DestinationChip binder={job.binder} t={t} />}
             <p className="mt-1 text-xs text-text-muted">{expiryLabel(job, t)}</p>
           </div>
           {Number(job.retrying || 0) > 0 && Number(job.active || 0) === Number(job.retrying || 0) ? (
@@ -230,7 +260,11 @@ function JobDetail({ jobId, onObscuredChange }) {
             key={item.id}
             jobId={job.id}
             item={item}
-            onAdd={(scanItem, match) => setAddSelection({ item: scanItem, match })}
+            onAdd={(scanItem, match) => setAddSelection({
+              item: scanItem,
+              match,
+              binderName: job.binder?.name || null,
+            })}
             onRetry={itemToRetry => retryMutation.mutate(itemToRetry)}
             onDismiss={dismiss}
             onReview={(scanItem, matchIndex) => setReview({ itemId: scanItem.id, matchIndex })}
@@ -252,7 +286,12 @@ function JobDetail({ jobId, onObscuredChange }) {
           onIndex={matchIndex => setReview(current => ({ ...current, matchIndex }))}
           onAccept={reviewItem.resolved
             ? undefined
-            : card => setAddSelection({ item: reviewItem, match: card, fromReview: true })}
+            : card => setAddSelection({
+              item: reviewItem,
+              match: card,
+              fromReview: true,
+              binderName: job.binder?.name || null,
+            })}
           onClose={() => setReview(null)}
           t={t}
         />
@@ -275,8 +314,10 @@ function JobDetail({ jobId, onObscuredChange }) {
                 confirmed_card_id: addSelection.match.tcg_card_id,
               },
             )
+            allocationRef.current = result.binder_allocation || null
             return result.collection_item
           }}
+          binderName={addSelection.binderName || job.binder?.name || null}
           // Cancelling returns to the comparison for the same photo rather
           // than skipping it: backing out of the add form is not a decision
           // about the card, and silently advancing would strand the user.
@@ -290,6 +331,15 @@ function JobDetail({ jobId, onObscuredChange }) {
             const remaining = items.filter(
               candidate => candidate.id !== finishedItemId && !candidate.resolved
             )
+            // The success toast has already fired in the modal; this one only
+            // adds the filing outcome, and only when it fell short.
+            const notice = allocationNotice(
+              allocationRef.current,
+              t,
+              addSelection.binderName || job.binder?.name || null,
+            )
+            allocationRef.current = null
+            if (notice) toast(notice, { duration: 6000 })
             setAddSelection(null)
             invalidate()
             if (remaining.length === 0) navigate('/scans', { replace: true })

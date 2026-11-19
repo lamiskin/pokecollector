@@ -1,8 +1,8 @@
 import { useEffect, useState, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
-import { Camera, Upload, ImagePlus, Trash2, X, Check, Loader2, RefreshCw, Plus } from 'lucide-react'
-import { recognizeCard, addToCollection, enqueueScanJob, getScannerConfiguration, uploadCollectionItemPhoto } from '../api/client'
+import { BookOpen, Camera, Upload, ImagePlus, Trash2, X, Check, FolderInput, Loader2, PackageCheck, RefreshCw, Plus } from 'lucide-react'
+import { recognizeCard, addToCollection, enqueueScanJob, getBinders, getScannerConfiguration, uploadCollectionItemPhoto } from '../api/client'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSettings } from '../contexts/SettingsContext'
 import { useConfirmDialog } from '../contexts/ConfirmDialogContext'
@@ -34,6 +34,91 @@ export async function attachScanFallbackPhoto({ created, match, getPhoto, upload
   }
 }
 
+// ─── Batch destination ─────────────────────────────────────────────────────
+// Only physical lists can take a card this batch actually adds: a Binder or a
+// Real Deck holds exact owned copies, so the backend can file the new card
+// there. Planned binders/decks are things you collect *towards*, not places a
+// scanned card can physically go, so they are deliberately not offered.
+function physicalScanDestinations(binders = []) {
+  const lists = Array.isArray(binders) ? binders : []
+  return {
+    binders: lists.filter(binder => binder.binder_type === 'collection'),
+    realDecks: lists.filter(binder => binder.binder_type === 'physical_deck'),
+  }
+}
+
+export function ScanDestinationField({ id, binders = [], value, onChange, disabled = false }) {
+  const { t } = useSettings()
+  const { binders: binderLists, realDecks } = physicalScanDestinations(binders)
+  const hasLists = binderLists.length > 0 || realDecks.length > 0
+  const hintId = `${id}-hint`
+
+  return (
+    <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <label htmlFor={id} className="block text-[10px] font-black uppercase tracking-[0.2em] text-text-muted">
+            {t('scanner.destinationLabel')}
+          </label>
+          <p id={hintId} className="mt-1 text-xs leading-relaxed text-text-muted">{t('scanner.destinationHint')}</p>
+        </div>
+        <FolderInput size={16} className="mt-0.5 flex-shrink-0 text-brand-red/70" aria-hidden />
+      </div>
+      <select
+        id={id}
+        value={value}
+        onChange={event => onChange(event.target.value)}
+        disabled={disabled || !hasLists}
+        aria-describedby={hintId}
+        className="select mt-3 w-full"
+      >
+        <option value="">{t('scanner.destinationNone')}</option>
+        {binderLists.length > 0 && (
+          <optgroup label={t('scanner.destinationBinders')}>
+            {binderLists.map(binder => (
+              <option key={binder.id} value={String(binder.id)}>{binder.name}</option>
+            ))}
+          </optgroup>
+        )}
+        {realDecks.length > 0 && (
+          <optgroup label={t('scanner.destinationRealDecks')}>
+            {realDecks.map(deck => (
+              <option key={deck.id} value={String(deck.id)}>{deck.name}</option>
+            ))}
+          </optgroup>
+        )}
+      </select>
+      {!hasLists && (
+        <p className="mt-2 text-xs text-text-muted">{t('scanner.destinationEmpty')}</p>
+      )}
+    </div>
+  )
+}
+
+// The last thing above the start button: one quiet line that says where the
+// staged photos are about to go, so the choice in the panel above cannot be
+// forgotten at the moment the batch is submitted.
+export function ScanDestinationSummary({ binder }) {
+  const { t } = useSettings()
+
+  if (!binder) {
+    return (
+      <p className="flex items-center justify-center gap-1.5 text-xs text-text-muted">
+        <FolderInput size={13} className="flex-shrink-0 opacity-70" aria-hidden />
+        {t('scanner.destinationSummaryNone')}
+      </p>
+    )
+  }
+
+  const Icon = binder.binder_type === 'physical_deck' ? PackageCheck : BookOpen
+  return (
+    <p className="flex min-w-0 items-center justify-center gap-1.5 text-xs text-text-secondary">
+      <Icon size={13} className="flex-shrink-0 text-brand-red" aria-hidden />
+      <span className="truncate">{t('scanner.destinationSummary').replace('{name}', binder.name)}</span>
+    </p>
+  )
+}
+
 // ─── Add-to-Collection Modal für Scan-Ergebnis ──────────────────────────────
 // `getPhoto`, when given, resolves to the Blob/File the user actually scanned.
 // Callers decide how to source it: CardScanner has the raw File in hand,
@@ -48,6 +133,7 @@ export function ScanAddModal({
   onClose,
   onAdded,
   addCard,
+  binderName = null,
   preservePhotoBeforeAdd = false,
 }) {
   const { t, exchangeRate, exchangeRateReady } = useSettings()
@@ -147,6 +233,15 @@ export function ScanAddModal({
             </div>
           </div>
 
+          {binderName && (
+            <div className="mb-4 flex items-start gap-2 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2">
+              <FolderInput size={14} className="mt-px flex-shrink-0 text-text-muted" aria-hidden />
+              <p className="text-xs leading-relaxed text-text-secondary">
+                {t('scanner.addModalFilingInto').replace('{name}', binderName)}
+              </p>
+            </div>
+          )}
+
           <div className="space-y-3">
             {/* Language */}
             <div>
@@ -226,6 +321,7 @@ export default function CardScanner({ isOpen, onClose, onCardSelected }) {
   const [scanPreviewUrl, setScanPreviewUrl] = useState(null)
   const [stagedFiles, setStagedFiles] = useState([])
   const [submittingBatch, setSubmittingBatch] = useState(false)
+  const [destinationBinderId, setDestinationBinderId] = useState('')
   const cameraRef = useRef()
   const uploadRef = useRef()
   const batchCameraRef = useRef()
@@ -241,6 +337,15 @@ export default function CardScanner({ isOpen, onClose, onCardSelected }) {
     queryFn: getScannerConfiguration,
     enabled: isOpen,
   })
+  // Shared with the Binders page, so a list created or renamed there is
+  // already current when the scanner opens.
+  const { data: binderData = [] } = useQuery({
+    queryKey: ['binders'],
+    queryFn: () => getBinders().then(r => r.data),
+    enabled: isOpen,
+  })
+  const destinationBinder = (Array.isArray(binderData) ? binderData : [])
+    .find(binder => String(binder.id) === destinationBinderId) || null
 
   useEffect(() => {
     stagedFilesRef.current = stagedFiles
@@ -345,9 +450,14 @@ export default function CardScanner({ isOpen, onClose, onCardSelected }) {
     if (!stagedFiles.length || submittingBatch) return
     setSubmittingBatch(true)
     try {
-      const job = await enqueueScanJob(stagedFiles.map(item => item.file))
+      const job = await enqueueScanJob(
+        stagedFiles.map(item => item.file),
+        [],
+        destinationBinder ? destinationBinder.id : null,
+      )
       releaseStagedFiles()
       setStagedFiles([])
+      setDestinationBinderId('')
       setPhase('capture')
       onClose?.()
       navigate(`/scans/${job.id}`)
@@ -476,6 +586,16 @@ export default function CardScanner({ isOpen, onClose, onCardSelected }) {
                 <Upload size={16} /> {t('scanner.chooseFromGallery')}
               </button>
             </div>
+
+            <ScanDestinationField
+              id="card-scanner-destination"
+              binders={binderData}
+              value={destinationBinderId}
+              onChange={setDestinationBinderId}
+              disabled={submittingBatch}
+            />
+
+            <ScanDestinationSummary binder={destinationBinder} />
 
             <button type="button" onClick={submitBatch}
               disabled={!stagedFiles.length || submittingBatch}

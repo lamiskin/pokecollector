@@ -16,7 +16,7 @@ try:
     from api.scan_jobs import router
     from api.auth import get_current_user
     from database import Base, get_db
-    from models import Card, CollectionItem, ImageCache, ScanJob, ScanJobItem, User, UserSetting
+    from models import Binder, BinderCard, Card, CollectionItem, ImageCache, ScanJob, ScanJobItem, User, UserSetting
     from services.scan_candidate_images import cache_key_for
     from services.scan_providers import scanner_capability_proof
     from services.scan_storage import resolve_scan_path
@@ -70,15 +70,77 @@ class ScanJobsApiTests(unittest.TestCase):
         self.env.stop()
         self.temp_dir.cleanup()
 
-    def _enqueue(self):
+    def _post_job(self, binder_id=None):
+        data = {"binder_id": str(binder_id)} if binder_id is not None else None
         with patch("api.recognize.get_gemini_key", return_value="secret-key"), \
                 patch("api.scan_jobs.drain_scan_queue", new=AsyncMock(return_value=0)):
-            response = self.client.post(
+            return self.client.post(
                 "/api/cards/recognize/jobs",
+                data=data,
                 files={"files": ("private-name.jpg", _jpeg_bytes(), "image/jpeg")},
             )
+
+    def _enqueue(self, binder_id=None):
+        response = self._post_job(binder_id)
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()
+
+    def _add_catalogue_card(self, card_id="card-1"):
+        self.db.add(Card(
+            id=f"{card_id}_en",
+            tcg_card_id=card_id,
+            name="Pikachu",
+            number="1",
+            lang="en",
+            is_custom=False,
+        ))
+        self.db.commit()
+
+    def _create_binder(self, binder_type="collection", name="Scan Target", owner=None):
+        binder = Binder(
+            name=name,
+            user_id=(owner or self.user).id,
+            binder_type=binder_type,
+        )
+        self.db.add(binder)
+        self.db.commit()
+        return binder
+
+    def _mark_ready(self, item, card_id="card-1"):
+        item.status = "done"
+        item.matches = [{"id": f"{card_id}_en", "tcg_card_id": card_id}]
+        self.db.commit()
+
+    def _add_scan_item(self, job_id, position, card_id="card-1"):
+        item = ScanJobItem(
+            job_id=job_id,
+            user_id=self.user.id,
+            position=position,
+            byte_size=0,
+            status="done",
+            matches=[{"id": f"{card_id}_en", "tcg_card_id": card_id}],
+        )
+        self.db.add(item)
+        self.db.commit()
+        return item
+
+    def _scan_add_payload(self, quantity=1):
+        return {
+            "confirmed_card_id": "card-1",
+            "card_id": "card-1_en",
+            "quantity": quantity,
+            "condition": "NM",
+            "variant": "Normal",
+            "lang": "en",
+            "purchase_price": None,
+        }
+
+    def _resolve_and_add(self, job_id, item_id, quantity=1):
+        with patch("services.scan_trace.record_ground_truth", return_value=1):
+            return self.client.post(
+                f"/api/cards/recognize/jobs/{job_id}/items/{item_id}/resolve-and-add",
+                json=self._scan_add_payload(quantity),
+            )
 
     def test_enqueue_list_detail_and_authenticated_image(self):
         created = self._enqueue()
@@ -484,6 +546,193 @@ class ScanJobsApiTests(unittest.TestCase):
             ).status_code,
             404,
         )
+    def test_enqueue_stores_owned_destination_and_detail_returns_it(self):
+        binder = self._create_binder("collection", "Trade Binder")
+        created = self._enqueue(binder_id=binder.id)
+        self.assertEqual(self.db.get(ScanJob, created["id"]).binder_id, binder.id)
+
+        detail = self.client.get(f"/api/cards/recognize/jobs/{created['id']}").json()
+        self.assertEqual(
+            detail["binder"],
+            {"id": binder.id, "name": "Trade Binder", "binder_type": "collection"},
+        )
+
+        deck = self._create_binder("physical_deck", "Real Deck")
+        deck_job = self._enqueue(binder_id=deck.id)
+        deck_detail = self.client.get(f"/api/cards/recognize/jobs/{deck_job['id']}").json()
+        self.assertEqual(
+            deck_detail["binder"],
+            {"id": deck.id, "name": "Real Deck", "binder_type": "physical_deck"},
+        )
+
+        plain_job = self._enqueue()
+        listed = {
+            job["id"]: job
+            for job in self.client.get("/api/cards/recognize/jobs").json()["jobs"]
+        }
+        self.assertEqual(
+            listed[created["id"]]["binder"],
+            {"id": binder.id, "name": "Trade Binder", "binder_type": "collection"},
+        )
+        self.assertEqual(
+            listed[deck_job["id"]]["binder"],
+            {"id": deck.id, "name": "Real Deck", "binder_type": "physical_deck"},
+        )
+        self.assertIsNone(listed[plain_job["id"]]["binder"])
+        self.assertIsNone(
+            self.client.get(f"/api/cards/recognize/jobs/{plain_job['id']}").json()["binder"]
+        )
+
+    def test_enqueue_rejects_planned_and_foreign_destinations(self):
+        for binder_type in ("wishlist", "deck"):
+            planned = self._create_binder(binder_type, f"Planned {binder_type}")
+            self.assertEqual(self._post_job(planned.id).status_code, 422)
+
+        foreign = self._create_binder("collection", "Other", owner=self.other_user)
+        response = self._post_job(foreign.id)
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["detail"], "Card list not found.")
+
+        self.assertEqual(self.db.query(ScanJob).count(), 0)
+        self.assertEqual(os.listdir(self.temp_dir.name), [])
+
+    def test_resolve_and_add_files_copies_and_reuses_the_allocation_row(self):
+        self._add_catalogue_card()
+        binder = self._create_binder("collection", "Trade Binder")
+        created = self._enqueue(binder_id=binder.id)
+        first = self.db.query(ScanJobItem).filter(ScanJobItem.job_id == created["id"]).one()
+        self._mark_ready(first)
+        second = self._add_scan_item(created["id"], 1)
+
+        first_response = self._resolve_and_add(created["id"], first.id)
+        second_response = self._resolve_and_add(created["id"], second.id)
+
+        self.assertEqual(first_response.status_code, 200, first_response.text)
+        self.assertEqual(second_response.status_code, 200, second_response.text)
+        self.assertEqual(
+            second_response.json()["binder_allocation"],
+            {
+                "binder_id": binder.id,
+                "binder_name": "Trade Binder",
+                "requested": 1,
+                "allocated": 1,
+                "reason": None,
+            },
+        )
+        collection_item = self.db.query(CollectionItem).one()
+        self.assertEqual(collection_item.quantity, 2)
+        rows = self.db.query(BinderCard).filter(
+            BinderCard.binder_id == binder.id,
+            BinderCard.collection_item_id.isnot(None),
+        ).all()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].collection_item_id, collection_item.id)
+        self.assertEqual(rows[0].card_id, collection_item.card_id)
+        self.assertEqual(rows[0].required_quantity, 2)
+
+    def test_partial_allocation_keeps_the_add_and_reports_partial(self):
+        self._add_catalogue_card()
+        target = self._create_binder("collection", "Target")
+        other = self._create_binder("collection", "Other")
+        # A prior quantity reduction can leave more copies allocated than owned.
+        # The scan add must still succeed and only give the list what is free.
+        collection_item = CollectionItem(
+            card_id="card-1_en",
+            user_id=self.user.id,
+            quantity=2,
+            condition="NM",
+            variant="Normal",
+            lang="en",
+        )
+        self.db.add(collection_item)
+        self.db.commit()
+        self.db.add(BinderCard(
+            binder_id=other.id,
+            card_id="card-1_en",
+            collection_item_id=collection_item.id,
+            required_quantity=3,
+        ))
+        self.db.commit()
+
+        created = self._enqueue(binder_id=target.id)
+        scan_item = self.db.query(ScanJobItem).filter(ScanJobItem.job_id == created["id"]).one()
+        self._mark_ready(scan_item)
+
+        response = self._resolve_and_add(created["id"], scan_item.id, quantity=2)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        allocation = response.json()["binder_allocation"]
+        self.assertEqual(allocation["requested"], 2)
+        self.assertEqual(allocation["allocated"], 1)
+        self.assertEqual(allocation["reason"], "partial")
+
+        self.db.refresh(collection_item)
+        self.assertEqual(collection_item.quantity, 4)
+        target_row = self.db.query(BinderCard).filter(
+            BinderCard.binder_id == target.id,
+            BinderCard.collection_item_id == collection_item.id,
+        ).one()
+        self.assertEqual(target_row.required_quantity, 1)
+        # The binder never exceeds the owned quantity across all lists.
+        allocated_total = sum(
+            row.required_quantity
+            for row in self.db.query(BinderCard).filter(
+                BinderCard.collection_item_id == collection_item.id
+            )
+        )
+        self.assertEqual(allocated_total, collection_item.quantity)
+
+    def test_real_deck_scan_add_creates_plan_and_exact_allocation(self):
+        self._add_catalogue_card()
+        deck = self._create_binder("physical_deck", "Real Deck")
+        created = self._enqueue(binder_id=deck.id)
+        scan_item = self.db.query(ScanJobItem).filter(ScanJobItem.job_id == created["id"]).one()
+        self._mark_ready(scan_item)
+
+        response = self._resolve_and_add(created["id"], scan_item.id, quantity=2)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["binder_allocation"]["allocated"], 2)
+        self.assertIsNone(response.json()["binder_allocation"]["reason"])
+
+        plan = self.db.query(BinderCard).filter(
+            BinderCard.binder_id == deck.id,
+            BinderCard.collection_item_id.is_(None),
+        ).one()
+        allocation = self.db.query(BinderCard).filter(
+            BinderCard.binder_id == deck.id,
+            BinderCard.collection_item_id.isnot(None),
+        ).one()
+        self.assertEqual(plan.card_id, "card-1_en")
+        self.assertEqual(plan.required_quantity, 2)
+        self.assertEqual(allocation.collection_item_id, self.db.query(CollectionItem).one().id)
+        self.assertEqual(allocation.required_quantity, 2)
+
+    def test_missing_destination_reports_list_unavailable_and_still_adds(self):
+        self._add_catalogue_card()
+        binder = self._create_binder("collection", "Gone")
+        binder_id = binder.id
+        created = self._enqueue(binder_id=binder_id)
+        scan_item = self.db.query(ScanJobItem).filter(ScanJobItem.job_id == created["id"]).one()
+        self._mark_ready(scan_item)
+        self.db.delete(binder)
+        self.db.commit()
+
+        response = self._resolve_and_add(created["id"], scan_item.id)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            response.json()["binder_allocation"],
+            {
+                "binder_id": binder_id,
+                "binder_name": None,
+                "requested": 1,
+                "allocated": 0,
+                "reason": "list_unavailable",
+            },
+        )
+        self.assertEqual(self.db.query(CollectionItem).one().quantity, 1)
+        self.assertEqual(self.db.query(BinderCard).count(), 0)
 
 
 if __name__ == "__main__":

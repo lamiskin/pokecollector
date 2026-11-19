@@ -730,6 +730,9 @@ class ScanJob(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     status = Column(String, default="pending", nullable=False, index=True)
+    # Optional destination Card List: every card confirmed from this batch is
+    # filed there as well as into the collection.
+    binder_id = Column(Integer, ForeignKey("binders.id", ondelete="SET NULL"), nullable=True, index=True)
     created_at = Column(DateTime, default=func.now(), nullable=False)
     updated_at = Column(DateTime, default=func.now(), nullable=False)
     started_at = Column(DateTime)
