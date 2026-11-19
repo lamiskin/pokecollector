@@ -277,8 +277,9 @@ Goal: a prerequisite for set-symbol matching and a fixed-scale bottom-strip crop
 
 **Corpus counts corrected.** The real figures are **88** clean renders, **1,056**
 augmented (88 × 12 variants) and **44** photos (16 original + 28 session) — earlier
-text here said 60/720/16. The augmenter lives in a separate worktree
-(`card-image-corpus/scripts/augment_test_card_corpus.py`), not this checkout.
+text here said 60/720/16. The augmenter lives in the standalone
+`pc-card-corpus` repository (`scripts/augment_test_card_corpus.py`), not this
+checkout.
 
 **Ground truth is free for the synthetic set.** The augmenter is deterministic
 (seeded by `card_id:variant`), so replaying a transform on a magenta-filled card and
