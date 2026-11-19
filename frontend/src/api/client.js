@@ -147,10 +147,15 @@ export const recognizeCard = (imageFile, requestTimeoutSeconds) => {
 }
 
 // Persistent background card-scan queue.
-export const enqueueScanJob = (files = [], individualPositions = []) => {
+export const enqueueScanJob = (files = [], individualPositions = [], binderId = null) => {
   const formData = new FormData()
   files.forEach(file => formData.append('files', file))
   formData.append('individual_positions', JSON.stringify(individualPositions))
+  // Optional destination card list. Omitted entirely when unset, so a batch
+  // that was not given a destination behaves exactly as before.
+  if (binderId !== null && binderId !== undefined && binderId !== '') {
+    formData.append('binder_id', String(binderId))
+  }
   return api.post('/cards/recognize/jobs', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
   }).then(r => r.data)

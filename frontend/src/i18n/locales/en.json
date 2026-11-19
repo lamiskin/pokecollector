@@ -1700,7 +1700,22 @@
     "lookup_pokellector": "Search Pokellector",
     "lookupShort": "find image",
     "searchByPhoto": "Search Google by this photo",
-    "searchByPhotoSaved": "Photo saved to your downloads — drop it into the Google Lens tab that just opened"
+    "searchByPhotoSaved": "Photo saved to your downloads — drop it into the Google Lens tab that just opened",
+    "destinationLabel": "File cards into",
+    "destinationHint": "Optional. Confirmed cards are filed into this card list whenever copies are free.",
+    "destinationNone": "No card list — collection only",
+    "destinationBinders": "Binders",
+    "destinationRealDecks": "Real Decks",
+    "destinationEmpty": "No binders or real decks yet — create one under Binders.",
+    "destinationSummary": "Filing into {name}",
+    "destinationSummaryNone": "No card list — cards go to the collection only",
+    "filingInto": "Filing into {name}",
+    "addModalFilingInto": "This card will be filed into {name} when you add it.",
+    "allocationPartial": "Card added — {allocated} of {requested} copies filed into {name}.",
+    "allocationNone": "Card added, but no copies were filed into {name}.",
+    "allocationNoCopies": "Card added, but no free copies were available for {name}.",
+    "allocationListUnavailable": "Card added, but {name} is no longer available — no copies were filed.",
+    "allocationFallbackName": "the chosen card list"
   },
   "lang": {
     "de": "DE",

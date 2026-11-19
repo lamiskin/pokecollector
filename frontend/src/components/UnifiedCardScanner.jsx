@@ -4,7 +4,8 @@ import { useQuery } from '@tanstack/react-query'
 import { Camera, Check, HelpCircle, ImagePlus, Loader2, Trash2, Upload, Video, X } from 'lucide-react'
 import toast from 'react-hot-toast'
 
-import { enqueueScanJob, getScannerConfiguration } from '../api/client'
+import { enqueueScanJob, getBinders, getScannerConfiguration } from '../api/client'
+import { ScanDestinationField, ScanDestinationSummary } from './CardScanner'
 import { useSettings } from '../contexts/SettingsContext'
 import { isSupportedScannerImage, SCANNER_IMAGE_ACCEPT } from '../utils/scannerImages'
 import ConfirmDialog from './ui/ConfirmDialog'
@@ -46,6 +47,7 @@ function PhotoPositionGuide({ title, description }) {
 export default function UnifiedCardScanner({ isOpen, onClose }) {
   const [stagedFiles, setStagedFiles] = useState([])
   const [submitting, setSubmitting] = useState(false)
+  const [destinationBinderId, setDestinationBinderId] = useState('')
   const [confirmation, setConfirmation] = useState(null)
   const [photoGuidePinned, setPhotoGuidePinned] = useState(false)
   const [photoGuideHovered, setPhotoGuideHovered] = useState(false)
@@ -67,6 +69,13 @@ export default function UnifiedCardScanner({ isOpen, onClose }) {
     queryFn: getScannerConfiguration,
     enabled: isOpen,
   })
+  const { data: binderData = [] } = useQuery({
+    queryKey: ['binders'],
+    queryFn: () => getBinders().then(r => r.data),
+    enabled: isOpen,
+  })
+  const destinationBinder = (Array.isArray(binderData) ? binderData : [])
+    .find(binder => String(binder.id) === destinationBinderId) || null
 
   useEffect(() => {
     stagedFilesRef.current = stagedFiles
@@ -176,7 +185,9 @@ export default function UnifiedCardScanner({ isOpen, onClose }) {
       const job = await enqueueScanJob(
         stagedFiles.map(item => item.file),
         individualPositions,
+        destinationBinder ? destinationBinder.id : null,
       )
+      setDestinationBinderId('')
       clearFiles()
       onClose?.()
       navigate(`/scans/${job.id}`)
@@ -414,15 +425,29 @@ export default function UnifiedCardScanner({ isOpen, onClose }) {
             </button>
           )}
 
-          {mode === 'staging' && <button
-            type="button"
-            onClick={startScanning}
-            disabled={!stagedFiles.length || submitting}
-            className="btn-primary flex w-full items-center justify-center gap-2 py-3"
-          >
-            {submitting ? <Loader2 size={16} className="animate-spin" /> : <ImagePlus size={16} />}
-            <span>{submitting ? t('scanner.submittingBatch') : t('scanner.startScanning')}</span>
-          </button>}
+          {mode === 'staging' && (
+            <>
+              <ScanDestinationField
+                id="unified-scanner-destination"
+                binders={binderData}
+                value={destinationBinderId}
+                onChange={setDestinationBinderId}
+                disabled={submitting}
+              />
+
+              <ScanDestinationSummary binder={destinationBinder} />
+
+              <button
+                type="button"
+                onClick={startScanning}
+                disabled={!stagedFiles.length || submitting}
+                className="btn-primary flex w-full items-center justify-center gap-2 py-3"
+              >
+                {submitting ? <Loader2 size={16} className="animate-spin" /> : <ImagePlus size={16} />}
+                <span>{submitting ? t('scanner.submittingBatch') : t('scanner.startScanning')}</span>
+              </button>
+            </>
+          )}
         </div>
       </Modal>
 
