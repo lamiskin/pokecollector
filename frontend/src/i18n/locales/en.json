@@ -1702,7 +1702,7 @@
     "searchByPhoto": "Search Google by this photo",
     "searchByPhotoSaved": "Photo saved to your downloads — drop it into the Google Lens tab that just opened",
     "destinationLabel": "File cards into",
-    "destinationHint": "Optional. Confirmed cards are filed into this card list whenever copies are free.",
+    "destinationHint": "Optional. Each confirmed card is added to this list too.",
     "destinationNone": "No card list — collection only",
     "destinationBinders": "Binders",
     "destinationRealDecks": "Real Decks",
