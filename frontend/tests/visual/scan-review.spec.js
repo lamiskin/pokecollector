@@ -311,3 +311,54 @@ test('a failed atomic add keeps the current review open and does not advance', a
   expect(api.resolvedCards).toEqual([])
   expect(api.items.find(item => item.id === 11).resolved).toBe(false)
 })
+
+// The quick add sits beside Accept match and deliberately skips the add form:
+// one NM, normal-printing copy of the candidate on screen, with the match's own
+// language. It must not open the form, must send exactly those defaults, and
+// must leave the resolved item without the action (that view is read-only).
+test('quick add files the card as NM normal without opening the add form', async ({ page }) => {
+  const api = await installScanReviewApi(page)
+  await page.goto('/scans/7')
+
+  await page.getByRole('button', { name: 'Compare with your photo' }).first().click()
+  const dialog = page.getByRole('dialog', { name: 'Compare with your photo' })
+  const quickAdd = dialog.getByRole('button', { name: 'Add as NM · Normal' })
+  await expect(quickAdd).toBeVisible()
+  await expect(quickAdd).toHaveAttribute(
+    'title',
+    'Add this card now as Near Mint, normal printing — no details to fill in.',
+  )
+
+  await quickAdd.click()
+
+  // No form at any point, and no second review of the same card.
+  await expect(page.getByRole('dialog', { name: 'Add to collection' })).toHaveCount(0)
+  await expect.poll(() => api.addedPayloads.length).toBe(1)
+  await expect.poll(() => api.addedPayloads[0]).toMatchObject({
+    card_id: 'base1-074_ja',
+    confirmed_card_id: 'base1-074',
+    quantity: 1,
+    condition: 'NM',
+    variant: 'Normal',
+    printing_details: [],
+    lang: 'ja',
+  })
+  expect(api.addedPayloads[0].purchase_price).toBeUndefined()
+  await expect(page.getByText('Bill added to collection!')).toBeVisible()
+
+  // The walk continues on to the next photo still needing a decision.
+  await expect(dialog.getByText('Machop', { exact: true })).toBeVisible()
+  await dialog.getByRole('button', { name: 'Close' }).click()
+
+  // Resolved items stay read-only: neither add action comes back.
+  const resolvedBill = page.getByRole('button', { name: /Bill/ })
+  await expect(resolvedBill).toBeVisible()
+  await resolvedBill.click()
+  await page.locator('article').filter({ hasText: 'Bill' })
+    .getByRole('button', { name: 'Compare with your photo' }).first().click()
+  await expect(dialog.getByRole('button', { name: 'Add as NM · Normal' })).toHaveCount(0)
+  await expect(dialog.getByRole('button', { name: 'Accept match' })).toHaveCount(0)
+  await dialog.getByRole('button', { name: 'Close' }).click()
+
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+})

@@ -1609,6 +1609,8 @@
     "previousMatch": "Previous match",
     "nextMatch": "Next match",
     "acceptMatch": "Accept match",
+    "quickAdd": "Add as NM · Normal",
+    "quickAddHint": "Add this card now as Near Mint, normal printing — no details to fill in.",
     "arrowKeyHint": "Arrow keys to browse",
     "zoomHint": "Scroll or click to zoom",
     "expandCard": "Expand photo",

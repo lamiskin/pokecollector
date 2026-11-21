@@ -1567,6 +1567,8 @@
     "previousMatch": "Forrige match",
     "nextMatch": "Næste match",
     "acceptMatch": "Accepter match",
+    "quickAdd": "Tilføj som NM · Normal",
+    "quickAddHint": "Tilføj kortet nu som Near Mint i normal udgave – uden flere oplysninger.",
     "arrowKeyHint": "Piletaster for at navigere",
     "zoomHint": "Scroll eller klik for at zoome",
     "expandCard": "Udvid foto",
