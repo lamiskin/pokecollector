@@ -82,6 +82,12 @@ export function useScanItemPhoto(jobId, item) {
 // figures sit side by side. A photo-only viewer can use considerably more
 // space because it has no comparison sibling.
 const COMPARISON_CARD_WIDTH = 'w-[min(76vw,24dvh,220px)] md:w-[min(30vw,44.286dvh,420px)]'
+// The review surface carries one extra action beneath the accept row (the
+// quick add). Rather than let that taller chrome push the pair into a scroll
+// on a phone, the figures give up just enough height to keep both visible —
+// which is the whole point of this view. The read-only comparison and the
+// photo-only viewer keep the roomier bound.
+const REVIEW_CARD_WIDTH = 'w-[min(76vw,22dvh,220px)] md:w-[min(30vw,44.286dvh,420px)]'
 const SOLO_CARD_WIDTH = 'w-[min(88vw,55dvh,560px)]'
 const CARD_FRAME = 'aspect-[5/7] w-full flex items-center justify-center rounded-xl'
 const CARD_IMAGE = 'h-full w-full object-cover rounded-xl'
@@ -249,14 +255,16 @@ const zoomStyle = ({ scale, x, y }) => scale === 1 ? undefined : {
 }
 
 export function CardZoomModal({
-  card, photoUrl, onClose, t, matches, index = 0, onIndex, onAccept, jobId, itemId, nameEn, footer,
+  card, photoUrl, onClose, t, matches, index = 0, onIndex, onAccept, onQuickAdd, quickAddPending = false,
+  jobId, itemId, nameEn, footer,
 }) {
   const canNavigate = Array.isArray(matches) && matches.length > 1 && onIndex
   const step = useCallback(delta => {
-    if (!canNavigate) return
+    // Stepping away mid-add would show a different card than the one being filed.
+    if (!canNavigate || quickAddPending) return
     // Wrap, so holding an arrow cycles rather than dead-ending on the last card.
     onIndex((index + delta + matches.length) % matches.length)
-  }, [canNavigate, index, matches, onIndex])
+  }, [canNavigate, quickAddPending, index, matches, onIndex])
 
   const { zoom, zoomAt, focusOn, panBy, reset } = useLinkedZoom()
   const zoomed = zoom.scale > 1
@@ -400,7 +408,9 @@ export function CardZoomModal({
   const retrySrc = full || (card?.image && retryAttempt > 0
     ? `${card.image}${card.image.includes('?') ? '&' : '?'}retry=${retryAttempt}`
     : card?.image)
-  const cardWidth = photoUrl && card ? COMPARISON_CARD_WIDTH : SOLO_CARD_WIDTH
+  const cardWidth = photoUrl && card
+    ? (onQuickAdd ? REVIEW_CARD_WIDTH : COMPARISON_CARD_WIDTH)
+    : SOLO_CARD_WIDTH
 
   // `footer` keeps the modal meaningful even without a card or a photo — the
   // no-match review surface renders its message and actions there, and a scan
@@ -563,28 +573,65 @@ export function CardZoomModal({
 
       {/* Accept bar. stopPropagation because the overlay itself closes on
           click, and a mis-aimed tap next to Accept should not dismiss the
-          comparison. */}
-      {onAccept && card && (
-        <div className="flex flex-shrink-0 cursor-default items-center justify-center gap-3 pb-1"
+          comparison.
+
+          The row wraps rather than shrinks. Arrows plus Accept already fill a
+          phone's width, so a second action drops onto its own line instead of
+          squeezing the primary button or pushing an arrow out of reach. The
+          quick add is deliberately quiet — outlined on the dark overlay — so
+          it reads as "the same card, just without the details" rather than as
+          a second way to accept. */}
+      {card && (onAccept || onQuickAdd) && (
+        <div className="flex flex-shrink-0 cursor-default flex-wrap items-center justify-center gap-x-3 gap-y-1.5 pb-1"
           onClick={e => e.stopPropagation()}>
-          {canNavigate && (
-            <button type="button" onClick={() => step(-1)} aria-label={t('scanner.previousMatch')}
-              className="flex h-10 w-10 cursor-pointer items-center justify-center rounded-full bg-white/10 transition-colors hover:bg-white/20">
-              <ChevronLeft size={20} className="text-white" />
-            </button>
+          <div className="flex items-center justify-center gap-3">
+            {canNavigate && (
+              <button type="button" onClick={() => step(-1)} aria-label={t('scanner.previousMatch')}
+                disabled={quickAddPending}
+                className="flex h-10 w-10 cursor-pointer items-center justify-center rounded-full bg-white/10 transition-colors hover:bg-white/20 disabled:cursor-default disabled:opacity-60">
+                <ChevronLeft size={20} className="text-white" />
+              </button>
+            )}
+            {onAccept && (
+              <button
+                type="button"
+                onClick={() => onAccept(card)}
+                disabled={quickAddPending}
+                className="flex cursor-pointer items-center gap-2 rounded-xl px-6 py-3 font-black text-white transition-all disabled:cursor-default disabled:opacity-60"
+                style={{ background: '#e3000b', boxShadow: '0 0 16px rgba(227,0,11,0.35)' }}
+              >
+                <Check size={18} />{t('scanner.acceptMatch')}
+              </button>
+            )}
+            {canNavigate && (
+              <button type="button" onClick={() => step(1)} aria-label={t('scanner.nextMatch')}
+                disabled={quickAddPending}
+                className="flex h-10 w-10 cursor-pointer items-center justify-center rounded-full bg-white/10 transition-colors hover:bg-white/20 disabled:cursor-default disabled:opacity-60">
+                <ChevronRight size={20} className="text-white" />
+              </button>
+            )}
+          </div>
+          {/* One tap, no add form: the reviewer has already said this is the
+              card, and only wants it counted. NM/normal are the defaults the
+              form would have offered anyway. On a wide screen the hairline
+              separates it from the stepper so the two read as different
+              kinds of action rather than one cluster. */}
+          {onQuickAdd && (
+            <span aria-hidden="true" className="hidden h-6 w-px self-center bg-white/15 md:block" />
           )}
-          <button
-            type="button"
-            onClick={() => onAccept(card)}
-            className="flex cursor-pointer items-center gap-2 rounded-xl px-6 py-3 font-black text-white transition-all"
-            style={{ background: '#e3000b', boxShadow: '0 0 16px rgba(227,0,11,0.35)' }}
-          >
-            <Check size={18} />{t('scanner.acceptMatch')}
-          </button>
-          {canNavigate && (
-            <button type="button" onClick={() => step(1)} aria-label={t('scanner.nextMatch')}
-              className="flex h-10 w-10 cursor-pointer items-center justify-center rounded-full bg-white/10 transition-colors hover:bg-white/20">
-              <ChevronRight size={20} className="text-white" />
+          {onQuickAdd && (
+            <button
+              type="button"
+              onClick={() => onQuickAdd(card)}
+              disabled={quickAddPending}
+              aria-busy={quickAddPending || undefined}
+              title={t('scanner.quickAddHint')}
+              className="flex cursor-pointer items-center gap-1.5 rounded-xl border border-white/25 bg-white/[0.06] px-3.5 py-2 text-sm font-semibold text-white/90 transition-colors hover:border-white/40 hover:bg-white/15 disabled:cursor-default disabled:opacity-60"
+            >
+              {quickAddPending
+                ? <Loader2 size={15} className="animate-spin" aria-hidden />
+                : <Plus size={15} aria-hidden />}
+              {t('scanner.quickAdd')}
             </button>
           )}
         </div>

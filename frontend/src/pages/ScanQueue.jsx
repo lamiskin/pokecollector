@@ -12,7 +12,7 @@ import {
   resolveScanJobItem,
   retryScanJobItem,
 } from '../api/client'
-import { ScanAddModal } from '../components/CardScanner'
+import { ScanAddModal, attachScanFallbackPhoto } from '../components/CardScanner'
 import { CardZoomModal, ScanItemPanel, useScanItemPhoto } from '../components/ScanReview'
 import ConfirmDialog from '../components/ui/ConfirmDialog'
 import Modal from '../components/ui/Modal'
@@ -26,6 +26,7 @@ import {
 import { formatRetryCountdown } from '../utils/retryCountdown'
 import { searchGoogleByPhoto } from '../utils/cardLookup'
 import { allocationNotice } from '../utils/scanAllocationNotice'
+import { invalidateCardState, invalidateTcgdexFilterLanguages } from '../utils/queryInvalidation'
 
 function useRetryClock(enabled) {
   const [now, setNow] = useState(() => Date.now())
@@ -113,6 +114,10 @@ function JobDetail({ jobId, onObscuredChange }) {
   const [addSelection, setAddSelection] = useState(null)
   const [confirmation, setConfirmation] = useState(null)
   const [itemModalOpen, setItemModalOpen] = useState(false)
+  // The quick add (no add form) in flight. Held here rather than in the modal
+  // so the row it came from can stay disabled while the request is pending —
+  // a second tap must not add the card twice.
+  const [quickAddItemId, setQuickAddItemId] = useState(null)
   // The full-screen review session: which photo is open and which of its
   // candidates. Owned here rather than by a single ScanItemPanel because
   // accepting a match from the zoom view walks on to the *next* unresolved
@@ -223,6 +228,56 @@ function JobDetail({ jobId, onObscuredChange }) {
     toast(t('scanner.searchByPhotoSaved'), { duration: 6000 })
   }
 
+  // Add the shown candidate exactly as the reviewer's default would be — one
+  // NM, normal-printing copy — without opening the add form. Everything the
+  // form would have prefilled is what the payload says, so this is the same
+  // request the form sends, just without the round trip through a dialog.
+  const quickAdd = async (item, card) => {
+    if (quickAddItemId != null) return
+    setQuickAddItemId(item.id)
+    try {
+      // Resolving a queued scan deletes its stored source photo, so the bytes
+      // are retained before the atomic add and attached afterwards — the same
+      // best-effort photo retention the add form does.
+      const photo = item.has_image
+        ? await fetchScanJobItemImageBlob(jobId, item.id).catch(() => null)
+        : null
+      const result = await resolveAndAddScanJobItem(jobId, item.id, {
+        card_id: card.id,
+        confirmed_card_id: card.tcg_card_id,
+        quantity: 1,
+        condition: 'NM',
+        variant: 'Normal',
+        printing_details: [],
+        lang: card.lang || item.recognized?.language || 'en',
+      })
+      // Never allowed to undo the add.
+      await attachScanFallbackPhoto({
+        created: result.collection_item,
+        match: card,
+        getPhoto: photo ? () => Promise.resolve(photo) : undefined,
+      })
+      invalidateCardState(queryClient)
+      invalidateTcgdexFilterLanguages(queryClient)
+      toast.success(`${card.name} ${t('scanner.addedToCollection')}!`)
+      const notice = allocationNotice(result.binder_allocation, t, job.binder?.name || null)
+      if (notice) toast(notice, { duration: 6000 })
+      invalidate()
+      // Same walk-on as accepting a match from the form: the server has
+      // already added the card and resolved the item, so advancing here cannot
+      // duplicate anything.
+      const remaining = items.filter(candidate => candidate.id !== item.id && !candidate.resolved)
+      if (remaining.length === 0) navigate('/scans', { replace: true })
+      else openNextReview(item.id)
+    } catch (error) {
+      // Stay on this comparison: nothing was added, so advancing would skip a
+      // card the reviewer still has to deal with.
+      toast.error(error?.response?.data?.detail || t('scanner.actionFailed'))
+    } finally {
+      setQuickAddItemId(null)
+    }
+  }
+
   if (isLoading) {
     return <div className="flex justify-center py-16"><Loader2 size={28} className="animate-spin text-brand-red" /></div>
   }
@@ -314,7 +369,13 @@ function JobDetail({ jobId, onObscuredChange }) {
               fromReview: true,
               binderName: job.binder?.name || null,
             })}
-          onClose={() => setReview(null)}
+          onQuickAdd={reviewItem.resolved
+            ? undefined
+            : card => quickAdd(reviewItem, card)}
+          quickAddPending={quickAddItemId === reviewItem.id}
+          // Dismissing mid-add would let the finished request walk the batch on
+          // under a closed viewer, so the comparison stays put until it settles.
+          onClose={() => { if (quickAddItemId == null) setReview(null) }}
           t={t}
         />
       )}
