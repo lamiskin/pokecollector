@@ -8,6 +8,11 @@ thin and the same rule is applied identically everywhere.
 
 ## Responsibility
 
+- `binderLayout.js`: numbered-side spread pairing, localized layout messages,
+  private/public identity-aware location URLs, and stale deep-link resolution.
+  It preserves physical gaps and never resolves coordinates to an unrelated
+  occupant; removed identities fall back to the tray or explicit copy choices.
+
 - Single source of truth for domain rules: canonical variants, price-field precedence,
   currency conversion, scan-timeout math, language normalization.
 - Adapter/glue between three shapes of the same data: API payloads, URL search params,

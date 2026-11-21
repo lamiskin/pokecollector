@@ -13,6 +13,16 @@ const api = axios.create({
   },
 })
 
+// Physical binder layouts return complete, revisioned snapshots after every write.
+export const getBinderLayout = id => api.get(`/binders/${id}/layout`, { headers: { 'Cache-Control': 'no-cache' } }).then(r => r.data)
+export const previewBinderLayout = (id, data) => api.post(`/binders/${id}/layout/preview`, data).then(r => r.data)
+export const saveBinderLayout = (id, data) => api.put(`/binders/${id}/layout`, data).then(r => r.data)
+export const moveBinderPlacement = (id, data) => api.post(`/binders/${id}/placements`, data).then(r => r.data)
+export const undoBinderLayout = (id, expected_revision) => api.post(`/binders/${id}/layout/undo`, { expected_revision }).then(r => r.data)
+export const getCardLocations = (cardId, collectionItemId) => api.get(`/cards/${encodeURIComponent(cardId)}/locations`, {
+  params: collectionItemId ? { collection_item_id: collectionItemId } : {},
+}).then(r => r.data)
+
 api.interceptors.request.use((config) => {
   if (config.skipAuthentication) return config
 

@@ -8,6 +8,7 @@ from models import Binder, BinderCard, CollectionItem
 from services.bulk_removal_errors import batch_detail, unavailable_blockers
 from services.binder_allocations import lock_user_card_allocations, stored_binder_quantity
 from services.product_sources import product_sources_by_collection_item
+from services.binder_layouts import require_unplaced
 
 
 def owned_items(db, user, item_ids):
@@ -87,6 +88,7 @@ def release_confirmed_assignments(db, user, request):
         lock_user_card_allocations(db, user.id)
         items = owned_items(db, user, request.item_ids)
         rows = assignment_rows(db, user, request.item_ids)
+        require_unplaced(db, [row.id for row, _binder in rows])
         actual = sorted([assignment_snapshot(row, binder) for row, binder in rows], key=lambda a: a['assignment_id'])
         confirmed = sorted([a.model_dump() for a in request.assignments], key=lambda a: a['assignment_id'])
         if actual != confirmed:
