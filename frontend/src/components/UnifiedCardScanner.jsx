@@ -8,6 +8,12 @@ import { enqueueScanJob, getBinders, getScannerConfiguration } from '../api/clie
 import { ScanDestinationField, ScanDestinationSummary } from './CardScanner'
 import { useSettings } from '../contexts/SettingsContext'
 import { isSupportedScannerImage, SCANNER_IMAGE_ACCEPT } from '../utils/scannerImages'
+import {
+  individualPositions,
+  nextIndividualChoice,
+  resolveIndividual,
+  scannerGroupsIndividuallyByDefault,
+} from '../utils/scannerGrouping'
 import ConfirmDialog from './ui/ConfirmDialog'
 import Modal from './ui/Modal'
 import WebcamCapture from './WebcamCapture'
@@ -107,7 +113,9 @@ export default function UnifiedCardScanner({ isOpen, onClose }) {
       id: globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`,
       file,
       previewUrl: URL.createObjectURL(file),
-      individual: false,
+      // Tri-state: null follows the scanner's default grouping, which may still
+      // be loading, so photos adopt it as soon as it resolves.
+      individual: null,
     }))
     setStagedFiles(current => [...current, ...additions])
   }
@@ -159,12 +167,21 @@ export default function UnifiedCardScanner({ isOpen, onClose }) {
 
   const toggleIndividual = id => {
     setStagedFiles(current => current.map(item => (
-      item.id === id ? { ...item, individual: !item.individual } : item
+      item.id === id
+        ? { ...item, individual: nextIndividualChoice(item.individual, scannerConfiguration) }
+        : item
     )))
   }
 
-  const allIndividual = stagedFiles.length > 0 && stagedFiles.every(item => item.individual)
+  // A local/self-hosted model scans one card per photo, so its photos default
+  // to individual scans; hosted providers default to automatic grouping.
+  const individualByDefault = scannerGroupsIndividuallyByDefault(scannerConfiguration)
+  const allIndividual = stagedFiles.length > 0 && stagedFiles.every(item => (
+    resolveIndividual(item.individual, scannerConfiguration)
+  ))
   const toggleAllIndividual = () => {
+    // Both directions are explicit choices for every photo, so a later
+    // configuration change cannot silently undo the user's master selection.
     setStagedFiles(current => current.map(item => ({ ...item, individual: !allIndividual })))
   }
   // A composite asks the model to read several cards out of one image, which
@@ -179,12 +196,9 @@ export default function UnifiedCardScanner({ isOpen, onClose }) {
     setSubmitting(true)
     setMode('staging')
     try {
-      const individualPositions = stagedFiles
-        .map((item, position) => item.individual ? position : null)
-        .filter(position => position !== null)
       const job = await enqueueScanJob(
         stagedFiles.map(item => item.file),
-        individualPositions,
+        individualPositions(stagedFiles, scannerConfiguration),
         destinationBinder ? destinationBinder.id : null,
       )
       setDestinationBinderId('')
@@ -265,38 +279,58 @@ export default function UnifiedCardScanner({ isOpen, onClose }) {
             />
           ) : stagedFiles.length > 0 ? (
             <div className="grid grid-cols-3 gap-3 sm:grid-cols-5 md:grid-cols-7">
-              {stagedFiles.map((item, index) => (
-                <div key={item.id} className="space-y-1.5">
-                  <div className="relative aspect-[2.5/3.5] overflow-hidden rounded-xl border border-white/10 bg-bg-surface">
-                    <img src={item.previewUrl} alt="" className="h-full w-full object-contain" />
-                    <span className="absolute bottom-1 left-1 rounded bg-black/75 px-1.5 py-0.5 text-[10px] font-bold text-white">
-                      {index + 1}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => removeFile(item.id)}
-                      aria-label={t('common.remove')}
-                      className="absolute right-1 top-1 grid h-6 w-6 place-items-center rounded-full bg-black/75 text-white hover:bg-brand-red"
-                    >
-                      <X size={13} />
-                    </button>
+              {stagedFiles.map((item, index) => {
+                const individual = resolveIndividual(item.individual, scannerConfiguration)
+                return (
+                  <div key={item.id} className="space-y-1.5">
+                    <div className="relative aspect-[2.5/3.5] overflow-hidden rounded-xl border border-white/10 bg-bg-surface">
+                      <img src={item.previewUrl} alt="" className="h-full w-full object-contain" />
+                      <span className="absolute bottom-1 left-1 rounded bg-black/75 px-1.5 py-0.5 text-[10px] font-bold text-white">
+                        {index + 1}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => removeFile(item.id)}
+                        aria-label={t('common.remove')}
+                        className="absolute right-1 top-1 grid h-6 w-6 place-items-center rounded-full bg-black/75 text-white hover:bg-brand-red"
+                      >
+                        <X size={13} />
+                      </button>
+                    </div>
+                    {stagedFiles.length > 1 && canComposite && (individualByDefault ? (
+                      // Individual scanning is this provider's own default, so
+                      // a lit red chip on every photo would read like a
+                      // warning. Keep the default quiet and let only a photo
+                      // the user chose to group stand out.
+                      <button
+                        type="button"
+                        onClick={() => toggleIndividual(item.id)}
+                        className={`flex w-full items-center justify-center gap-1 rounded-lg border px-1 py-1 text-center text-[9px] font-semibold leading-tight transition-colors ${
+                          individual
+                            ? 'border-white/10 bg-white/5 text-text-muted'
+                            : 'border-gold/40 bg-gold/15 text-gold'
+                        }`}
+                      >
+                        {!individual && <Check size={10} />}
+                        <span>{individual ? t('scanner.scanIndividually') : t('scanner.useAutomaticGrouping')}</span>
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => toggleIndividual(item.id)}
+                        className={`flex w-full items-center justify-center gap-1 rounded-lg border px-1 py-1 text-[9px] font-semibold transition-colors ${
+                          individual
+                            ? 'border-brand-red/50 bg-brand-red/20 text-brand-red'
+                            : 'border-white/10 bg-white/5 text-text-muted'
+                        }`}
+                      >
+                        {individual && <Check size={10} />}
+                        <span>{t('scanner.scanIndividually')}</span>
+                      </button>
+                    ))}
                   </div>
-                  {stagedFiles.length > 1 && canComposite && (
-                    <button
-                      type="button"
-                      onClick={() => toggleIndividual(item.id)}
-                      className={`flex w-full items-center justify-center gap-1 rounded-lg border px-1 py-1 text-[9px] font-semibold transition-colors ${
-                        item.individual
-                          ? 'border-brand-red/50 bg-brand-red/20 text-brand-red'
-                          : 'border-white/10 bg-white/5 text-text-muted'
-                      }`}
-                    >
-                      {item.individual && <Check size={10} />}
-                      <span>{t('scanner.scanIndividually')}</span>
-                    </button>
-                  )}
-                </div>
-              ))}
+                )
+              })}
             </div>
           ) : (
             <div className="rounded-2xl border-2 border-dashed border-white/10 py-12 text-center text-sm text-text-muted">

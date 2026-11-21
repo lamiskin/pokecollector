@@ -67,6 +67,7 @@ class ScannerConfigurationTests(unittest.TestCase):
         self.assertEqual([item["id"] for item in config["providers"]], ["gemini"])
         self.assertEqual(config["status"], "api_key_required")
         self.assertEqual(config["visual_verification"], "automatic")
+        self.assertEqual(config["default_grouping"], "automatic")
         self.assertEqual(config["providers"][0]["endpoint_type"], "hosted")
         self.assertNotIn("custom_model_allowed", config["providers"][0])
         self.assertNotIn("administrator", config)
@@ -118,6 +119,36 @@ class ScannerConfigurationTests(unittest.TestCase):
         self.assertEqual(after["status"], "ready")
         self.assertEqual(provider.name, "gemini")
         self.assertEqual(self._rows()["scanner_provider"], "gemini")
+
+    def test_self_hosted_scanner_defaults_to_individual_scans(self):
+        self.db.add(
+            UserSetting(user_id=self.user.id, key="scanner_provider", value="openai")
+        )
+        self.db.commit()
+        env = {
+            "OPENAI_SCANNER_ENABLED": "true",
+            "OPENAI_BASE_URL": "http://127.0.0.1:11434/v1",
+            "OPENAI_API_KEY_REQUIRED": "false",
+        }
+        with patch.dict(os.environ, env):
+            config = _scanner_configuration(self.db, self.user.id)
+        self.assertEqual(config["provider"], "openai")
+        self.assertEqual(config["default_grouping"], "individual")
+
+    def test_hosted_scanner_keeps_automatic_grouping(self):
+        self.db.add(
+            UserSetting(user_id=self.user.id, key="scanner_provider", value="openai")
+        )
+        self.db.commit()
+        env = {
+            "OPENAI_SCANNER_ENABLED": "true",
+            "OPENAI_BASE_URL": "https://api.openai.com/v1",
+            "OPENAI_API_KEY_REQUIRED": "true",
+        }
+        with patch.dict(os.environ, env):
+            config = _scanner_configuration(self.db, self.user.id)
+        self.assertEqual(config["provider"], "openai")
+        self.assertEqual(config["default_grouping"], "automatic")
 
     def test_admin_gets_a_secret_free_server_summary(self):
         env = {

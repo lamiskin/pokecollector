@@ -377,6 +377,10 @@ def _scanner_configuration(db: Session, user_id: int, *, is_admin: bool = False)
         providers.append(provider_data)
     active = next(item for item in providers if item["id"] == selected)
     ready = not active["requires_api_key"] or active["api_key_configured"]
+    # A keyless custom endpoint is a self-hosted model. Reading several cards
+    # out of one downscaled grid is where small local models fail, so those
+    # photos start as individual scans and grouping stays an explicit choice.
+    self_hosted = active["endpoint_type"] == "custom" and not active["requires_api_key"]
     capability_mode = scanner_capability_mode(
         db, user_id, selected, active["selected_model"]
     )
@@ -405,6 +409,7 @@ def _scanner_configuration(db: Session, user_id: int, *, is_admin: bool = False)
             if capability_mode == SCANNER_CAPABILITY_DEGRADED
             else ("automatic" if capability_mode == SCANNER_CAPABILITY_FULL else "unverified")
         ),
+        "default_grouping": "individual" if self_hosted else "automatic",
     }
     if is_admin:
         result["administrator"] = _administrator_scanner_summary()

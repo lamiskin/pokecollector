@@ -99,7 +99,10 @@ tiles re-fetch.
 **Scanner timing/attention.** `scannerTimeout` derives request timeouts from a bounded
 option set (covering retry/fallback attempts with a headroom constant); `scanJobs` turns a
 job into a poll interval (`active` → 3s, else `false`) and aggregates `attention` counts;
-`retryCountdown` converts `next_attempt_at` into human labels.
+`retryCountdown` converts `next_attempt_at` into human labels. `scannerGrouping` resolves
+the scanner's provider-derived default grouping against each staged photo's tri-state
+choice (`null` follows the default, `true`/`false` is the user's), so local models default
+to individual scans without that ever being stored as a preference.
 
 ## Integration
 
