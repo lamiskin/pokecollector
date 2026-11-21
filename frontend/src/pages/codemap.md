@@ -128,6 +128,8 @@ of that routing table.
 | `/pokedex`, `/pokedex/:dexId` | `Pokedex`, `PokedexSpecies` | `getPokedex`, `getPokedexSpecies`, `searchCards` |
 | `/collection/user/:userId` | `UserCollection` | `getUserCollection` |
 | `/sets`, `/sets/:setId` | `Sets`, `SetDetail` | `getSets`, `markSetsSeen`; `getSetChecklist`, `getBinders`, `addOwnedSetToBinder`, `addOwnedSetToAutoBinder` |
+| `/artist/:artistName` | `ArtistChecklist` | `getArtistChecklist` |
+| `/artists` | `Artists` | `getArtistsIndex` |
 | `/wishlist` | `Wishlist` | `getWishlist`, `removeFromWishlist`, `updateWishlistItem` |
 | `/binders`, `/binders/:binderId` | `Binders`, `BinderDetail` | `getBinders`/CRUD; `getBinderCards`, entry add/remove/update, print optimization, wishlist conversion, CSV import/export |
 | `/decks` → `/binders` (redirect) | `Binders` | (legacy deck routes remap to binders) |
