@@ -175,8 +175,10 @@ decision to accept.
    `docs/release-notes/fork-v1.55.1-1.md`. Curate its feature and fix highlights
    by checking the actual frozen tree; do not infer shipped content from commit
    ancestry. Use [`release-notes/TEMPLATE.md`](release-notes/TEMPLATE.md), and
-   include limitations or notes where relevant. Both dry-run and publish fail
-   unless the exact-tag file exists and is non-empty.
+   include limitations or notes where relevant. Screenshots of user-visible
+   changes are committed under `docs/release-notes/assets/<exact-fork-tag>/` and
+   linked by tag-pinned URL; see [RELEASES.md](RELEASES.md). Both dry-run and
+   publish fail unless the exact-tag file exists and is non-empty.
 4. Push the release branch, then rehearse the pipeline from it before tagging:
 
    ```sh

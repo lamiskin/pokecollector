@@ -36,3 +36,16 @@ manifest in the dry-run artifact, including the point-in-time `origin/main`
 mirror tip and lag, before publishing. After publication, add a row here on
 `fork/main` from the manifest. Record only public tags, commit SHAs, digests and
 dates; environment-specific detail belongs in the operator's private record.
+
+Include screenshots in the highlights where they make a user-visible feature or
+visual change clearer; skip them for internal fixes and when the text already
+says enough. Commit the images under
+`docs/release-notes/assets/<exact-fork-tag>/` before tagging and reference them
+inline by absolute, tag-pinned URL, for example
+`https://raw.githubusercontent.com/lamiskin/pokecollector/<exact-fork-tag>/docs/release-notes/assets/<exact-fork-tag>/<file>.png`;
+the release body is generated from the committed highlights file, so relative
+paths do not resolve. Crop to the changed UI, keep each file small (roughly
+1200 px wide, a few hundred KB) and give every image alt text. Use demo data
+only: the repository and the published notes are public, so a screenshot must
+not show a real collection, personal names or email addresses, OIDC identities,
+API keys, private hostnames or addresses, or browser chrome containing a URL.
