@@ -118,10 +118,11 @@ That process gives contributors room to evolve the design while helping accepted
 ## Pull requests
 
 Keep pull requests focused and explain the reason for the change. For UI or
-other user-visible visual changes, include screenshots of the affected screens
-(desktop and mobile when both layouts are affected). If screenshots are not
-relevant or cannot reasonably be provided, explain why in the PR. Screenshots
-are not needed for non-visual changes. Reviewers use
+other user-visible visual changes, PRs must include screenshots of the affected
+screens (desktop and mobile when both layouts are affected). If screenshots are
+not relevant or cannot reasonably be provided, explain why in the PR. Screenshots
+are not needed for non-visual changes; use synthetic/demo data and do not expose
+private or sensitive information. Reviewers use
 [`docs/CARD_SYSTEM.md`](docs/CARD_SYSTEM.md) as a consistency checklist and may
 suggest adapting a contribution to the shared visual language before merge.
 
