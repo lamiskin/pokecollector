@@ -15,8 +15,8 @@ checks). These five tools run on the host, outside the application:
   stable defaults, preventing an empty `BACKEND_PORT`/`FRONTEND_PORT` from
   silently receiving an ephemeral host port.
 - **`check-version.mjs`** — a release-consistency guard that the `VERSION` file,
-  the frontend package manifests, the Compose image tags, and the README badge
-  all agree.
+  the frontend package manifests, the Compose image configuration, and the
+  README badge all agree.
 - **`update-rescue-donation-total.mjs`** — regenerates the historic
   animal-rescue donation total in `README.md` from `RESCUE_DONATIONS.csv`.
 - **`upgrade-postgres-15-to-18.sh`** — an interactive, dump/restore major-version
@@ -59,11 +59,18 @@ Specific decisions:
 - **Version is a single source of truth.** `VERSION` must be both valid SemVer
   and a valid Docker tag; `check-version.mjs` then cross-checks it against
   `frontend/package.json`, `frontend/package-lock.json` (both its top-level
-  `version` and `packages[""].version`), the release image tags
-  `ghcr.io/git-romer/pokecollector-{backend,frontend}:${POKECOLLECTOR_VERSION:-<v>}`
-  in `docker-compose.yml`, and the README badge/text. The README checks are
-  skippable (`--skip-readme` / `SKIP_README_VERSION_CHECK=true`) for CI steps
-  where the README is not yet updated.
+  `version` and `packages[""].version`), and the README badge/text. For
+  upstream-style Compose it validates the versioned
+  `ghcr.io/git-romer/pokecollector-{backend,frontend}` tags; for the fork's
+  Compose it requires the exact `BACKEND_IMAGE`/`FRONTEND_IMAGE` local defaults
+  and preserves them during version bumps. `--allow-unchanged` permits equal
+  versions on fork-only refs and the upstream mirror, which continue tracking
+  upstream releases. Fork-only refs skip the upstream `v<version>` tag check
+  because the Fork Release workflow validates `fork-v<version>-<n>` tags; the
+  mirror and integration refs skip it because they carry upstream tags
+  verbatim. The README checks are skippable (`--skip-readme` /
+  `SKIP_README_VERSION_CHECK=true`) for CI steps where the README is not yet
+  updated.
 - **Hand-rolled CSV.** `update-rescue-donation-total.mjs` parses
   `RESCUE_DONATIONS.csv` itself (quote/escaped-quote aware), rather than adding
   a dependency, validates the required headers (`date, amount, currency,

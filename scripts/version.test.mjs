@@ -26,16 +26,49 @@ function fixture(t) {
   return { dir, git, run: (...args) => spawnSync(process.execPath, [resolve(root, 'scripts/check-version.mjs'), '--root', dir, ...args], { encoding: 'utf8' }) }
 }
 
-test('the shared bump command updates every reference and makes the gate pass', t => {
+test('the shared bump command updates release metadata and preserves fork image defaults', t => {
   const f = fixture(t)
+  const composeBefore = readFileSync(resolve(f.dir, 'docker-compose.yml'), 'utf8')
   const before = readFileSync(resolve(f.dir, 'VERSION'), 'utf8').trim()
   const next = before.replace(/(\d+)$/, n => String(BigInt(n) + 1n))
   const r = spawnSync(process.execPath, [resolve(root, 'scripts/bump-version.mjs'), '--root', f.dir, 'patch'], { encoding: 'utf8' })
   assert.equal(r.status, 0, r.stderr)
   assert.equal(readFileSync(resolve(f.dir, 'VERSION'), 'utf8').trim(), next)
+  assert.equal(readFileSync(resolve(f.dir, 'docker-compose.yml'), 'utf8'), composeBefore)
   const check = f.run('--base', 'HEAD')
   assert.equal(check.status, 0, check.stderr)
-  assert.equal(f.git('diff', '--name-only').split('\n').length, 5)
+  assert.deepEqual(f.git('diff', '--name-only').split('\n').sort(), [
+    'README.md',
+    'VERSION',
+    'frontend/package-lock.json',
+    'frontend/package.json',
+  ])
+})
+
+test('upstream Compose image tags are still checked and updated', () => {
+  const files = readVersionFiles(root)
+  const before = files.VERSION.trim()
+  files['docker-compose.yml'] = files['docker-compose.yml']
+    .replace('image: ${BACKEND_IMAGE:-pokecollector-backend:local}', `image: ghcr.io/git-romer/pokecollector-backend:\${POKECOLLECTOR_VERSION:-${before}}`)
+    .replace('image: ${FRONTEND_IMAGE:-pokecollector-frontend:local}', `image: ghcr.io/git-romer/pokecollector-frontend:\${POKECOLLECTOR_VERSION:-${before}}`)
+  const next = nextPatch(before)
+  const updated = bumpVersionFiles(files, next)
+  for (const image of ['backend', 'frontend']) {
+    assert.ok(updated['docker-compose.yml'].includes(`image: ghcr.io/git-romer/pokecollector-${image}:\${POKECOLLECTOR_VERSION:-${next}}`))
+  }
+})
+
+test('fork Compose requires both image override defaults', t => {
+  const f = fixture(t)
+  const composePath = resolve(f.dir, 'docker-compose.yml')
+  const compose = readFileSync(composePath, 'utf8').replace(
+    'image: ${FRONTEND_IMAGE:-pokecollector-frontend:local}',
+    'image: pokecollector-frontend:local',
+  )
+  writeFileSync(composePath, compose)
+  const result = f.run()
+  assert.notEqual(result.status, 0)
+  assert.match(result.stderr, /docker-compose\.yml must use image: \$\{FRONTEND_IMAGE/)
 })
 
 test('the version gate rejects an unchanged version relative to the target', t => {
@@ -43,6 +76,9 @@ test('the version gate rejects an unchanged version relative to the target', t =
   const r = f.run('--base', 'HEAD')
   assert.notEqual(r.status, 0, 'An unchanged version must not pass the PR gate')
   assert.match(r.stderr, /newer|increase/i)
+  const unchanged = f.run('--base', 'HEAD', '--allow-unchanged')
+  assert.equal(unchanged.status, 0)
+  assert.match(unchanged.stdout, /equal to the target/)
 })
 
 for (const [left, right, expected] of [['1.10.0', '1.9.9', 1], ['2.0.0', '1.99.99', 1], ['1.2.3-rc.10', '1.2.3-rc.2', 1], ['1.2.3', '1.2.3-rc.9', 1], ['1.2.3-alpha', '1.2.3-beta', -1], ['1.2.3+one', '1.2.3+two', 0]]) {
@@ -83,6 +119,7 @@ test('release tag reuse fails, except a main push tagged at that exact commit', 
   assert.equal(f.run('--check-tags', '--allow-tag-at-head').status, 0)
   f.git('commit', '--allow-empty', '-qm', 'Another commit')
   assert.equal(f.run('--check-tags', '--allow-tag-at-head').status, 1)
+  assert.equal(f.run('--check-tags', '--skip-upstream-tag-check').status, 0)
 })
 
 test('immutable candidate inspection ignores dirty working-tree contents', t => {

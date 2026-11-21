@@ -11,6 +11,9 @@ test('the version workflow checks all pushes and PR updates without path filters
   assert.match(source, /^  pull_request:/m)
   assert.match(source, /--base/)
   assert.match(source, /--check-tags/)
+  assert.match(source, /--allow-unchanged/)
+  assert.match(source, /--skip-upstream-tag-check/)
+  assert.match(source, /fork\/main\|main\|dev\|sync\/\*\|personal\/\*\|release\/\*/)
 })
 
 test('the write workflow runs trusted main and uses a dedicated token for fresh CI', () => {

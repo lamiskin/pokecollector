@@ -1,20 +1,32 @@
 # Version automation
 
 The application keeps one version in `VERSION`, `frontend/package.json`, both
-root version entries in `frontend/package-lock.json`, the frontend/backend image
-defaults in `docker-compose.yml`, and the README badge/current-version text.
-Use `node scripts/bump-version.mjs patch` or an explicit `major.minor.patch`
-version to update them together. `--dry-run` prints the affected files without
+root version entries in `frontend/package-lock.json`, and the README
+badge/current-version text. Upstream-style Compose files also use that version in
+their image tags. This fork's Compose file instead uses `BACKEND_IMAGE` and
+`FRONTEND_IMAGE` overrides with local-image defaults; the bump command preserves
+those defaults, while Dev and Prod provide digest-pinned fork images. Use
+`node scripts/bump-version.mjs patch` or an explicit `major.minor.patch` version
+to update the versioned metadata. `--dry-run` prints the affected files without
 writing. Versions must satisfy SemVer and Docker image tag rules, so `+build`
 suffixes are not supported. Prereleases such as `2.0.0-rc.1` are supported.
 
 ## Checks for every contribution
 
 `Version Consistency / version-check` runs on every branch push and PR update,
-including translation-only changes. It checks consistency, a version newer than
-the latest target branch, and reuse of an existing `v<version>` release tag.
-Direct default-branch pushes compare against the previous commit; an existing
-tag is accepted there only when it resolves to the exact checked commit.
+including translation-only changes. It checks consistency (including the
+appropriate upstream-tagged or fork-overridable Compose image form), version
+ordering, and reuse of an existing `v<version>` release tag. Upstream-bound PRs
+must increase the version and may not reuse an upstream tag. This fork keeps
+`VERSION` aligned with upstream, so fork-only branches and changes targeting
+`fork/main` may keep it unchanged but may not lower it. The `main` mirror and
+integration refs (`dev`, `sync/*`) may also keep it unchanged. Fork-only refs
+skip upstream tag-reuse checks because fork releases use `fork-v<version>-<n>`
+tags, validated by the Fork Release workflow; the mirror and integration refs
+carry upstream tag history rather than creating upstream releases.
+On upstream-style default branches, direct pushes compare against the previous
+commit; an existing tag is accepted only when it resolves to the exact checked
+commit. Fork default-branch pushes use the fork-only behavior above.
 The workflow has read-only repository permissions and does not write versions.
 On `main`, `version-check` is a required status check from GitHub Actions, and
 branches must be up to date before merging. These protections also apply to
