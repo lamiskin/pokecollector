@@ -14,6 +14,10 @@ thin and the same rule is applied identically everywhere.
   and component/editor state (most visibly in `tradeDraft`, `filterUrlState`,
   `pokedexUrlState`).
 - Presentational formatting (currency, counts, countdowns, chart axes) kept out of JSX.
+- Collection species grouping (`species.js`): the first `dex_ids` entry is the group
+  key, names come from `GET /api/pokedex/directory`, sprite URLs are built from the
+  dex id, and cards without dex ids return in a separate `other` bucket so trainers,
+  energy and manual cards stay reachable.
 - One place to mirror backend business logic on the client (`prices.js` re-implements
   `effective_market_price()` from `backend/services/card_values.py`).
 
