@@ -1594,6 +1594,8 @@
     "previousMatch": "Vorheriger Treffer",
     "nextMatch": "Nächster Treffer",
     "acceptMatch": "Treffer bestätigen",
+    "quickAdd": "Als NM · Normal hinzufügen",
+    "quickAddHint": "Diese Karte jetzt als Near Mint im Normal-Druck hinzufügen – ohne weitere Angaben.",
     "arrowKeyHint": "Pfeiltasten zum Durchblättern",
     "zoomHint": "Scrollen oder klicken zum Zoomen",
     "expandCard": "Foto vergrößern",

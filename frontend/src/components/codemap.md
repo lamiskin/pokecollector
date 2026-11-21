@@ -71,8 +71,10 @@ and `../api`, and `../pages` owns routing and orchestration.
    `enqueueScanJob`, then navigates to `/scans`. `ScanReview` renders each queued
    item (`ScanItemPanel`) with candidate matches (`CandidateGrid`) and a
    linked-zoom `CardZoomModal`. Confirming a match opens `ScanAddModal`
-   (`CardScanner.jsx`), which adds to the collection and best-effort attaches the
-   scan photo via `attachScanFallbackPhoto` — a photo failure never blocks the add.
+   (`CardScanner.jsx`); the comparison's **Add as NM · Normal** action skips
+   that form and files one NM/normal copy directly. `ScanQueue`'s `JobDetail`
+   sends either request and both best-effort attach the scan photo via
+   `attachScanFallbackPhoto` — a photo failure never blocks the add.
 2. **Display.** Pages fetch collection/search/set rows, normalize them with
    `withCollectionItemState` (owned/quantity/variant), and render through
    `CollectionCardDisplay` / `CollectionCardIdentity` / `CollectionCardRow` or a
