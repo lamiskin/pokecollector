@@ -41,6 +41,20 @@ private photos.
 
 ![The destination chooser on a phone, showing numbered pockets for the chosen page](https://raw.githubusercontent.com/lamiskin/pokecollector/fork-v1.57.9-5/docs/release-notes/assets/fork-v1.57.9-5/binder-phone.png)
 
+**Group the collection by Pokémon species.** The collection grid's Group by
+control gains a **Pokémon** mode beside None. Groups collapse and expand, and
+each header carries the species sprite, dex number, the name in your interface
+language, printing and copy counts, and the group's value; cards with no dex id
+— Trainers, Energy and manual cards — stay reachable in a trailing Other cards
+section. Grouping runs on what is already filtered, searched and sorted, so it
+never rescans availability, and selecting in the visible rows follows the groups
+you have expanded.
+
+**Species duplicates in Analytics.** A new tab lists every Pokémon you own in
+two or more printings, summarised by species and printings, copies and value.
+Expanding a species shows each printing with set, number, language, quantity and
+price, and opens the usual card dialog.
+
 **Card pickers hide cards you cannot add.** When adding cards to a binder,
 wishlist or deck, entries that are already in the list or have no free copies
 are no longer shown greyed out in the grid. A **Show unavailable** toggle with a
@@ -55,6 +69,10 @@ owned-cards and all-cards tabs and the deck editor, which share the same picker.
   state; the toggle reveals the matches.
 - Clearing filters or switching between My collection and All cards hides
   unavailable cards again.
+- Group by is a grid control: selecting the list view disables it and explains
+  why, rather than half-grouping a table.
+- Release images are now published for both `linux/amd64` and `linux/arm64`,
+  sharing one pinned digest per image.
 
 ### Limitations and notes
 
@@ -65,6 +83,9 @@ owned-cards and all-cards tabs and the deck editor, which share the same picker.
   converting the binder or releasing an allocation asks you to return the chosen
   copies to Not placed first, and names the affected locations.
 - Pages are numbered visible sides, not double-sided sheets.
+- A card depicting several species is grouped once, under the first dex id, and
+  marked rather than repeated in each group. Grouping is session state, like the
+  sort order.
 - The three new picker strings are English-only for now; other languages fall
   back to English until translated.
 - The picker's badge counts matches under the current filters. On the All cards
