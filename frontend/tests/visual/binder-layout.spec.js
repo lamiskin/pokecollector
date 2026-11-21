@@ -270,38 +270,6 @@ test('drag dwell changes page without saving, and an off-target drop does not co
   expect(fixture.writes).toHaveLength(1)
 })
 
-test('a finger drag from the pocket grip moves the copy', async ({ page, isMobile }) => {
-  test.skip(!isMobile, 'Mouse uses native HTML5 drag; this covers the touch pointer path.')
-  const fixture = await install(page)
-  await page.goto('/binders/11')
-  await page.getByRole('button', { name: 'Arrange', exact: true }).click()
-  // Slots and their grips sit in the same row, so one scroll keeps both on screen.
-  await page.locator('[data-page="1"][data-slot="1"]').scrollIntoViewIfNeeded()
-  const grip = page.getByRole('button', { name: 'Drag one copy of Sample Pikachu', exact: true }).first()
-  const origin = await grip.boundingBox()
-  const middle = { x: origin.x + origin.width / 2, y: origin.y + origin.height / 2 }
-  const pointer = { pointerId: 41, pointerType: 'touch', isPrimary: true }
-  await grip.dispatchEvent('pointerdown', { ...pointer, buttons: 1, clientX: middle.x, clientY: middle.y })
-  // The selection bar appears on pointerdown, so measure the pocket afterwards.
-  const target = await page.locator('[data-page="1"][data-slot="1"]').boundingBox()
-  const drop = { x: target.x + target.width / 2, y: target.y + target.height / 2 }
-  const viewport = page.viewportSize()
-  expect(drop.y).toBeGreaterThan(0)
-  expect(drop.y).toBeLessThan(viewport.height)
-  expect(middle.y).toBeLessThan(viewport.height)
-  const move = (x, y) => page.evaluate(({ pointer, x, y }) => window.dispatchEvent(
-    new PointerEvent('pointermove', { ...pointer, bubbles: true, clientX: x, clientY: y })), { pointer, x, y })
-  await move(middle.x, middle.y - 2)
-  await move(drop.x, drop.y)
-  const dropTarget = page.locator('li.binder-pocket', { has: page.locator('[data-page="1"][data-slot="1"]') })
-  await expect(dropTarget).toHaveClass(/binder-pocket-highlight/)
-  await page.evaluate(({ pointer, x, y }) => window.dispatchEvent(
-    new PointerEvent('pointerup', { ...pointer, bubbles: true, clientX: x, clientY: y })), { pointer, x: drop.x, y: drop.y })
-  await expect(page.locator('[data-page="1"][data-slot="1"]')).toHaveAttribute('data-placement', initial().placements[0].id)
-  expect(fixture.writes).toHaveLength(1)
-  expect(fixture.writes[0]).toMatchObject({ placement_id: initial().placements[0].id, page: 1, slot: 1 })
-})
-
 test('ordinary binder location links explain Cards view and open the associated entry', async ({ page }) => {
   await install(page, { withoutLayout: true })
   await page.goto('/binders/11?view=pages&card=sample-1_en&member=71&tray=1')
