@@ -171,7 +171,13 @@ decision to accept.
    push `fork/main`, and freeze an exact release SHA reachable from the remote
    `fork/main`. No tag until the final candidate is tested; a subsequent change
    invalidates affected evidence.
-3. Push the release branch, then rehearse the pipeline from it before tagging:
+3. Add and commit `docs/release-notes/<exact-fork-tag>.md`, for example
+   `docs/release-notes/fork-v1.55.1-1.md`. Curate its feature and fix highlights
+   by checking the actual frozen tree; do not infer shipped content from commit
+   ancestry. Use [`release-notes/TEMPLATE.md`](release-notes/TEMPLATE.md), and
+   include limitations or notes where relevant. Both dry-run and publish fail
+   unless the exact-tag file exists and is non-empty.
+4. Push the release branch, then rehearse the pipeline from it before tagging:
 
    ```sh
    git push -u origin release/1.55.1-fork.1
@@ -181,10 +187,13 @@ decision to accept.
      -f publish=false
    ```
 
-   The dry run runs the gates and builds both images; it pushes nothing and
-   creates no release. It needs the workflow on the repository's default branch
-   (`fork/main`; see the prerequisites below).
-4. Create the annotated tag on the frozen SHA and push only that tag, with
+    The dry run runs the gates and builds both images; it pushes nothing and
+    creates no release. Review its generated `RELEASE_NOTES.md` and manifest,
+    especially the curated highlights, exact comparison ranges, and the
+    point-in-time upstream `main` mirror tip and lag. The workflow distinguishes
+    upstream `main` (the mirror) from `fork/main` (the stable fork). It needs the
+    workflow on the repository's default branch (`fork/main`; see prerequisites).
+5. Create the annotated tag on the frozen SHA and push only that tag, with
    authorization. The tag push is the release commitment and is what publishes
    the images and the GitHub release:
 
@@ -197,16 +206,17 @@ decision to accept.
    `fork/main`, or whose version does not match `VERSION`. It never moves an
    existing release and never rebuilds an image already built from the same
    commit.
-5. The release carries `release-manifest.json` (upstream base SHA, fork SHA,
-   digests, platform, test evidence), a digest-pinned `pokecollector.env.example`
+6. The release carries reader-facing generated GitHub notes and
+   `release-manifest.json` (upstream base and mirror tip/lag, prior release
+   comparison, fork SHA, digests, platform, test evidence), a digest-pinned `pokecollector.env.example`
    and `docker-compose.yml`. Images are `ghcr.io/<owner>/pokecollector-backend`
    and `-frontend`, tagged with the release tag and labelled with the fork SHA.
    Add a row for it to [`docs/RELEASES.md`](RELEASES.md) — that register is the
    repository's own record of what was published.
-6. Temporarily run the **clean release candidate** in Dev, not Dev's extra
+7. Temporarily run the **clean release candidate** in Dev, not Dev's extra
    experimental combination, using the published digests. Exercise migrations
    on an approved copy of representative data and smoke-test the app.
-7. After acceptance, pin the same digests in `.env.prod` and deploy to Prod
+8. After acceptance, pin the same digests in `.env.prod` and deploy to Prod
    without rebuilding images on the server.
 
 Prerequisites, once per repository. These are repository settings, not commits:

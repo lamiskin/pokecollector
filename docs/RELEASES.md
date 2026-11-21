@@ -1,9 +1,12 @@
 # Fork release register
 
-One row per published `fork-v*` release. The authoritative per-release detail is
-that release's `release-manifest.json` asset (tag, fork SHA, upstream base,
-platform, digests, test evidence); this register exists so the repository itself
-records what was published and where Prod came from.
+One row per published `fork-v*` release. The GitHub release notes are the
+user-facing summary: curated highlights plus generated upstream/fork comparisons,
+test results, pinned images and deployment guidance. The attached
+`release-manifest.json` is the artifact provenance record (tag, fork SHA,
+upstream base and mirror tip/lag, prior-release comparison, platform, digests and
+test evidence). This register records what was published and where Prod came
+from.
 
 Images live under `ghcr.io/<owner>/pokecollector-{backend,frontend}` and are
 pulled by digest, never rebuilt on the server.
@@ -23,7 +26,12 @@ workflow.
 
 ## Adding a release
 
-After the workflow publishes, add a row here on `fork/main` with the values from
-that release's manifest. Record only what is public: tags, commit SHAs, digests
-and dates. Host names, credentials, backup paths and other environment-specific
-detail belong in the operator's private deployment record, not this file.
+Before running either a dry run or a publish, commit
+`docs/release-notes/<exact-fork-tag>.md` with highlights verified against the
+tagged tree. Start from [`release-notes/TEMPLATE.md`](release-notes/TEMPLATE.md);
+do not treat ancestry as evidence that a feature shipped. The workflow fails if
+the exact-tag file is missing or empty. Review the generated GitHub notes and
+manifest in the dry-run artifact, including the point-in-time `origin/main`
+mirror tip and lag, before publishing. After publication, add a row here on
+`fork/main` from the manifest. Record only public tags, commit SHAs, digests and
+dates; environment-specific detail belongs in the operator's private record.

@@ -19,6 +19,15 @@ export function parseArgs(argv) {
     'tag',
     'sha',
     'upstream-base',
+    'upstream-tip',
+    'upstream-lag',
+    'highlights',
+    'prior-manifest',
+    'prior-tag',
+    'prior-sha',
+    'prior-upstream-base',
+    'upstream-change-count',
+    'fork-change-count',
     'namespace',
     'repository',
     'digest-backend',
@@ -62,6 +71,9 @@ export function validate(input) {
     'tag',
     'sha',
     'upstream-base',
+    'upstream-tip',
+    'upstream-lag',
+    'highlights',
     'namespace',
     'repository',
   ]
@@ -89,6 +101,12 @@ export function validate(input) {
       errors.push(`--${name} must be a 40-character lowercase commit SHA, got ${input[name]}`)
     }
   }
+  if (!SHA_PATTERN.test(input['upstream-tip'])) {
+    errors.push(`--upstream-tip must be a 40-character lowercase commit SHA, got ${input['upstream-tip']}`)
+  }
+  if (!/^\d+$/u.test(input['upstream-lag'])) {
+    errors.push(`--upstream-lag must be a non-negative commit count, got ${input['upstream-lag']}`)
+  }
   for (const name of ['digest-backend', 'digest-frontend']) {
     if (!dryRun && !DIGEST_PATTERN.test(input[name])) {
       errors.push(`--${name} must be sha256:<64 lowercase hex>, got ${input[name]}`)
@@ -109,6 +127,32 @@ export function validate(input) {
     throw new Error(errors.join('\n'))
   }
 
+  let priorRelease = null
+  if (input['prior-manifest']) {
+    let prior
+    try {
+      prior = JSON.parse(readFileSync(resolve(root, input['prior-manifest']), 'utf8'))
+    } catch (error) {
+      errors.push(`--prior-manifest could not be read: ${error.message}`)
+    }
+    if (prior) {
+      if (prior.schema !== 1 || prior.repository !== repository || !TAG_PATTERN.test(prior.tag ?? '') || prior.tag === input.tag || !SHA_PATTERN.test(prior.fork_sha ?? '') || !SHA_PATTERN.test(prior.upstream_base_sha ?? '') || prior.dry_run !== false) {
+        errors.push('--prior-manifest must be a published fork manifest with valid tag, fork_sha and upstream_base_sha')
+      } else {
+        priorRelease = { tag: prior.tag, fork_sha: prior.fork_sha, upstream_base_sha: prior.upstream_base_sha }
+        for (const [option, field] of [['prior-tag', prior.tag], ['prior-sha', prior.fork_sha], ['prior-upstream-base', prior.upstream_base_sha]]) {
+          if (input[option] !== field) errors.push(`--${option} does not match the downloaded prior manifest`)
+        }
+        if (!/^\d+$/u.test(input['upstream-change-count'] ?? '') || !/^\d+$/u.test(input['fork-change-count'] ?? '')) {
+          errors.push('--upstream-change-count and --fork-change-count are required with --prior-manifest')
+        }
+      }
+    }
+  } else if (['prior-tag', 'prior-sha', 'prior-upstream-base', 'upstream-change-count', 'fork-change-count'].some((name) => input[name] !== undefined)) {
+    errors.push('prior release details and comparison counts require --prior-manifest')
+  }
+  if (errors.length) throw new Error(errors.join('\n'))
+
   const [, upstreamVersion, releaseNumber] = tagMatch
   return {
     tag: input.tag,
@@ -116,6 +160,12 @@ export function validate(input) {
     upstreamVersion,
     sha: input.sha,
     upstreamBase: input['upstream-base'],
+    upstreamTip: input['upstream-tip'],
+    upstreamLag: Number(input['upstream-lag']),
+    highlights: input.highlights,
+    priorRelease,
+    upstreamChangeCount: input['upstream-change-count'] === undefined ? null : Number(input['upstream-change-count']),
+    forkChangeCount: input['fork-change-count'] === undefined ? null : Number(input['fork-change-count']),
     namespace: input.namespace,
     repository,
     dryRun,
@@ -156,6 +206,12 @@ export function buildManifest(fields, generatedAt) {
     repository: fields.repository,
     fork_sha: fields.sha,
     upstream_base_sha: fields.upstreamBase,
+    upstream_main_tip_sha: fields.upstreamTip,
+    upstream_main_lag_commits: fields.upstreamLag,
+    prior_release: fields.priorRelease,
+    upstream_changes_since_prior: fields.upstreamChangeCount,
+    fork_changes_since_prior: fields.forkChangeCount,
+    highlights_file: `docs/release-notes/${fields.tag}.md`,
     platforms: [fields.platform],
     images,
     tests: {
@@ -171,7 +227,7 @@ export function buildManifest(fields, generatedAt) {
   }
 }
 
-export function renderNotes(manifest) {
+export function renderNotes(manifest, highlights) {
   const { images } = manifest
   const warning = manifest.dry_run
     ? '**Dry run — the images were built but not pushed. This manifest is not deployable.**\n\n'
@@ -187,12 +243,39 @@ Fork build of upstream ${manifest.upstream_version}, pinned by image digest.
 | | |
 | --- | --- |
 | Fork commit | \`${manifest.fork_sha}\` |
-| Upstream base | \`${manifest.upstream_base_sha}\` |
+| Upstream base (fork's adopted upstream position) | \`${manifest.upstream_base_sha}\` |
+| Upstream \`origin/main\` mirror tip at workflow run | \`${manifest.upstream_main_tip_sha}\` |
+| Commits \`origin/main\` was ahead of release base at workflow run | ${manifest.upstream_main_lag_commits} |
 | Platform | ${manifest.platforms.join(', ')} |
 | Backend tests | ${manifest.tests.backend} |
 | Frontend tests | ${manifest.tests.frontend} |
 
-## Images
+## Fork highlights
+
+${highlights.trim()}
+
+## Upstream sync position
+
+\`main\` is the fast-forward mirror of upstream \`main\`; \`fork/main\` is the stable fork branch and adopts upstream only after integration. This release is based on upstream commit \`${manifest.upstream_base_sha}\`. At workflow run time, the mirror tip was \`${manifest.upstream_main_tip_sha}\`, ${manifest.upstream_main_lag_commits} commit(s) ahead of that base. This is a point-in-time measurement, not a claim about the mirror's state now.
+
+## Upstream changes since the prior published fork release
+
+${manifest.prior_release
+    ? `Since [${manifest.prior_release.tag}](https://github.com/${manifest.repository}/releases/tag/${manifest.prior_release.tag}) (upstream base \`${manifest.prior_release.upstream_base_sha}\`): [compare upstream bases](https://github.com/Git-Romer/pokecollector/compare/${manifest.prior_release.upstream_base_sha}...${manifest.upstream_base_sha}) — ${manifest.upstream_changes_since_prior} commit(s).`
+    : 'No prior published fork release was found; comparison ranges are omitted.'}
+
+## Fork release commit range since the prior published fork release
+
+${manifest.prior_release
+    ? `The full fork history range since [${manifest.prior_release.tag}](https://github.com/${manifest.repository}/releases/tag/${manifest.prior_release.tag}) (fork commit \`${manifest.prior_release.fork_sha}\`) spans ${manifest.fork_changes_since_prior} commit(s): [compare fork commits](https://github.com/${manifest.repository}/compare/${manifest.prior_release.fork_sha}...${manifest.fork_sha}). This range includes upstream and fork-specific commits; fork-only feature highlights are listed above.`
+    : 'No prior published fork release was found; comparison ranges are omitted.'}
+
+## Tests
+
+- Backend: ${manifest.tests.backend}
+- Frontend tests and build: ${manifest.tests.frontend}
+
+## Pinned images
 
 Pull by digest; do not rebuild or substitute upstream images.
 
@@ -240,20 +323,34 @@ export function pinEnvExample(source, manifest) {
   return output
 }
 
-export function writeAssets(fields, outDir = fields.out) {
+export function writeAssets(fields, outDir = fields.out, repoRoot = root) {
+  const highlightsPath = resolve(repoRoot, fields.highlights)
+  if (fields.highlights !== `docs/release-notes/${fields.tag}.md`) {
+    throw new Error(`highlights file must be docs/release-notes/${fields.tag}.md`)
+  }
+  let highlights
+  try {
+    highlights = readFileSync(highlightsPath, 'utf8')
+  } catch {
+    throw new Error(`required highlights file is missing: ${fields.highlights}`)
+  }
+  if (!highlights.trim()) throw new Error(`required highlights file is empty: ${fields.highlights}`)
+  if (highlights.includes('<!-- RELEASE-NOTES-TEMPLATE-PLACEHOLDER -->')) {
+    throw new Error(`replace the template placeholder in ${fields.highlights} with release-specific notes`)
+  }
   const manifest = buildManifest(fields, new Date().toISOString())
-  const absoluteOut = resolve(root, outDir)
+  const absoluteOut = resolve(repoRoot, outDir)
   mkdirSync(absoluteOut, { recursive: true })
 
   writeFileSync(resolve(absoluteOut, 'release-manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`)
-  writeFileSync(resolve(absoluteOut, 'RELEASE_NOTES.md'), renderNotes(manifest))
+  writeFileSync(resolve(absoluteOut, 'RELEASE_NOTES.md'), renderNotes(manifest, highlights))
 
   // A dry run has no digests to pin, so it ships nothing an operator could
   // mistake for a deployable deployment file.
   if (!manifest.dry_run) {
-    const envSource = readFileSync(resolve(root, '.env.prod.example'), 'utf8')
+    const envSource = readFileSync(resolve(repoRoot, '.env.prod.example'), 'utf8')
     writeFileSync(resolve(absoluteOut, 'pokecollector.env.example'), pinEnvExample(envSource, manifest))
-    copyFileSync(resolve(root, 'docker-compose.yml'), resolve(absoluteOut, 'docker-compose.yml'))
+    copyFileSync(resolve(repoRoot, 'docker-compose.yml'), resolve(absoluteOut, 'docker-compose.yml'))
   }
 
   return { manifest, outDir: absoluteOut }
