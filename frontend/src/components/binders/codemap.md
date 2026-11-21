@@ -2,8 +2,8 @@
 
 ## Responsibility
 
-This folder hosts the UI for importing card lists into a binder via CSV. Its
-single component, `BinderCsvImportModal`, is a **presentational modal** that
+This folder hosts physical binder layouts, card-location links, and CSV import.
+`BinderCsvImportModal` is a **presentational modal** that
 onboards the user onto the CSV-import flow: it explains the expected column
 schema, offers a downloadable template, and exposes the two actions (choose a
 file / download the template). It does **not** own the file input, the upload,
@@ -11,6 +11,41 @@ or the API call — those live in the parent pages. It is the "explainer and
 gateway" between the user and the binder CSV import endpoint.
 
 ## Design
+
+### Physical pages and locations
+
+- `BinderLayoutPanel` is the private integration boundary: a fresh React Query
+  layout snapshot, revision-checked move/layout/undo mutations, Cards/Pages URL
+  state, conflict refresh, and layout settings. `BinderDetail` retains ordinary
+  gallery, membership editing, allocation, and card-detail behaviour.
+- `BinderWorkspace` is shared by private and public pages. It receives snapshots
+  and optional mutation callbacks; it does not fetch. Exported `BinderPage`
+  renders all 9/12 numbered pockets, including gaps, through card-system artwork.
+  Container width determines readable two-page spreads versus one-page viewing;
+  the Not placed tray is alongside wide workspaces or expandable below a page.
+- Arrange mode separates browsing from selection. One-copy tap/place, a labelled
+  page/slot chooser, desktop grip dragging with deliberate dwell paging, occupied
+  destination confirmation, save/error status, and conflict-safe Undo share one
+  mutation path. Native buttons support keyboard moves and arrow-key slot focus.
+- `BinderLayoutSettings` requires a server preview before saving. The preview's
+  revision and exact affected placement IDs accompany confirmation; geometry
+  changes and disabling pages return occupied copies to Not placed, never repack.
+- `CardLocations` fetches all placed copies and grouped unplaced memberships for
+  card dialogs. A public handle switches to the anonymous public client; private
+  collection dialogs additionally scope by collection item. Links carry expected
+  card/membership and placement identity, not coordinates alone.
+  Ordinary binders without layouts retain Cards view; linked unplaced entries
+  receive an explicit explanation and an action opening the associated card.
+- `utils/binderLayout.js` owns spread calculations, translated interpolation,
+  location URLs and safe stale-target resolution. Fresh snapshots resolve moved
+  targets before focus/highlight; ambiguous remaining copies get explicit links.
+- `binder-layout.css` adds themed pockets, spine accents, selection/focus states
+  and a short directional page reveal. Reduced motion disables workspace motion.
+  Shared `Modal`/`ConfirmDialog` provide focus trapping and responsive overlays.
+- Public callers provide sanitized snapshots and no mutation callbacks. Public
+  artwork never passes through private collection-photo wrappers.
+
+### CSV import
 
 - **Pure presentation, no data fetching.** The modal receives everything it
   needs as props and renders against them; it holds no local state beyond the

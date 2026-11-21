@@ -12,6 +12,7 @@ import clsx from 'clsx'
 import { cardImageUrl, resolveCardImageUrl } from '../utils/imageUrl'
 import { CARD_VARIANTS, getAvailableVariants, getDefaultVariant } from '../utils/cardVariants'
 import MoneyInput from './MoneyInput'
+import CardLocations from './binders/CardLocations'
 import { getCardPriceValue, getEffectiveCardPrice, getPrimaryCardPrice } from '../utils/prices'
 import { tcgdexLanguageLabel } from '../utils/tcgdexLanguages'
 import TcgdexLanguageSelect from './TcgdexLanguageSelect'
@@ -857,6 +858,7 @@ export function CardModal({ card, onClose, onEdit, defaultLang = 'en', ownedItem
               {activeTab === 'owned' && ownedQuantity > 0 && (
                 <div className="space-y-3">
                   <p className="text-sm font-semibold text-green">✓ {t('cardSearch.alreadyOwned')} · {ownedQuantity}x</p>
+                  <CardLocations cardId={resolvedCardId} />
                   {modalOwnedItems.length > 0 && (
                     <div className="mt-3 space-y-2">
                       {modalOwnedItems.map(item => (

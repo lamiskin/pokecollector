@@ -599,6 +599,60 @@ When a queued candidate is confirmed, its TCGdex card id labels all stored attem
 
 Turning consent off stops future capture and leaves existing traces unchanged. There is no automatic retention limit. `DELETE /api/settings/scan-diagnostics` is the explicit per-user deletion action; deleting an account revokes in-flight writes and removes its trace subtree as well. Trace directories use mode `0700` and JSON/JPEG files use `0600`. Diagnostics are not included in SQL backups because they are filesystem analysis data.
 
+## Physical binder pages and slots
+
+Collection binders can optionally have 1–500 numbered visible sides, each with
+three rows and three or four columns. Page count is **not** physical sheet count.
+`BinderPlacement` stores one owned copy per `(binder_id, page, slot)` and references
+the existing reserved `BinderCard` membership. Unplaced quantity is membership
+quantity minus placement count; enabling a layout never infers gallery order or
+changes collection inventory. Planned binders, Planned Decks and Real Decks keep
+their existing semantics. Scan-to-binder continues adding unplaced copies.
+
+Owner endpoints:
+
+- `GET /api/binders/{id}/layout`: layout, placements, grouped tray entries and revision.
+- `POST /api/binders/{id}/layout/preview`: `{page_count, rows: 3, columns: 3|4}`;
+  returns the current revision and exact affected locations. Null page count disables.
+- `PUT /api/binders/{id}/layout`: the same configuration plus `expected_revision`
+  and `confirmed_unplace_ids`. Shrinking returns only out-of-bounds copies to the
+  tray; changing grid geometry returns **all** placed copies, without renumbering.
+- `POST /api/binders/{id}/placements`: `{binder_card_id, placement_id, page, slot,
+  expected_revision, confirm_occupied}`. Null placement ID consumes one tray copy.
+  A placed source swaps with an occupied destination; a tray source returns the
+  displaced copy to the tray. Both require occupied-slot confirmation. Null page
+  **and** slot return the chosen placed copy to the tray, retaining its allocation.
+- `POST /api/binders/{id}/layout/undo`: `{expected_revision}` restores the last
+  server-held layout/placement snapshot only if no relevant state changed.
+- `GET /api/cards/{card_id}/locations?collection_item_id=...`: every applicable
+  placed location plus grouped unplaced quantities, owner-scoped.
+
+Writes take the existing user-allocation lock before binder/collection locks.
+Revisions include a monotonic counter and a membership/inventory snapshot. Stale
+requests return 409, never an overwrite. Moves, swaps, layout changes and undo are
+single transactions; failed saves roll back. Membership deletions, quantity
+reductions below placed count, print switches/merges, conversions and allocation
+release identify affected locations and return 409 until the owner explicitly
+returns the chosen copies to Not placed. Reducing unplaced quantities alone is safe.
+Legacy unresolved memberships remain visible in the tray but cannot be placed:
+remove the unresolved membership and re-add an exact owned collection row first.
+
+Public `GET /api/public/profiles/{handle}/binders/{id}/layout` and
+`GET /api/public/profiles/{handle}/cards/{card_id}/locations` enforce the existing
+global/profile/binder sharing gates. They have no mutation counterpart and expose
+only shared binder information, proxy card images and no collection IDs, private
+photos, conditions, purchase data, revisions or undo state. Failed reads are not cached.
+
+Startup uses `services/binder_layout_schema.py`, outside the best-effort legacy
+migration loop. It preserves legacy memberships, verifies constraints and fails
+closed on invalid placement data. PostgreSQL deferred triggers enforce matching
+membership/binder/owner/card, bounds and reserved/owned quantity limits; immediate
+unique/FK constraints prevent duplicate pockets and accidental occupied-parent
+deletion. SQLite unit tests cover service behavior; isolated PostgreSQL tests cover
+deferred integrity, upgrade/rerun preservation and real concurrent writes. Run
+`test_binder_layouts.py`; enable `BINDER_LAYOUTS_POSTGRES_TEST=1` with a disposable
+`DATABASE_URL` for `test_binder_layouts_postgres.py` (unique schemas per test).
+
 ## Bulk removal
 
 Authenticated owners can remove complete entries in one atomic request:

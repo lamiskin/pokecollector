@@ -44,7 +44,7 @@ share the service layer for catalogue, price, and maintenance work.
 | `frontend/src/` | React app bootstrap, routes and UI source atlas | [frontend/src/codemap.md](frontend/src/codemap.md) |
 | `frontend/src/api/` | Authenticated and public HTTP clients | [frontend/src/api/codemap.md](frontend/src/api/codemap.md) |
 | `frontend/src/components/` | Shared visual components and feature subareas | [frontend/src/components/codemap.md](frontend/src/components/codemap.md) |
-| `frontend/src/components/binders/` | Binder CSV import UI | [codemap](frontend/src/components/binders/codemap.md) |
+| `frontend/src/components/binders/` | Binder CSV import, physical pages/tray/arranging and card-location navigation | [codemap](frontend/src/components/binders/codemap.md) |
 | `frontend/src/components/card-lists/` | Reusable card gallery and picker | [codemap](frontend/src/components/card-lists/codemap.md) |
 | `frontend/src/components/card-system/` | Shared card display primitives and pricing | [codemap](frontend/src/components/card-system/codemap.md) |
 | `frontend/src/components/decks/` | Deck validation, analytics and display components | [codemap](frontend/src/components/decks/codemap.md) |

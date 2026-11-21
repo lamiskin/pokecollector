@@ -39,7 +39,7 @@ and `../api`, and `../pages` owns routing and orchestration.
 | `card-system/` | Card rendering tokens + primitives (`CardDisplay`, `CardRow`, `CardIdentity`, `CardPriceDetails`, `CardStack`, `CardDialog`, `CardLegend`, `CardRequirementProgress`, `CardSelectionQuantityModal`, `CardSystemGallery`) with barrel `index.js`. | [card-system/codemap.md](card-system/codemap.md) |
 | `decks/` | Deck analytics/validation/composition visuals (`DeckAnalyticsPanel`, `DeckAnalyticsVisuals`, `DeckCompositionBar`, `DeckCardViewer`, `DeckValidationPanel`). | [decks/codemap.md](decks/codemap.md) |
 | `card-lists/` | `CardListPicker`, `CardListGallery`. | [card-lists/codemap.md](card-lists/codemap.md) |
-| `binders/` | `BinderCsvImportModal`. | [binders/codemap.md](binders/codemap.md) |
+| `binders/` | Physical pages/slots workspace, revisioned layout settings and moves, card-location links, `BinderCsvImportModal`. | [binders/codemap.md](binders/codemap.md) |
 | `public/` | `PublicProfileShell` (public profile layout, reuses `TabNav`). | [public/codemap.md](public/codemap.md) |
 
 ## Design

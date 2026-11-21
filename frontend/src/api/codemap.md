@@ -19,6 +19,14 @@ directly — they import typed helper functions from here instead. It encapsulat
 
 ## Design
 
+- **Physical binder snapshots.** `getBinderLayout` bypasses HTTP caches;
+  `previewBinderLayout`, `saveBinderLayout`, `moveBinderPlacement` and
+  `undoBinderLayout` use `/binders/:id/layout` and `/placements`. Writes carry
+  the latest revision and return a complete snapshot. Preview confirmation sends
+  exact affected placement IDs. `getCardLocations` optionally scopes by owned
+  collection item. `publicClient` separately exports read-only binder layouts
+  and shared card locations under `/profiles/:handle/...`.
+
 - **Two instances, one trust boundary.** `client.js` creates `axios.create({ baseURL: '/api' })`
   with request/response interceptors; `publicClient.js` creates a separate
   `axios.create({ baseURL: '/api/public' })` with **no interceptors at all**. Public

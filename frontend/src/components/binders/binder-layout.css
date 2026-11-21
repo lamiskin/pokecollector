@@ -1,0 +1,18 @@
+@layer components {
+  .binder-page { background: var(--color-card); border: 1px solid var(--color-border); border-top: 3px solid var(--binder-accent); border-radius: 1rem; padding: clamp(.5rem, 1.5vw, 1rem); box-shadow: inset 0 0 25px var(--color-border-subtle), 0 6px 24px #00000015; }
+  .binder-pocket { border: 1px solid var(--color-border); border-radius: .55rem; padding: .15rem; background: var(--color-surface); aspect-ratio: 63 / 91; }
+  .binder-pocket .unified-card-frame { width: 100%; }
+  .binder-empty { aspect-ratio: 63 / 88; display: grid; place-items: center; color: var(--color-text-secondary); font-size: .8rem; background: linear-gradient(145deg, var(--color-elevated), transparent); border-radius: .4rem; }
+  .binder-pocket-action { position: absolute; inset: 0; width: 100%; border-radius: .55rem; z-index: 10; }
+  .binder-pocket-action:focus-visible { outline: 3px solid var(--color-blue); outline-offset: 3px; }
+  .binder-pocket-selected { outline: 3px solid var(--color-blue); outline-offset: 2px; }
+  .binder-pocket-highlight { box-shadow: 0 0 0 3px var(--color-yellow); }
+  .binder-slot-number { position: absolute; bottom: .3rem; left: .3rem; z-index: 11; pointer-events: none; background: var(--color-surface); color: var(--color-text-primary); border: 1px solid var(--color-border); border-radius: .25rem; min-width: 1.2rem; text-align: center; font-size: .65rem; line-height: 1.2rem; }
+  .binder-drag-handle { position: absolute; top: .25rem; right: .25rem; z-index: 12; cursor: grab; border-radius: .35rem; padding: .4rem; background: var(--color-surface); color: var(--color-text-primary); }
+  .binder-tray-drag { padding: .6rem; cursor: grab; }
+  .binder-page-reveal { animation: binder-page-in 180ms ease-out; }
+  .binder-dwell { background: var(--color-blue); color: white; animation: binder-dwell 650ms linear; }
+  @keyframes binder-page-in { from { opacity: .4; transform: translateX(calc(var(--binder-direction, 1) * .5rem)); } to { opacity: 1; transform: none; } }
+  @keyframes binder-dwell { from { box-shadow: inset 0 -3px transparent; } to { box-shadow: inset 0 -3px white; } }
+  @media (prefers-reduced-motion: reduce) { .binder-workspace *, .binder-workspace *::before, .binder-workspace *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
+}

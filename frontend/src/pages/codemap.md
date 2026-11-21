@@ -28,6 +28,14 @@ of that routing table.
 
 ## Design
 
+- **Physical binders.** Collection `BinderDetail` composes `BinderLayoutPanel`
+  alongside its existing Cards gallery. The panel owns revisioned layout reads,
+  preview/settings and placement changes; the page still owns membership edits
+  and details. `PublicBinderView` fetches the sanitized anonymous layout and
+  composes the same `BinderWorkspace` without mutation actions. Collection
+  details and owned catalogue results expose `CardLocations`, whose identity-
+  aware URLs open Pages and resolve against a fresh snapshot before highlighting.
+
 - **Lazy, code-split pages.** `App.jsx` wraps every page in `React.lazy(() => import('./pages/…'))`
   and renders each through `lazyRoute()` inside a `<Suspense>` whose fallback is
   the `PokeBallLoader` spinner (`RouteLoader`). This keeps the initial bundle small;

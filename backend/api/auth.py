@@ -1187,6 +1187,7 @@ def delete_user(
     from models import (
         Binder,
         BinderCard,
+        BinderPlacement,
         Card,
         CollectionCardPhoto,
         CollectionItem,
@@ -1209,6 +1210,13 @@ def delete_user(
             Card.custom_owner_id == user_id,
         ).all()
     ]
+    # Explicit account erasure removes the whole owner's inventory, unlike a
+    # binder/quantity edit. Purge its locations first under the allocation lock.
+    from services.binder_allocations import lock_user_card_allocations
+    lock_user_card_allocations(db, user_id)
+    db.query(BinderPlacement).filter(
+        BinderPlacement.binder_id.in_(db.query(Binder.id).filter(Binder.user_id == user_id))
+    ).delete(synchronize_session=False)
     db.query(BinderCard).filter(
         BinderCard.binder_id.in_(db.query(Binder.id).filter(Binder.user_id == user_id))
     ).delete(synchronize_session=False)
