@@ -295,5 +295,7 @@ test('an unavailable identity endpoint leaves settings explanatory rather than b
   await page.goto('/settings')
 
   await expect(page.getByText('Sign-in details are unavailable right now.')).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible()
+  // The settings page also renders the scanner "Retry uncertain scans with
+  // reasoning" toggle, so this needs an exact accessible name.
+  await expect(page.getByRole('button', { name: 'Retry', exact: true })).toBeVisible()
 })
