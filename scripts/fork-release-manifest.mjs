@@ -115,9 +115,9 @@ export function validate(input) {
   if (!NAMESPACE_PATTERN.test(input.namespace)) {
     errors.push(`--namespace must be a lowercase registry namespace, got ${input.namespace}`)
   }
-  const platform = input.platform ?? 'linux/amd64'
-  if (!PLATFORM_PATTERN.test(platform)) {
-    errors.push(`--platform must be linux/<arch>, got ${platform}`)
+  const platforms = (input.platform ?? 'linux/amd64,linux/arm64').split(',')
+  if (platforms.some((platform) => !PLATFORM_PATTERN.test(platform)) || new Set(platforms).size !== platforms.length) {
+    errors.push(`--platform must be a comma-separated list of unique linux/<arch> values, got ${input.platform}`)
   }
   const repository = input.repository ?? ''
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(repository)) {
@@ -171,7 +171,7 @@ export function validate(input) {
     dryRun,
     digestBackend: input['digest-backend'],
     digestFrontend: input['digest-frontend'],
-    platform,
+    platforms,
     backendTests: input['backend-tests'] ?? 'success',
     frontendTests: input['frontend-tests'] ?? 'success',
     workflowRun: input['workflow-run'] ?? '',
@@ -212,7 +212,7 @@ export function buildManifest(fields, generatedAt) {
     upstream_changes_since_prior: fields.upstreamChangeCount,
     fork_changes_since_prior: fields.forkChangeCount,
     highlights_file: `docs/release-notes/${fields.tag}.md`,
-    platforms: [fields.platform],
+    platforms: fields.platforms ?? [fields.platform ?? 'linux/amd64'],
     images,
     tests: {
       backend: fields.backendTests,

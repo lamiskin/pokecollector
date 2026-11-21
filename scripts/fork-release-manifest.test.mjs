@@ -61,7 +61,7 @@ test('validate derives the fork and upstream versions from the tag', () => {
   const fields = validate(parseArgs(validArgs))
   assert.equal(fields.forkVersion, '1.55.1-2')
   assert.equal(fields.upstreamVersion, '1.55.1')
-  assert.equal(fields.platform, 'linux/amd64')
+  assert.deepEqual(fields.platforms, ['linux/amd64', 'linux/arm64'])
 })
 
 test('validate rejects a tag, digest, SHA or namespace that cannot be published', () => {
@@ -77,6 +77,16 @@ test('validate rejects a tag, digest, SHA or namespace that cannot be published'
     args[args.indexOf(option) + 1] = value
     assert.throws(() => validate(parseArgs(args)), `${option} ${value} should be rejected`)
   }
+})
+
+test('platform option parses a validated list and manifest records every platform', () => {
+  const fields = validate(parseArgs([...validArgs, '--platform', 'linux/amd64,linux/arm64']))
+  const manifest = buildManifest(fields, '2026-11-04T00:00:00.000Z')
+  assert.deepEqual(manifest.platforms, ['linux/amd64', 'linux/arm64'])
+  assert.throws(
+    () => validate(parseArgs([...validArgs, '--platform', 'linux/amd64,linux/amd64'])),
+    /unique linux/,
+  )
 })
 
 test('a dry run needs no digests and refuses to carry them', () => {
@@ -127,6 +137,7 @@ test('a dry run writes only the manifest and notes', () => {
 
     const manifest = JSON.parse(readFileSync(join(outDir, 'release-manifest.json'), 'utf8'))
     assert.equal(manifest.dry_run, true)
+    assert.deepEqual(manifest.platforms, ['linux/amd64', 'linux/arm64'])
     assert.equal(manifest.images.backend.digest, null)
     assert.equal(manifest.images.backend.ref, null)
     assert.match(readFileSync(join(outDir, 'RELEASE_NOTES.md'), 'utf8'), /Dry run/)
@@ -157,6 +168,7 @@ test('writeAssets emits the manifest, notes, pinned env and compose file', () =>
     assert.equal(written.upstream_main_tip_sha, sha)
     assert.equal(written.upstream_main_lag_commits, 0)
     assert.equal(written.fork_sha, sha)
+    assert.deepEqual(written.platforms, ['linux/amd64', 'linux/arm64'])
 
     const notes = readFileSync(join(outDir, 'RELEASE_NOTES.md'), 'utf8')
     assert.match(notes, /fork-v1\.55\.1-2/)

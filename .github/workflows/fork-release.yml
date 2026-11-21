@@ -219,16 +219,6 @@ jobs:
           RELEASE_SHA: ${{ steps.tag.outputs.sha }}
         run: |
           set -euo pipefail
-          # buildx may push an image index (multi-platform metadata, provenance)
-          # or a single manifest; labels live on the platform manifest either way.
-          image_labels() {
-            local repo="$1" index_digest="$2" manifest platform_digest labels
-            manifest="$(docker buildx imagetools inspect "${repo}@${index_digest}" --format '{{json .Manifest}}' 2>/dev/null || true)"
-            platform_digest="$(jq -r 'first(.manifests[]? | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest) // empty' <<< "${manifest:-null}" 2>/dev/null || true)"
-            labels="$(docker buildx imagetools inspect "${repo}@${platform_digest:-$index_digest}" --format '{{json .Image.Config.Labels}}' 2>/dev/null || true)"
-            printf '%s' "${labels:-null}"
-          }
-
           for image in backend frontend; do
             ref="ghcr.io/${NAMESPACE}/pokecollector-${image}:${TAG}"
             inspection="$(docker buildx imagetools inspect "$ref" 2>/dev/null || true)"
@@ -239,14 +229,25 @@ jobs:
                 echo "::error::could not read the digest of ${ref}"
                 exit 1
               fi
-              labels="$(image_labels "${ref%:*}" "$index_digest")"
-              revision="$(jq -r '."org.opencontainers.image.revision" // empty' <<< "$labels" 2>/dev/null || true)"
-              if [[ "$revision" != "$RELEASE_SHA" ]]; then
-                echo "::error::${ref} exists but was built from '${revision}', not ${RELEASE_SHA}; cut the next release number"
-                exit 1
+              manifest="$(docker buildx imagetools inspect "${ref%:*}@${index_digest}" --format '{{json .Manifest}}' 2>/dev/null || true)"
+              reusable=true
+              for architecture in amd64 arm64; do
+                platform_digest="$(jq -r --arg architecture "$architecture" 'first(.manifests[]? | select(.platform.os == "linux" and .platform.architecture == $architecture) | .digest) // empty' <<< "${manifest:-null}" 2>/dev/null || true)"
+                if [[ -z "$platform_digest" ]]; then
+                  reusable=false
+                  continue
+                fi
+                labels="$(docker buildx imagetools inspect "${ref%:*}@${platform_digest}" --format '{{json .Image.Config.Labels}}' 2>/dev/null || true)"
+                revision="$(jq -r '."org.opencontainers.image.revision" // empty' <<< "${labels:-null}" 2>/dev/null || true)"
+                if [[ "$revision" != "$RELEASE_SHA" ]]; then
+                  echo "::error::${ref} linux/${architecture} was built from '${revision}', not ${RELEASE_SHA}; cut the next release number"
+                  exit 1
+                fi
+              done
+              if [[ "$reusable" == true ]]; then
+                present=true
+                echo "Reusing ${ref}; both platform images were built from ${RELEASE_SHA}."
               fi
-              present=true
-              echo "Reusing ${ref}; it was built from ${RELEASE_SHA}."
             fi
             echo "${image}_present=${present}" >> "$GITHUB_OUTPUT"
           done
@@ -381,6 +382,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
+      - name: Set up QEMU
+        if: needs.prepare.outputs.publish != 'true' || needs.prepare.outputs.backend_present != 'true' || needs.prepare.outputs.frontend_present != 'true'
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4
 
@@ -390,9 +395,8 @@ jobs:
         with:
           context: .
           file: backend/Dockerfile
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           push: ${{ needs.prepare.outputs.publish == 'true' }}
-          load: ${{ needs.prepare.outputs.publish != 'true' }}
           tags: ghcr.io/${{ needs.prepare.outputs.namespace }}/pokecollector-backend:${{ needs.prepare.outputs.tag }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
@@ -409,9 +413,8 @@ jobs:
         with:
           context: .
           file: frontend/Dockerfile
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           push: ${{ needs.prepare.outputs.publish == 'true' }}
-          load: ${{ needs.prepare.outputs.publish != 'true' }}
           tags: ghcr.io/${{ needs.prepare.outputs.namespace }}/pokecollector-frontend:${{ needs.prepare.outputs.tag }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
@@ -426,7 +429,6 @@ jobs:
         if: needs.prepare.outputs.publish != 'true'
         run: |
           echo "Dry run: both images were built; nothing was pushed and no release was created."
-          docker image ls --format '{{.Repository}}:{{.Tag}} {{.ID}}' | grep pokecollector
 
   release:
     name: Publish release
@@ -478,19 +480,20 @@ jobs:
               exit 1
             fi
 
-            manifest="$(docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}' 2>/dev/null || true)"
-            platform_digest="$(jq -r 'first(.manifests[]? | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest) // empty' <<< "${manifest:-null}" 2>/dev/null || true)"
-            if jq -e 'has("manifests")' <<< "${manifest:-null}" >/dev/null 2>&1 && [[ -z "$platform_digest" ]]; then
-              echo "::error::${ref} has no linux/amd64 manifest"
-              exit 1
-            fi
-
-            labels="$(docker buildx imagetools inspect "${ref%:*}"@"${platform_digest:-$index_digest}" --format '{{json .Image.Config.Labels}}' 2>/dev/null || true)"
-            revision="$(jq -r '."org.opencontainers.image.revision" // empty' <<< "${labels:-null}" 2>/dev/null || true)"
-            if [[ "$revision" != "$RELEASE_SHA" ]]; then
-              echo "::error::${ref} was built from '${revision}', not ${RELEASE_SHA}"
-              exit 1
-            fi
+            manifest="$(docker buildx imagetools inspect "${ref%:*}@${index_digest}" --format '{{json .Manifest}}' 2>/dev/null || true)"
+            for architecture in amd64 arm64; do
+              platform_digest="$(jq -r --arg architecture "$architecture" 'first(.manifests[]? | select(.platform.os == "linux" and .platform.architecture == $architecture) | .digest) // empty' <<< "${manifest:-null}" 2>/dev/null || true)"
+              if [[ -z "$platform_digest" ]]; then
+                echo "::error::${ref} has no linux/${architecture} manifest"
+                exit 1
+              fi
+              labels="$(docker buildx imagetools inspect "${ref%:*}@${platform_digest}" --format '{{json .Image.Config.Labels}}' 2>/dev/null || true)"
+              revision="$(jq -r '."org.opencontainers.image.revision" // empty' <<< "${labels:-null}" 2>/dev/null || true)"
+              if [[ "$revision" != "$RELEASE_SHA" ]]; then
+                echo "::error::${ref} linux/${architecture} was built from '${revision}', not ${RELEASE_SHA}"
+                exit 1
+              fi
+            done
             echo "${image}_digest=${index_digest}" >> "$GITHUB_OUTPUT"
           done
 
@@ -524,7 +527,7 @@ jobs:
             --highlights "docs/release-notes/${TAG}.md"
             --namespace "$NAMESPACE"
             --repository "$GITHUB_REPOSITORY"
-            --platform linux/amd64
+            --platform linux/amd64,linux/arm64
             --backend-tests success
             --frontend-tests success
             --workflow-run "$WORKFLOW_RUN"
