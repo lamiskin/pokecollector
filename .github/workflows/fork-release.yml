@@ -157,6 +157,34 @@ jobs:
             git merge-base --is-ancestor "$prior_sha" "$sha" || { echo "::error::prior fork release is not an ancestor of this release"; exit 1; }
             upstream_change_count="$(git rev-list --count "${prior_upstream_base}..${upstream_base}")"
             fork_change_count="$(git rev-list --count "${prior_sha}..${sha}")"
+
+            # Coverage gate: the highlights must account for every merged PR that
+            # changed application code, so a release cannot silently ship a
+            # feature the notes never mention. PRs that touch only docs or tests
+            # are exempt. Notes name their PRs in a hidden marker comment, which
+            # keeps the visible prose free of numbers.
+            uncovered=()
+            while read -r merge; do
+              [[ -n "$merge" ]] || continue
+              subject="$(git log -1 --format=%s "$merge")"
+              [[ "$subject" =~ ^Merge[[:space:]]pull[[:space:]]request[[:space:]]#([0-9]+)[[:space:]]from ]] || continue
+              number="${BASH_REMATCH[1]}"
+              # Skip PRs that only touch documentation or tests.
+              git diff --name-only "${merge}^1" "$merge" \
+                | grep -qvE '^(docs/|\.github/|frontend/tests/|backend/tests/|CONTRIBUTING\.md$|README\.md$)' \
+                || continue
+              grep -qE "#${number}([^0-9]|$)" "$highlights" || uncovered+=("#${number} ${subject}")
+            done < <(git rev-list --merges "${prior_sha}..${sha}")
+            if (( ${#uncovered[@]} > 0 )); then
+              echo "::error::${highlights} does not mention ${#uncovered[@]} merged change(s): ${uncovered[*]}. Describe each one and list its PR in a marker such as <!-- release-coverage: #12 -->."
+              exit 1
+            fi
+
+            # Register gate: the previous published release must have its row.
+            if ! grep -qE "^\| \`${prior_tag}\` \|" docs/RELEASES.md; then
+              echo "::error::docs/RELEASES.md has no row for the published ${prior_tag}; add it before cutting ${tag}"
+              exit 1
+            fi
           fi
 
           app_version="$(tr -d '[:space:]' < VERSION)"
