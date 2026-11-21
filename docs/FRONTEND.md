@@ -347,7 +347,7 @@ The optional Holo effect client reads the published-design list from `/api/holo/
 
 ### Scanner and review inbox
 
-`components/UnifiedCardScanner.jsx` is the capture-only entry point. It supports the native device camera and gallery uploads, a live webcam mode, stages one or more photos, allows per-photo individual recognition overrides, and includes an optional positioning guide beside **Take photos**. Every submission enqueues a persistent job and routes to the same review inbox, including a one-photo scan.
+`components/UnifiedCardScanner.jsx` is the capture-only entry point. It supports the native device camera and gallery uploads, a live webcam mode, stages one or more photos, allows per-photo individual recognition overrides, and includes an optional positioning guide beside **Take photos**. A keyless self-hosted scanner endpoint stages every photo as an individual scan by default and leaves grouping as an opt-in override. Every submission enqueues a persistent job and routes to the same review inbox, including a one-photo scan.
 
 The scanner exposes **Take photos** and **Choose from gallery**. **Take photos** opens a small choice: **Single photo** retains the existing native-camera file input (where the device/browser supports it); **Continuous capture** opens the in-app camera preview. Neither opening this choice nor using Single photo starts a live camera stream. Continuous capture includes the explanation: ‘Keep the camera open and take photos automatically when each card is held steady.’ Cancel returns to staging without discarding photos. If live camera access is unavailable, only Continuous capture is disabled; Single photo and gallery selection remain available.
 
