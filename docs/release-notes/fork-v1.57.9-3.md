@@ -2,6 +2,8 @@
 
 - **Locally hosted scanners scan photos individually.** When the scanner is a keyless self-hosted endpoint such as Ollama, every staged photo now starts as its own individual scan, and grouping cards into one composite request is an explicit per-photo or per-batch choice. Gemini and hosted OpenAI-compatible endpoints keep automatic grouping.
 
+  ![Scan card dialog with three staged photos set to Scan individually and Use automatic grouping offered as the batch override](https://github.com/lamiskin/pokecollector/releases/download/fork-v1.57.9-3/fork-v1.57.9-3-individual-scans.webp)
+
 ### Fixes and changes
 
 - None user-visible. The remaining commits in this release are release-pipeline and documentation updates.

@@ -44,8 +44,12 @@ says enough. Commit the images under
 inline by absolute, tag-pinned URL, for example
 `https://raw.githubusercontent.com/lamiskin/pokecollector/<exact-fork-tag>/docs/release-notes/assets/<exact-fork-tag>/<file>.png`;
 the release body is generated from the committed highlights file, so relative
-paths do not resolve. Crop to the changed UI, keep each file small (roughly
-1200 px wide, a few hundred KB) and give every image alt text. Use demo data
-only: the repository and the published notes are public, so a screenshot must
-not show a real collection, personal names or email addresses, OIDC identities,
-API keys, private hostnames or addresses, or browser chrome containing a URL.
+paths do not resolve. A screenshot added to an already-published release cannot
+use a tag-pinned path, because the tag tree is immutable: attach it to that
+release instead and link
+`https://github.com/lamiskin/pokecollector/releases/download/<exact-fork-tag>/<file>`.
+Crop to the changed UI, keep each file small (roughly 1200 px wide, a few
+hundred KB) and give every image alt text. Use demo data only: the repository
+and the published notes are public, so a screenshot must not show a real
+collection, personal names or email addresses, OIDC identities, API keys,
+private hostnames or addresses, or browser chrome containing a URL.
