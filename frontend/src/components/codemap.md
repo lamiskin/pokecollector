@@ -14,6 +14,9 @@ and `../api`, and `../pages` owns routing and orchestration.
   dashboards, and trades.
 - **Card detail & editing** — `CardItem` (grid tile, `CardModal` detail dialog,
   `CustomCardModal` creator), `CardListItem` (compact list identity/row).
+- **Grouping chrome** — `CardGroupSection` is the collapsible header (sprite, dex
+  number, counts, value) shared by the Collection's species grid and the
+  Analytics species list; each caller keeps its own card rendering inside.
 - **Scanning** — `UnifiedCardScanner` (multi-file capture → `enqueueScanJob`),
   `ScanReview` (persistent batch review: `ScanItemPanel`, `CandidateGrid`,
   `CardZoomModal`), and `CardScanner`'s `ScanAddModal` (add a match to the
