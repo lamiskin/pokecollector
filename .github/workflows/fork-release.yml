@@ -54,6 +54,13 @@ jobs:
       app_version: ${{ steps.tag.outputs.app_version }}
       sha: ${{ steps.tag.outputs.sha }}
       upstream_base: ${{ steps.tag.outputs.upstream_base }}
+      upstream_tip: ${{ steps.tag.outputs.upstream_tip }}
+      upstream_lag: ${{ steps.tag.outputs.upstream_lag }}
+      prior_tag: ${{ steps.tag.outputs.prior_tag }}
+      prior_sha: ${{ steps.tag.outputs.prior_sha }}
+      prior_upstream_base: ${{ steps.tag.outputs.prior_upstream_base }}
+      upstream_change_count: ${{ steps.tag.outputs.upstream_change_count }}
+      fork_change_count: ${{ steps.tag.outputs.fork_change_count }}
       namespace: ${{ steps.tag.outputs.namespace }}
       publish: ${{ steps.tag.outputs.publish }}
       backend_present: ${{ steps.images.outputs.backend_present }}
@@ -121,6 +128,36 @@ jobs:
           fi
 
           upstream_base="$(git merge-base "$sha" refs/remotes/origin/main)"
+          upstream_tip="$(git rev-parse refs/remotes/origin/main)"
+          upstream_lag="$(git rev-list --count "${upstream_base}..${upstream_tip}")"
+
+          highlights="docs/release-notes/${tag}.md"
+          if [[ ! -s "$highlights" ]]; then
+            echo "::error::${highlights} must exist and contain curated release highlights"
+            exit 1
+          fi
+
+          prior_tag=""
+          prior_sha=""
+          prior_upstream_base=""
+          upstream_change_count=""
+          fork_change_count=""
+          prior_tag="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" | jq -sr --arg current "$tag" '[.[][] | select(.draft == false and .published_at != null and .tag_name != $current and (.tag_name | startswith("fork-v")))] | sort_by(.published_at) | last | .tag_name // empty')"
+          if [[ -n "$prior_tag" ]]; then
+            mkdir -p prior-release
+            gh release download "$prior_tag" --repo "${GITHUB_REPOSITORY}" --pattern release-manifest.json --dir prior-release
+            prior_sha="$(jq -er '.fork_sha | select(type == "string" and test("^[0-9a-f]{40}$"))' prior-release/release-manifest.json)"
+            prior_upstream_base="$(jq -er '.upstream_base_sha | select(type == "string" and test("^[0-9a-f]{40}$"))' prior-release/release-manifest.json)"
+            prior_manifest_tag="$(jq -er '.tag | select(type == "string" and test("^fork-v[0-9]+\\.[0-9]+\\.[0-9]+-[0-9]+$"))' prior-release/release-manifest.json)"
+            if [[ "$prior_manifest_tag" != "$prior_tag" || "$(jq -r '.dry_run' prior-release/release-manifest.json)" != "false" || "$(jq -r '.schema' prior-release/release-manifest.json)" != "1" || "$(jq -r '.repository' prior-release/release-manifest.json)" != "$GITHUB_REPOSITORY" ]]; then
+              echo "::error::prior release manifest is inconsistent or is not a published fork manifest"
+              exit 1
+            fi
+            git merge-base --is-ancestor "$prior_upstream_base" "$upstream_base" || { echo "::error::prior upstream base is not an ancestor of this release base"; exit 1; }
+            git merge-base --is-ancestor "$prior_sha" "$sha" || { echo "::error::prior fork release is not an ancestor of this release"; exit 1; }
+            upstream_change_count="$(git rev-list --count "${prior_upstream_base}..${upstream_base}")"
+            fork_change_count="$(git rev-list --count "${prior_sha}..${sha}")"
+          fi
 
           app_version="$(tr -d '[:space:]' < VERSION)"
           tag_version="${tag#fork-v}"
@@ -147,6 +184,13 @@ jobs:
             echo "app_version=${app_version}"
             echo "sha=${sha}"
             echo "upstream_base=${upstream_base}"
+            echo "upstream_tip=${upstream_tip}"
+            echo "upstream_lag=${upstream_lag}"
+            echo "prior_tag=${prior_tag}"
+            echo "prior_sha=${prior_sha}"
+            echo "prior_upstream_base=${prior_upstream_base}"
+            echo "upstream_change_count=${upstream_change_count}"
+            echo "fork_change_count=${fork_change_count}"
             echo "namespace=${namespace}"
             echo "publish=${publish}"
           } >> "$GITHUB_OUTPUT"
@@ -457,16 +501,27 @@ jobs:
           TAG: ${{ needs.prepare.outputs.tag }}
           RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
           UPSTREAM_BASE: ${{ needs.prepare.outputs.upstream_base }}
+          UPSTREAM_TIP: ${{ needs.prepare.outputs.upstream_tip }}
+          UPSTREAM_LAG: ${{ needs.prepare.outputs.upstream_lag }}
+          PRIOR_TAG: ${{ needs.prepare.outputs.prior_tag }}
+          PRIOR_SHA: ${{ needs.prepare.outputs.prior_sha }}
+          PRIOR_UPSTREAM_BASE: ${{ needs.prepare.outputs.prior_upstream_base }}
+          UPSTREAM_CHANGE_COUNT: ${{ needs.prepare.outputs.upstream_change_count }}
+          FORK_CHANGE_COUNT: ${{ needs.prepare.outputs.fork_change_count }}
           PUBLISH: ${{ needs.prepare.outputs.publish }}
           BACKEND_DIGEST: ${{ steps.verify.outputs.backend_digest }}
           FRONTEND_DIGEST: ${{ steps.verify.outputs.frontend_digest }}
           WORKFLOW_RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           args=(
             --tag "$TAG"
             --sha "$RELEASE_SHA"
             --upstream-base "$UPSTREAM_BASE"
+            --upstream-tip "$UPSTREAM_TIP"
+            --upstream-lag "$UPSTREAM_LAG"
+            --highlights "docs/release-notes/${TAG}.md"
             --namespace "$NAMESPACE"
             --repository "$GITHUB_REPOSITORY"
             --platform linux/amd64
@@ -475,6 +530,11 @@ jobs:
             --workflow-run "$WORKFLOW_RUN"
             --out release-assets
           )
+          if [[ -n "$PRIOR_TAG" ]]; then
+            mkdir -p prior-release
+            gh release download "$PRIOR_TAG" --repo "${GITHUB_REPOSITORY}" --pattern release-manifest.json --dir prior-release
+            args+=(--prior-manifest prior-release/release-manifest.json --prior-tag "$PRIOR_TAG" --prior-sha "$PRIOR_SHA" --prior-upstream-base "$PRIOR_UPSTREAM_BASE" --upstream-change-count "$UPSTREAM_CHANGE_COUNT" --fork-change-count "$FORK_CHANGE_COUNT")
+          fi
           if [[ "$PUBLISH" == "true" ]]; then
             if [[ -z "$BACKEND_DIGEST" || -z "$FRONTEND_DIGEST" ]]; then
               echo "::error::the verify step did not report both image digests"

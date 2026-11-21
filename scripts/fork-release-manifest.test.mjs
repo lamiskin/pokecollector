@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -8,6 +8,7 @@ import {
   buildManifest,
   parseArgs,
   pinEnvExample,
+  renderNotes,
   validate,
   writeAssets,
 } from './fork-release-manifest.mjs'
@@ -23,6 +24,12 @@ const baseArgs = [
   sha,
   '--upstream-base',
   otherSha,
+  '--upstream-tip',
+  sha,
+  '--upstream-lag',
+  '0',
+  '--highlights',
+  'docs/release-notes/fork-v1.55.1-2.md',
   '--namespace',
   'lamiskin',
   '--repository',
@@ -110,27 +117,36 @@ test('pinEnvExample refuses a template with no image line', () => {
 })
 
 test('a dry run writes only the manifest and notes', () => {
-  const outDir = mkdtempSync(join(tmpdir(), 'fork-release-dry-'))
+  const root = mkdtempSync(join(tmpdir(), 'fork-release-dry-'))
+  const outDir = join(root, 'out')
   try {
+    mkdirSync(join(root, 'docs/release-notes'), { recursive: true })
+    writeFileSync(join(root, 'docs/release-notes/fork-v1.55.1-2.md'), '## Features\n\n- Curated highlight.\n')
     const fields = validate(parseArgs([...baseArgs, '--dry-run', 'true', '--out', outDir]))
-    writeAssets(fields)
+    writeAssets(fields, outDir, root)
 
     const manifest = JSON.parse(readFileSync(join(outDir, 'release-manifest.json'), 'utf8'))
     assert.equal(manifest.dry_run, true)
     assert.equal(manifest.images.backend.digest, null)
     assert.equal(manifest.images.backend.ref, null)
     assert.match(readFileSync(join(outDir, 'RELEASE_NOTES.md'), 'utf8'), /Dry run/)
+    assert.match(readFileSync(join(outDir, 'RELEASE_NOTES.md'), 'utf8'), /Curated highlight/)
     assert.throws(() => readFileSync(join(outDir, 'docker-compose.yml')))
   } finally {
-    rmSync(outDir, { recursive: true, force: true })
+    rmSync(root, { recursive: true, force: true })
   }
 })
 
 test('writeAssets emits the manifest, notes, pinned env and compose file', () => {
-  const outDir = mkdtempSync(join(tmpdir(), 'fork-release-'))
+  const root = mkdtempSync(join(tmpdir(), 'fork-release-'))
+  const outDir = join(root, 'out')
   try {
+    mkdirSync(join(root, 'docs/release-notes'), { recursive: true })
+    writeFileSync(join(root, 'docs/release-notes/fork-v1.55.1-2.md'), '## Features\n\n- Curated highlight.\n')
+    writeFileSync(join(root, '.env.prod.example'), 'BACKEND_IMAGE=old\nFRONTEND_IMAGE=old\n')
+    writeFileSync(join(root, 'docker-compose.yml'), 'services:\n')
     const fields = validate(parseArgs([...validArgs, '--out', outDir]))
-    const { manifest } = writeAssets(fields)
+    const { manifest } = writeAssets(fields, outDir, root)
 
     const written = JSON.parse(readFileSync(join(outDir, 'release-manifest.json'), 'utf8'))
     assert.deepEqual(written, manifest)
@@ -138,18 +154,107 @@ test('writeAssets emits the manifest, notes, pinned env and compose file', () =>
     assert.equal(written.images.backend.digest, digest('1'))
     assert.equal(written.images.backend.ref, `ghcr.io/lamiskin/pokecollector-backend@${digest('1')}`)
     assert.equal(written.upstream_base_sha, otherSha)
+    assert.equal(written.upstream_main_tip_sha, sha)
+    assert.equal(written.upstream_main_lag_commits, 0)
     assert.equal(written.fork_sha, sha)
 
     const notes = readFileSync(join(outDir, 'RELEASE_NOTES.md'), 'utf8')
     assert.match(notes, /fork-v1\.55\.1-2/)
     assert.match(notes, /Fork build of upstream 1\.55\.1/)
     assert.match(notes, /ghcr\.io\/lamiskin\/pokecollector-backend@sha256:1111/)
+    assert.match(notes, /Curated highlight/)
+    assert.match(notes, /No prior published fork release was found/)
 
     const env = readFileSync(join(outDir, 'pokecollector.env.example'), 'utf8')
     assert.match(env, /^BACKEND_IMAGE=ghcr\.io\/lamiskin\/pokecollector-backend@sha256:1111/m)
 
     assert.match(readFileSync(join(outDir, 'docker-compose.yml'), 'utf8'), /^services:/m)
   } finally {
-    rmSync(outDir, { recursive: true, force: true })
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('release highlights are mandatory and must be non-empty', () => {
+  const root = mkdtempSync(join(tmpdir(), 'fork-release-highlights-'))
+  const outDir = join(root, 'out')
+  const fields = validate(parseArgs([...baseArgs, '--dry-run', 'true', '--out', outDir]))
+  try {
+    mkdirSync(join(root, 'docs/release-notes'), { recursive: true })
+    assert.throws(() => writeAssets(fields, outDir, root), /highlights file is missing/)
+    writeFileSync(join(root, fields.highlights), ' \n\t')
+    assert.throws(() => writeAssets(fields, outDir, root), /highlights file is empty/)
+    writeFileSync(join(root, fields.highlights), '<!-- RELEASE-NOTES-TEMPLATE-PLACEHOLDER -->\n')
+    assert.throws(() => writeAssets(fields, outDir, root), /replace the template placeholder/)
+    assert.throws(
+      () => writeAssets({ ...fields, highlights: 'docs/release-notes/other.md' }, outDir, root),
+      /must be docs\/release-notes/,
+    )
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('release notes include exact prior-release comparisons and point-in-time sync data', () => {
+  const fields = validate(parseArgs(validArgs))
+  const manifest = buildManifest({
+    ...fields,
+    upstreamTip: otherSha,
+    upstreamLag: 3,
+    priorRelease: {
+      tag: 'fork-v1.55.1-1',
+      fork_sha: otherSha,
+      upstream_base_sha: sha,
+    },
+    upstreamChangeCount: 4,
+    forkChangeCount: 7,
+  }, '2026-11-04T00:00:00.000Z')
+  const notes = renderNotes(manifest, '## Features\n\n- Verified feature.')
+
+  assert.equal(manifest.upstream_main_tip_sha, otherSha)
+  assert.equal(manifest.upstream_main_lag_commits, 3)
+  assert.match(notes, /Git-Romer\/pokecollector\/compare\/a{40}\.\.\.b{40}/)
+  assert.match(notes, /lamiskin\/pokecollector\/compare\/b{40}\.\.\.a{40}/)
+  assert.match(notes, /4 commit\(s\)/)
+  assert.match(notes, /7 commit\(s\)/)
+  assert.match(notes, /point-in-time measurement/)
+})
+
+test('prior release comparisons must match the downloaded published manifest', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'fork-release-prior-'))
+  const manifestPath = join(directory, 'release-manifest.json')
+  writeFileSync(manifestPath, JSON.stringify({
+    schema: 1,
+    dry_run: false,
+    tag: 'fork-v1.55.1-1',
+    repository: 'lamiskin/pokecollector',
+    fork_sha: otherSha,
+    upstream_base_sha: sha,
+  }))
+  const comparisonArgs = [
+    ...validArgs,
+    '--prior-manifest', manifestPath,
+    '--prior-tag', 'fork-v1.55.1-1',
+    '--prior-sha', otherSha,
+    '--prior-upstream-base', sha,
+    '--upstream-change-count', '17',
+    '--fork-change-count', '66',
+  ]
+  try {
+    const fields = validate(parseArgs(comparisonArgs))
+    assert.deepEqual(fields.priorRelease, {
+      tag: 'fork-v1.55.1-1',
+      fork_sha: otherSha,
+      upstream_base_sha: sha,
+    })
+    assert.equal(fields.upstreamChangeCount, 17)
+    assert.equal(fields.forkChangeCount, 66)
+    const mismatchedArgs = [...comparisonArgs]
+    mismatchedArgs[mismatchedArgs.indexOf('--prior-sha') + 1] = sha
+    assert.throws(
+      () => validate(parseArgs(mismatchedArgs)),
+      /does not match the downloaded prior manifest/,
+    )
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
   }
 })
