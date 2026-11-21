@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { readVersionFiles, VERSION_FILES } from './version.mjs'
+import { bumpVersionFiles, nextPatch, readVersionFiles, VERSION_FILES } from './version.mjs'
 import { resolve } from 'node:path'
 
 const root = resolve(import.meta.dirname, '..')
@@ -21,11 +21,15 @@ test('a translation-only Weblate change gets one synchronized patch bump', async
   const files = readVersionFiles(root)
   const plan = planWeblateVersion({ files, baseFiles: files, comparisonFiles: files, changes: [{ filename: 'frontend/src/i18n/locales/de.json', status: 'modified' }], cataloguePaths: ['frontend/src/i18n/locales/de.json'], tags: [] })
   assert.equal(plan.version, files.VERSION.trim().replace(/(\d+)$/, n => String(BigInt(n) + 1n)))
-  assert.deepEqual(Object.keys(plan.updated).sort(), [...VERSION_FILES].sort())
+  const bumped = bumpVersionFiles(files, plan.version)
+  const changedFiles = VERSION_FILES.filter(path => bumped[path] !== files[path])
+  assert.deepEqual(Object.keys(plan.updated).sort(), changedFiles.sort())
 })
 
 function apiFixture(files) {
   const base = '1'.repeat(40), head = '2'.repeat(40), treeId = '3'.repeat(40), newTree = '4'.repeat(40), newCommit = '5'.repeat(40)
+  const bumped = bumpVersionFiles(files, nextPatch(files.VERSION.trim()))
+  const changedFiles = VERSION_FILES.filter(path => bumped[path] !== files[path])
   let currentHead = head
   const writes = [], blobs = new Map()
   const entries = VERSION_FILES.map((path, i) => {
@@ -42,7 +46,7 @@ function apiFixture(files) {
       writes.push({ path, method, data })
       if (path.endsWith('/git/trees')) {
         assert.equal(data.base_tree, treeId, 'Create-tree must use a tree SHA, not a commit SHA')
-        assert.deepEqual(data.tree.map(e => e.path).sort(), [...VERSION_FILES].sort())
+        assert.deepEqual(data.tree.map(e => e.path).sort(), [...changedFiles].sort())
         return { sha: newTree }
       }
       if (path.endsWith('/git/commits')) { assert.deepEqual(data.parents, [head]); return { sha: newCommit } }

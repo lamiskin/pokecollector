@@ -9,25 +9,31 @@ try {
     if (['--root', '--base', '--candidate'].includes(arg)) {
       if (!args[i + 1] || args[i + 1].startsWith('--')) throw new Error(`Missing value for ${arg}`)
       options[arg] = args[++i]
-    } else if (['--skip-readme', '--check-tags', '--allow-tag-at-head'].includes(arg)) options[arg] = true
+    } else if (['--skip-readme', '--check-tags', '--allow-tag-at-head', '--allow-unchanged', '--skip-upstream-tag-check'].includes(arg)) options[arg] = true
     else throw new Error(`Unknown option: ${arg}`)
   }
   const root = resolve(options['--root'] ?? resolve(import.meta.dirname, '..'))
   const skipReadme = options['--skip-readme'] || process.env.SKIP_README_VERSION_CHECK === 'true'
   const files = readVersionFiles(root, options['--candidate'], { skipReadme })
   const version = checkVersionFiles(files, { skipReadme })
+  let baseSummary = ''
   if (options['--base']) {
     const base = readVersionFiles(root, options['--base']).VERSION.trim()
-    if (compareVersions(version, base) <= 0) throw new Error(`Version ${version} must be newer than target version ${base}. Run node scripts/bump-version.mjs patch, or select a newer minor/major version.`)
+    const comparison = compareVersions(version, base)
+    if (comparison < 0 || (comparison === 0 && !options['--allow-unchanged'])) {
+      const requirement = options['--allow-unchanged'] ? 'must not be older than' : 'must be newer than'
+      throw new Error(`Version ${version} ${requirement} target version ${base}. Run node scripts/bump-version.mjs patch, or select a newer minor/major version.`)
+    }
+    baseSummary = comparison === 0 ? ' and equal to the target' : ' and newer than the target'
   }
-  if (options['--check-tags']) {
+  if (options['--check-tags'] && !options['--skip-upstream-tag-check']) {
     const head = resolveCommit(root, options['--candidate'] ?? 'HEAD')
     for (const tag of git(root, 'tag', '--list', `v${version}`).split('\n').filter(Boolean)) {
       if (options['--allow-tag-at-head'] && resolveCommit(root, `refs/tags/${tag}`) === head) continue
       throw new Error(`Version ${version} already has release tag ${tag}; choose a new version.`)
     }
   }
-  console.log(`Version ${version} is consistent${options['--base'] ? ' and newer than the target' : ''}.`)
+  console.log(`Version ${version} is consistent${baseSummary}.`)
 } catch (error) {
   console.error(error.message)
   process.exitCode = 1

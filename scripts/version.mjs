@@ -77,14 +77,22 @@ export function checkVersionFiles(files, { skipReadme = false } = {}) {
   const version = files.VERSION.trim()
   validateReleaseVersion(version)
   const errors = []
+  const compose = files['docker-compose.yml']
+  const forkImageDefaults = {
+    backend: 'image: ${BACKEND_IMAGE:-pokecollector-backend:local}',
+    frontend: 'image: ${FRONTEND_IMAGE:-pokecollector-frontend:local}',
+  }
+  const usesForkImageDefaults = Object.values(forkImageDefaults).some(expected => compose.includes(expected))
   const pkg = JSON.parse(files['frontend/package.json'])
   const lock = JSON.parse(files['frontend/package-lock.json'])
   for (const [name, actual] of [['frontend/package.json', pkg.version], ['frontend/package-lock.json', lock.version], ['frontend/package-lock.json root package', lock.packages?.['']?.version]]) {
     if (actual !== version) errors.push(`${name} version ${actual} does not match VERSION ${version}`)
   }
   for (const image of ['backend', 'frontend']) {
-    const expected = 'image: ghcr.io/git-romer/pokecollector-' + image + ':${POKECOLLECTOR_VERSION:-' + version + '}'
-    if (!files['docker-compose.yml'].includes(expected)) errors.push(`docker-compose.yml must use ${expected}`)
+    const expected = usesForkImageDefaults
+      ? forkImageDefaults[image]
+      : 'image: ghcr.io/git-romer/pokecollector-' + image + ':${POKECOLLECTOR_VERSION:-' + version + '}'
+    if (!compose.includes(expected)) errors.push(`docker-compose.yml must use ${expected}`)
   }
   if (!skipReadme) {
     if (!files['README.md'].includes(`version-v${version}-`)) errors.push(`README version badge does not reference v${version}`)
