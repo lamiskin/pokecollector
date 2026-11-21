@@ -20,47 +20,30 @@ gateway" between the user and the binder CSV import endpoint.
   gallery, membership editing, allocation, and card-detail behaviour.
 - `BinderWorkspace` is shared by private and public pages. It receives snapshots
   and optional mutation callbacks; it does not fetch. Exported `BinderPage`
-  renders all 9/12 numbered pockets, including gaps, through card-system artwork;
-  each page carries an uppercase heading and an occupancy meter. Only occupied
-  pockets (or every pocket while arranging) are buttons, so browsing and the
-  public page never expose empty controls. Container width determines readable
-  two-page spreads versus one-page viewing; the Not placed tray is alongside
-  wide workspaces or expandable below a page.
-- Arrange mode separates browsing from selection. Its gestures are advertised
-  as three hint chips (select-then-slot, grip drag, hold-arrow paging) with the
-  full sentence kept for assistive tech. One-copy tap/place, a spatial
-  destination grid (page selector plus real pockets, with the source's own
-  slot marked as current and not selectable), grip dragging on both mouse
-  (HTML5 drag) and touch (pointer events with `touch-action: none` on the grip
-  alone, so the card body still scrolls), deliberate dwell paging, occupied
+  renders all 9/12 numbered pockets, including gaps, through card-system artwork.
+  Container width determines readable two-page spreads versus one-page viewing;
+  the Not placed tray is alongside wide workspaces or expandable below a page.
+- Arrange mode separates browsing from selection. One-copy tap/place, a labelled
+  page/slot chooser, grip dragging on both mouse (HTML5 drag) and touch (pointer
+  events with `touch-action: none` on the grip alone, so the card body still
+  scrolls), deliberate dwell paging, occupied
   destination confirmation, save/error status, and conflict-safe Undo share one
-  mutation path. Grips keep a 44px hit area while showing a smaller chip, and
-  the destination pocket flashes after a successful save. Native buttons support
-  keyboard moves and arrow-key slot focus; the chooser's grid supports arrow
-  keys too. The selection bar is fixed at every width (the app shell's overflow
-  makes `sticky` inert): bounded and centred over the pages column, its measured
-  insets keep it clear of the shell padding and the side tray, and the workspace
-  reserves scrollable space beneath it so no pocket is trapped behind it.
+  mutation path. Native buttons support keyboard moves and arrow-key slot focus.
 - `BinderLayoutSettings` requires a server preview before saving. The preview's
   revision and exact affected placement IDs accompany confirmation; geometry
   changes and disabling pages return occupied copies to Not placed, never repack.
-  Preview is a review step: its own footer keeps Update preview, a neutral or
-  warning-toned summary, and a separately labelled save button.
 - `CardLocations` fetches all placed copies and grouped unplaced memberships for
   card dialogs. A public handle switches to the anonymous public client; private
   collection dialogs additionally scope by collection item. Links carry expected
-  card/membership and placement identity, not coordinates alone, and show the
-  location as a compact pill beside the binder name.
+  card/membership and placement identity, not coordinates alone.
   Ordinary binders without layouts retain Cards view; linked unplaced entries
   receive an explicit explanation and an action opening the associated card.
 - `utils/binderLayout.js` owns spread calculations, translated interpolation,
   location URLs and safe stale-target resolution. Fresh snapshots resolve moved
   targets before focus/highlight; ambiguous remaining copies get explicit links.
-- `binder-layout.css` adds themed pockets (sleeve sheen, dashed empty recess),
-  page headers and occupancy meters, selection/focus states, a destination grid,
-  a short directional page reveal and a save flash. Reduced motion disables
-  workspace motion and chooser transitions. Shared `Modal`/`ConfirmDialog`
-  provide focus trapping and responsive overlays.
+- `binder-layout.css` adds themed pockets, spine accents, selection/focus states
+  and a short directional page reveal. Reduced motion disables workspace motion.
+  Shared `Modal`/`ConfirmDialog` provide focus trapping and responsive overlays.
 - Public callers provide sanitized snapshots and no mutation callbacks. Public
   artwork never passes through private collection-photo wrappers.
 

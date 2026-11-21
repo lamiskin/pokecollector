@@ -20,11 +20,10 @@ export default function CardLocations({ cardId, collectionItemId, handle }) {
   }, [cardId, collectionItemId, handle, retry])
   return <section className="rounded-xl border border-border bg-bg-card p-3 space-y-2" aria-label={t('binderLayout.locations')}>
     <h3 className="flex items-center gap-2 text-sm font-semibold"><MapPin size={15} aria-hidden />{t('binderLayout.locations')}</h3>
-    {state.loading ? <p className="text-xs text-text-secondary" role="status">{t('common.loading')}</p> : state.error ? <button className="btn-ghost text-xs" onClick={() => setRetry(n => n + 1)}>{t('binderLayout.retryLocations')}</button> : state.locations.length ? <ul className="max-h-48 overflow-y-auto space-y-1">
+    {state.loading ? <p className="text-xs text-text-secondary" role="status">{t('common.loading')}</p> : state.error ? <button className="btn-ghost text-xs" onClick={() => setRetry(n => n + 1)}>{t('binderLayout.retryLocations')}</button> : state.locations.length ? <ul className="max-h-48 overflow-y-auto space-y-2">
       {state.locations.map(location => <li key={`${location.binder_id}-${location.placement_id || `tray-${location.binder_card_id}`}`}>
-        <Link className="group flex min-h-11 items-center justify-between gap-3 rounded-lg p-2 text-sm text-text-primary hover:bg-bg-elevated focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand-red" to={binderLocationHref(location, handle)}>
-          <span className="min-w-0 truncate group-hover:underline underline-offset-4">{location.binder_name}</span>
-          <span className="shrink-0 rounded-full bg-bg-elevated px-2 py-0.5 text-xs tabular-nums text-text-secondary group-hover:bg-bg-surface">{location.page ? binderMessage(t, 'location', location) : binderMessage(t, 'unplacedCopies', { count: location.quantity })}</span>
+        <Link className="block rounded-lg p-2 text-sm text-text-primary underline decoration-text-muted underline-offset-4 hover:bg-bg-elevated focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand-red" to={binderLocationHref(location, handle)}>
+          {location.binder_name} · {location.page ? binderMessage(t, 'location', location) : binderMessage(t, 'unplacedCopies', { count: location.quantity })}
         </Link>
       </li>)}
     </ul> : <p className="text-xs text-text-secondary">{t('binderLayout.noLocations')}</p>}
