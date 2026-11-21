@@ -1,0 +1,120 @@
+@layer components {
+  /* ── Pages ──────────────────────────────────────────────────────────────
+     A page reads as a sleeve sheet: accent edge, a faint inner glow, and a
+     ruled header with an occupancy meter instead of a bare fraction. */
+  .binder-page { background: var(--color-card); border: 1px solid var(--color-border); border-top: 3px solid var(--binder-accent); border-radius: 1rem; padding: clamp(.5rem, 1.5vw, 1rem); box-shadow: inset 0 0 25px var(--color-border-subtle), 0 6px 24px #00000015; }
+  .binder-page-head { display: flex; align-items: baseline; justify-content: space-between; gap: .5rem; }
+  .binder-page-title { font-size: .6875rem; font-weight: 700; letter-spacing: .16em; text-transform: uppercase; color: var(--color-text-secondary); }
+  .binder-page-count { font-size: .6875rem; font-variant-numeric: tabular-nums; color: var(--color-text-muted); }
+  .binder-page-meter { display: block; height: 2px; margin-top: .4rem; border-radius: 999px; background: var(--color-elevated); overflow: hidden; }
+  .binder-page-meter > span { display: block; height: 100%; border-radius: inherit; background: var(--binder-accent, var(--color-brand-red)); transition: width 240ms ease-out; }
+  /* A lone page keeps one page's width and sits in the middle of the spread:
+     no decorative facing panel, and no stretching to the full spread width. */
+  .binder-spread-single { display: block; }
+  .binder-spread-single > .binder-page-reveal { width: calc(50% - .375rem); margin-inline: auto; }
+
+  /* ── Pockets ────────────────────────────────────────────────────────────
+     Occupied pockets keep a plastic-sleeve sheen; empty ones are a dashed
+     recess. One slot number, bottom-left, in both cases. */
+  .binder-pocket { position: relative; border: 1px solid var(--color-border); border-radius: .55rem; padding: .15rem; background: var(--color-surface); aspect-ratio: 63 / 91; transition: border-color 160ms ease-out, box-shadow 160ms ease-out, transform 160ms ease-out; }
+  .binder-pocket .unified-card-frame { width: 100%; }
+  .binder-pocket::after { content: ''; position: absolute; inset: 0; z-index: 5; border-radius: .5rem; background: linear-gradient(158deg, rgba(255,255,255,.06), rgba(255,255,255,0) 38%); pointer-events: none; }
+  .binder-pocket-empty { border-style: dashed; border-color: color-mix(in srgb, var(--color-text-muted) 55%, transparent); background: linear-gradient(160deg, var(--color-elevated), var(--color-surface) 70%); }
+  .binder-empty { display: block; position: absolute; inset: 0; border-radius: .4rem; background: radial-gradient(circle at 50% 42%, var(--color-border-subtle), transparent 62%); }
+  .binder-pocket-action { position: absolute; inset: 0; width: 100%; border-radius: .55rem; z-index: 21; cursor: pointer; }
+  .binder-pocket-action:focus-visible { outline: 3px solid var(--color-blue); outline-offset: 3px; }
+  .binder-pocket-selected { outline: 3px solid var(--color-blue); outline-offset: 2px; }
+  .binder-pocket-highlight { box-shadow: 0 0 0 3px var(--color-yellow); }
+  .binder-pocket-saved { box-shadow: 0 0 0 2px var(--binder-accent); }
+  .binder-pocket-saved::before { content: ''; position: absolute; inset: -4px; z-index: 13; border-radius: .75rem; border: 2px solid var(--binder-accent); pointer-events: none; animation: binder-saved 1400ms ease-out both; }
+  .binder-slot-number { position: absolute; bottom: .3rem; left: .3rem; z-index: 11; pointer-events: none; background: var(--color-surface); color: var(--color-text-primary); border: 1px solid var(--color-border); border-radius: .25rem; min-width: 1.1rem; text-align: center; font-size: .625rem; line-height: 1.1rem; font-variant-numeric: tabular-nums; }
+  @media (hover: hover) {
+    .binder-pocket:hover { border-color: var(--color-text-muted); }
+    .binder-pocket:hover::after { background: linear-gradient(158deg, rgba(255,255,255,.11), rgba(255,255,255,0) 42%); }
+  }
+
+  .binder-empty-state { border: 1px dashed color-mix(in srgb, var(--color-text-muted) 55%, transparent); border-radius: .75rem; background: var(--color-surface); padding: .75rem 1rem; font-size: .875rem; color: var(--color-text-secondary); }
+
+  /* ── Drag grips ─────────────────────────────────────────────────────────
+     A 44px hit area with a smaller visible chip: the target is thumb-sized
+     without covering a phone-sized pocket. */  .binder-drag-handle { position: absolute; top: -.4rem; right: -.4rem; z-index: 22; display: grid; place-items: center; width: 2.75rem; height: 2.75rem; border-radius: 999px; background: transparent; color: var(--color-text-primary); cursor: grab; touch-action: none; }
+  .binder-drag-handle::before { content: ''; position: absolute; inset: .5rem; z-index: -1; border-radius: .4rem; border: 1px solid color-mix(in srgb, var(--color-text-primary) 22%, transparent); background: color-mix(in srgb, var(--color-bg) 62%, transparent); box-shadow: 0 2px 8px rgba(0, 0, 0, .5); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+  .binder-drag-handle:hover::before { border-color: var(--color-text-muted); }
+  .binder-drag-handle:active { cursor: grabbing; }
+  .binder-drag-handle:focus-visible { outline: 2px solid var(--color-blue); outline-offset: 2px; }
+  .binder-tray-drag { display: grid; place-items: center; min-width: 2.75rem; min-height: 2.75rem; padding: .5rem; border-radius: .5rem; cursor: grab; touch-action: none; color: var(--color-text-secondary); }
+  .binder-tray-drag:hover { background: var(--color-surface); color: var(--color-text-primary); }
+  .binder-tray-drag:focus-visible { outline: 2px solid var(--color-blue); outline-offset: 2px; }
+
+  /* ── Held copy and drop targets ─────────────────────────────────────────── */
+  .binder-pocket-grab { cursor: grab; }
+  .binder-pocket-grab:active { cursor: grabbing; }
+  .binder-tray-grab { cursor: grab; }
+  .binder-tray-row-dragging { opacity: .5; }
+  .binder-pocket-dragging { opacity: .45; }
+  .binder-tray-drop { border-color: var(--binder-accent); background: color-mix(in srgb, var(--binder-accent) 8%, var(--color-card)); }
+  .binder-tray-drop-hint { border: 1px dashed var(--binder-accent); border-radius: .5rem; background: color-mix(in srgb, var(--binder-accent) 12%, transparent); padding: .5rem .625rem; font-size: .75rem; text-align: center; color: var(--color-text-primary); }
+  .binder-tray-saved { box-shadow: 0 0 0 2px var(--binder-accent); }
+  /* Fixed and pointer-events: none, so the held copy can never intercept the
+     drop it is heading for. Motion (the tilt) is removed for reduced motion. */
+  .binder-drag-ghost { position: fixed; z-index: 45; width: 5.5rem; pointer-events: none; transform: translate(-50%, -50%) scale(1.06) rotate(var(--binder-ghost-tilt, 0deg)); filter: drop-shadow(0 14px 18px rgba(0, 0, 0, .55)); }
+  .binder-drag-ghost .unified-card-frame { box-shadow: 0 18px 30px rgba(0, 0, 0, .55); }
+
+  /* ── Arrange hints and tray header ─────────────────────────────────────── */
+  .binder-hints { display: flex; flex-wrap: wrap; gap: .3rem; }
+  .binder-hint { display: inline-flex; align-items: center; gap: .3rem; padding: .2rem .5rem; border: 1px solid var(--color-border); border-radius: 999px; background: var(--color-card); color: var(--color-text-secondary); font-size: .6875rem; }
+  .binder-tray-count { border-radius: 999px; background: var(--color-elevated); padding: .125rem .5rem; font-variant-numeric: tabular-nums; }
+  .binder-tray-chevron-open { transform: rotate(180deg); }
+  .binder-tray-toggle svg { transition: transform 160ms ease-out; }
+
+  /* ── Destination chooser ──────────────────────────────────────────────── */
+  .binder-slot-grid { width: 100%; }
+  .binder-slot-option { position: relative; aspect-ratio: 63 / 91; overflow: hidden; border: 1px solid var(--color-border); border-radius: .55rem; background: var(--color-surface); transition: border-color 140ms ease-out, box-shadow 140ms ease-out; }
+  .binder-slot-option-empty { border-style: dashed; background: linear-gradient(160deg, var(--color-elevated), var(--color-surface) 70%); }
+  .binder-slot-option:hover:not([aria-disabled="true"]) { border-color: var(--color-text-muted); }
+  .binder-slot-option:focus-visible { outline: 2px solid var(--color-blue); outline-offset: 2px; }
+  .binder-slot-option-chosen { border-color: var(--color-blue); box-shadow: 0 0 0 3px var(--color-blue); }
+  .binder-slot-option-current { cursor: not-allowed; border-style: dashed; border-color: var(--color-text-muted); }
+  .binder-slot-art { position: absolute; inset: .15rem; display: block; overflow: hidden; border-radius: .4rem; }
+  .binder-slot-option .binder-slot-number { top: .3rem; bottom: auto; }
+  .binder-slot-name { position: absolute; inset-inline: 0; bottom: 0; z-index: 11; padding: 1.25rem .35rem .25rem; background: linear-gradient(to top, rgba(0,0,0,.82), rgba(0,0,0,0)); color: #fff; font-size: .625rem; line-height: 1.1rem; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .binder-slot-check { position: absolute; top: .3rem; right: .3rem; z-index: 12; display: grid; place-items: center; width: 1.25rem; height: 1.25rem; border-radius: 999px; background: var(--color-blue); color: #fff; }
+  .binder-slot-tag { position: absolute; inset-inline: .2rem; bottom: .25rem; z-index: 12; border-radius: .25rem; background: var(--color-surface); color: var(--color-text-secondary); font-size: .625rem; line-height: 1.1rem; text-align: center; }
+
+  /* ── Overview ─────────────────────────────────────────────────────────── */
+  .binder-overview-page { display: block; width: 100%; border: 1px solid var(--color-border); border-radius: .75rem; background: var(--color-surface); padding: .65rem .7rem; text-align: left; transition: border-color 160ms ease-out, background-color 160ms ease-out; }
+  .binder-overview-page .binder-page-meter { height: 4px; margin-top: .5rem; }
+  .binder-overview-page:hover { border-color: var(--color-text-muted); }
+  .binder-overview-page:focus-visible { outline: 2px solid var(--color-blue); outline-offset: 2px; }
+  .binder-overview-page-active { border-color: color-mix(in srgb, var(--color-brand-red) 55%, var(--color-border)); background: var(--color-card); box-shadow: inset 0 2px 0 var(--color-brand-red); }
+
+  /* ── Selection bar ────────────────────────────────────────────────────── */
+  /* The app shell sets overflow-x on an ancestor, so sticky cannot track the
+     viewport here. The bar is fixed at every width because a selection made
+     mid-page must stay actionable on short laptop screens too. Its insets come
+     from the workspace's measured box, and the right inset also clears the side
+     tray (296px = 280px column + 16px gap), so the tray's grips stay clickable.
+     A bounded, centred width leaves the outer pockets of the bottom row clear. */
+  .binder-selection { position: fixed; z-index: 40; left: var(--binder-bar-left, .75rem); right: var(--binder-bar-right, .75rem); bottom: calc(4.75rem + var(--safe-area-bottom)); margin-inline: auto; max-width: 42rem; }
+  @media (min-width: 1024px) { .binder-selection { bottom: .75rem; max-width: 46rem; } }
+  .binder-selection-art { width: 2.5rem; flex: none; }
+
+  /* Keep the last rows of the workspace scrollable clear of the fixed bar. */
+  @media (max-width: 1023px) { .binder-has-selection { padding-bottom: calc(13rem + var(--safe-area-bottom)); } }
+  @media (min-width: 1024px) { .binder-has-selection { padding-bottom: 6rem; } }
+
+  /* ── Motion ───────────────────────────────────────────────────────────── */
+  .binder-page-reveal { animation: binder-page-in 180ms ease-out; }
+  .binder-dwell { background: var(--color-blue); color: white; animation: binder-dwell 650ms linear; }
+  @keyframes binder-page-in { from { opacity: .4; transform: translateX(calc(var(--binder-direction, 1) * .5rem)); } to { opacity: 1; transform: none; } }
+  @keyframes binder-dwell { from { box-shadow: inset 0 -3px transparent; } to { box-shadow: inset 0 -3px white; } }
+  @keyframes binder-saved { 0% { opacity: 1; transform: scale(1); } 55% { opacity: .75; } 100% { opacity: 0; transform: scale(1.015); } }
+
+  /* The chooser is portalled outside the workspace, so its transitions are
+     reduced separately rather than inheriting the workspace rule. */
+  @media (prefers-reduced-motion: reduce) {
+    .binder-workspace *, .binder-workspace *::before, .binder-workspace *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+    .binder-slot-option, .binder-overview-page, .binder-tray-toggle svg { transition: none !important; }
+    .binder-drag-ghost { transform: translate(-50%, -50%) scale(1.06); }
+  }
+}

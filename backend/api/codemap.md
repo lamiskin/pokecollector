@@ -37,6 +37,12 @@ Routers are registered centrally in `backend/main.py` via
   `services/` (`card_upsert`, `card_state`, `scan_queue`, `scan_storage`,
   `public_profile`, `pokemon_api`, `scheduler`, …). Routers import these and
   keep endpoints thin.
+- **Physical binder overlay.** `binders.router` includes `binder_layouts.router`
+  for owner-scoped layout reads, previews, configuration, one-copy placement and
+  guarded undo. `cards.py` supplies owner-scoped location lookup; `public.py`
+  provides read-only layout/location routes behind all existing sharing gates.
+  Membership mutations reject destructive changes to placed copies until the
+  owner explicitly returns the chosen locations to the tray.
 - **BackgroundTasks for post-response work.** Search/scan endpoints schedule
   deferred work (metadata enrichment, queue draining) via FastAPI
   `BackgroundTasks` so the response is not blocked.

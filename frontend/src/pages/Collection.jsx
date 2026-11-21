@@ -9,6 +9,7 @@ import { getCollection, updateCollectionItem, updateCardCustomImage, updateCardM
 import { CustomCardModal } from '../components/CardItem'
 import ActionErrorNotice, { productLinkErrorNotice } from '../components/ActionErrorNotice'
 import ProductSourceList from '../components/ProductSourceList'
+import CardLocations from '../components/binders/CardLocations'
 import { useSettings } from '../contexts/SettingsContext'
 import { useConfirmDialog } from '../contexts/ConfirmDialogContext'
 import CardImage from '../components/CardImage'
@@ -721,6 +722,7 @@ function CollectionEditModal({ item, onClose }) {
       }}
       onClose={onClose}
     >
+      <CardLocations cardId={item.card_id || card.id} collectionItemId={item.id} />
       {actionError && (
         <ActionErrorNotice
           message={actionError.message}

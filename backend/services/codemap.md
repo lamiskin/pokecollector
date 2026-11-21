@@ -30,6 +30,16 @@ pattern. Every data-touching function accepts a `db: Session` and manages its ow
 commit/rollback; long-running jobs open their own session via
 `database.SessionLocal`. Shared helpers stay pure where possible.
 
+**Physical binder locations.** `binder_layouts.py` overlays occupied pockets on
+reserved membership quantities; unplaced copies are computed, never duplicated
+inventory. Writes acquire `binder_allocations.lock_user_card_allocations` before
+binder locks, compare revision/membership snapshots and commit swaps/replacements
+atomically. Undo retains one server-side snapshot and refuses intervening changes.
+`binder_layout_schema.py` performs the idempotent fail-fast schema upgrade and
+installs PostgreSQL cross-table integrity/revision triggers. `require_unplaced`
+protects legacy quantity, removal, conversion, printing and allocation-release
+workflows; explicit account erasure removes that owner's locations with its data.
+
 **Upsert convention.** `card_upsert.upsert_card` and `sync_service.upsert_set`
 implement query-then-update-or-insert. Card upserts support three modes —
 `partial` (catalogue list rows), `metadata_only` (never touch price state), and
