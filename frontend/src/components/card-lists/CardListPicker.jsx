@@ -1,6 +1,6 @@
 import { useEffect, useId, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { ChevronUp, RotateCcw } from 'lucide-react'
+import { ChevronUp, Eye, EyeOff, RotateCcw } from 'lucide-react'
 import { searchCards } from '../../api/client'
 import { useDebouncedValue } from '../../hooks/useDebouncedValue'
 import { resolveCardImageUrl } from '../../utils/imageUrl'
@@ -17,6 +17,7 @@ import {
   aggregateCollectionItems,
   cardListPickerOptions,
   filterCollectionCards,
+  orderPickerEntries,
 } from '../../utils/cardListPicker'
 import { CardDisplay, withCollectionItemState } from '../card-system'
 import CardSelectionQuantityModal from '../card-system/CardSelectionQuantityModal'
@@ -108,6 +109,7 @@ export default function CardListPicker({
   const [quantityItems, setQuantityItems] = useState([])
   const [quantities, setQuantities] = useState({})
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE)
+  const [showUnavailable, setShowUnavailable] = useState(false)
   const [submitting, setSubmitting] = useState(false)
 
   const exactCopyMode = selectionMode === 'collection-item'
@@ -136,16 +138,28 @@ export default function CardListPicker({
       : filterCollectionCards(ownedItems, filters)
   }, [condition, exactCopyMode, language, ownedItems, search, set, type, variant])
 
+  const ownedEntries = useMemo(() => filteredOwnedItems.map(item => {
+    const normalized = pickerItem(item, selectionMode, maxQuantityById)
+    const alreadyAdded = !exactCopyMode && existingIds.has(String(normalized.card.id))
+    const unavailable = unavailableIds.has(String(normalized.id)) || binderPickerQuantityMaximum(normalized) < 1
+    return { item, normalized, alreadyAdded, unavailable, blocked: alreadyAdded || unavailable }
+  }), [exactCopyMode, existingIds, filteredOwnedItems, maxQuantityById, selectionMode, unavailableIds])
+  const blockedOwnedCount = ownedEntries.filter(entry => entry.blocked).length
+
   useEffect(() => {
     setVisibleCount(PAGE_SIZE)
-  }, [source, search, type, set, language, variant, condition])
+  }, [source, search, type, set, language, variant, condition, showUnavailable])
 
-  const displayedOwnedItems = filteredOwnedItems.slice(0, visibleCount)
+  const orderedOwnedEntries = orderPickerEntries(ownedEntries, showUnavailable)
+  const displayedOwnedEntries = orderedOwnedEntries.slice(0, visibleCount)
   const catalogCards = catalogData?.data || []
+  const catalogEntries = catalogCards.map(card => ({ card, blocked: existingIds.has(String(card.id)) }))
+  const blockedCatalogCount = catalogEntries.filter(entry => entry.blocked).length
+  const displayedCatalogEntries = orderPickerEntries(catalogEntries, showUnavailable)
   const totalCatalogCards = Number(catalogData?.total_count) || catalogCards.length
   const hasMore = source === 'catalog'
     ? catalogCards.length < totalCatalogCards
-    : displayedOwnedItems.length < filteredOwnedItems.length
+    : displayedOwnedEntries.length < orderedOwnedEntries.length
   const hasFilters = Boolean(search || type || set || language || variant || condition)
 
   const clearSelection = () => setSelectedItems({})
@@ -156,6 +170,7 @@ export default function CardListPicker({
     setLanguage('')
     setVariant('')
     setCondition('')
+    setShowUnavailable(false)
     clearSelection()
   }
   const switchSource = nextSource => {
@@ -204,13 +219,10 @@ export default function CardListPicker({
 
   if (!open) return null
 
-  const renderOwnedCard = (item, index) => {
-    const normalized = pickerItem(item, selectionMode, maxQuantityById)
+  const renderOwnedCard = ({ item, normalized, alreadyAdded, unavailable }, index) => {
     const id = String(normalized.id)
     const card = normalized.card
     const selected = selectedIds.has(id)
-    const alreadyAdded = !exactCopyMode && existingIds.has(String(card.id))
-    const unavailable = unavailableIds.has(id) || binderPickerQuantityMaximum(normalized) < 1
     const unavailableMessage = alreadyAdded
       ? t('binderTypes.alreadyUsed')
       : unavailable
@@ -269,18 +281,34 @@ export default function CardListPicker({
             {exactCopyMode && <select className="select min-w-0 py-1.5 text-xs" value={condition} onChange={event => setCondition(event.target.value)} aria-label={t('common.allConditions')}><option value="">{t('common.allConditions')}</option>{CONDITIONS.map(option => <option key={option} value={option}>{option}</option>)}</select>}
           </div>}
 
+          {(source === 'catalog' ? blockedCatalogCount : blockedOwnedCount) > 0 && (
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                className={`btn-ghost py-1.5 px-2 text-xs font-medium ${showUnavailable ? 'text-brand-red border-brand-red/30 bg-brand-red/10' : ''}`}
+                aria-pressed={showUnavailable}
+                onClick={() => setShowUnavailable(current => !current)}
+              >
+                {showUnavailable ? <EyeOff size={14} /> : <Eye size={14} />}
+                {showUnavailable ? t('cardListPicker.hideUnavailable') : t('cardListPicker.showUnavailable')}
+                <span className="rounded-full bg-bg-elevated px-1.5 py-0.5 text-[10px] text-text-secondary">{source === 'catalog' ? blockedCatalogCount : blockedOwnedCount}</span>
+              </button>
+            </div>
+          )}
+
           <div className="max-h-[38rem] overflow-y-auto pr-1">
             <div className="grid grid-cols-3 items-start gap-2 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8" data-testid="card-list-picker-grid">
-              {source === 'owned' && displayedOwnedItems.map(renderOwnedCard)}
-              {source === 'catalog' && catalogCards.map(card => {
+              {source === 'owned' && displayedOwnedEntries.map(renderOwnedCard)}
+              {source === 'catalog' && displayedCatalogEntries.map(({ card, blocked }) => {
                 const selected = selectedIds.has(String(card.id))
-                const alreadyAdded = existingIds.has(String(card.id))
-                return <CardDisplay key={card.id} card={card} image={resolveCardImageUrl(card)} selected={selected} unavailableReason={alreadyAdded ? t('binderTypes.alreadyUsed') : ''} actionLabel={label?.('cardListPicker.selectCardAction', { name: card.name })} onClick={() => toggleSelection(card)} />
+                return <CardDisplay key={card.id} card={card} image={resolveCardImageUrl(card)} selected={selected} unavailableReason={blocked ? t('binderTypes.alreadyUsed') : ''} actionLabel={label?.('cardListPicker.selectCardAction', { name: card.name })} onClick={() => toggleSelection(card)} />
               })}
               {catalogLoading && <p className="col-span-full py-8 text-center text-xs text-text-muted">{t('common.loading')}</p>}
               {!catalogLoading && source === 'catalog' && debouncedSearch.length < 2 && <p className="col-span-full py-8 text-center text-xs text-text-muted">{t('cardListPicker.searchAllHint')}</p>}
               {!catalogLoading && source === 'catalog' && debouncedSearch.length >= 2 && catalogCards.length === 0 && <p className="col-span-full py-8 text-center text-xs text-text-muted">{t('cardListPicker.noCatalogCards')}</p>}
+              {!catalogLoading && source === 'catalog' && debouncedSearch.length >= 2 && catalogEntries.length > 0 && displayedCatalogEntries.length === 0 && <p className="col-span-full py-8 text-center text-xs text-text-muted">{t('cardListPicker.allUnavailable')}</p>}
               {source === 'owned' && filteredOwnedItems.length === 0 && <p className="col-span-full py-8 text-center text-xs text-text-muted">{t('cardListPicker.noOwnedCards')}</p>}
+              {source === 'owned' && filteredOwnedItems.length > 0 && displayedOwnedEntries.length === 0 && <p className="col-span-full py-8 text-center text-xs text-text-muted">{t('cardListPicker.allUnavailable')}</p>}
             </div>
             {hasMore && <div className="flex justify-center py-4"><button type="button" className="btn-secondary" onClick={() => setVisibleCount(current => current + PAGE_SIZE)}>{t('common.more')}</button></div>}
           </div>
