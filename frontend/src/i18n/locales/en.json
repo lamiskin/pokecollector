@@ -67,7 +67,20 @@
     "targetMissing": "This card is no longer available at the linked location. No other card has been selected.",
     "targetChoices": "That placed copy is no longer at this location. Choose one of the remaining copies below.",
     "layoutDisabled": "This binder uses Cards view rather than physical pages. The linked card is still associated with this binder and has no physical slot.",
-    "openAssociatedCard": "Open associated card"
+    "openAssociatedCard": "Open associated card",
+    "arrangeHintSelect": "Select a card, then a slot",
+    "arrangeHintDrag": "Drag the grip onto a slot",
+    "arrangeHintTurn": "Hold a page arrow to turn",
+    "dragHint": "Drag to another slot",
+    "trayHelpPublic": "Copies in this binder that are not placed on a page.",
+    "chooseSlot": "Choose a destination slot",
+    "currentSlot": "Current slot",
+    "pageFree": "{free} of {total} slots free",
+    "previewAgain": "Update preview",
+    "previewLayout": "Pages: {pages} · Slots per page: {slots}",
+    "pagesOff": "Pages and slots turn off; every placed card returns to Not placed.",
+    "previewBadge": "Preview only — nothing has changed yet.",
+    "emptyBinder": "No cards are placed yet. Choose Arrange to put a card from Not placed into a pocket."
   },
   "bulkRemoval": {
     "select": "Select cards",

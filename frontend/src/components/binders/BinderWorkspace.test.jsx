@@ -15,14 +15,22 @@ const props = {
 describe('physical pages', () => {
   it.each([3, 4])('renders every stable slot in a %s-column page', columns => {
     const markup = renderToStaticMarkup(createElement(BinderPage, { ...props, layout: { rows: 3, columns } }))
-    expect((markup.match(/data-slot=/g) || [])).toHaveLength(columns * 3)
+    expect((markup.match(/<li class="binder-pocket/g) || [])).toHaveLength(columns * 3)
     expect(markup).toContain('data-slot="7" data-page="2" data-placement="copy-b"')
     expect(markup).toContain('Page 2 · Slot 7 · Sample card · Holo')
     expect(markup).toContain(`repeat(${columns}, minmax(0,1fr))`)
   })
+  it('keeps empty pockets visible but stops them being dead controls outside arrange mode', () => {
+    const browse = renderToStaticMarkup(createElement(BinderPage, props))
+    expect((browse.match(/data-slot="/g) || [])).toHaveLength(1)
+    expect(browse).toContain('binder-pocket-empty')
+    expect(browse).toContain('Page 2 · Slot 1 · Empty slot')
+    const arranging = renderToStaticMarkup(createElement(BinderPage, { ...props, arranging: true }))
+    expect((arranging.match(/data-slot="/g) || [])).toHaveLength(9)
+  })
   it('search highlights without compacting slots or hiding other cards', () => {
     const markup = renderToStaticMarkup(createElement(BinderPage, { ...props, filter: 'sample' }))
-    expect((markup.match(/data-slot=/g) || [])).toHaveLength(9)
+    expect((markup.match(/<li class="binder-pocket/g) || [])).toHaveLength(9)
     expect(markup).toContain('binder-pocket-highlight')
     expect(markup).toContain('data-placement="copy-b"')
   })
