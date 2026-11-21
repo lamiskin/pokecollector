@@ -50,6 +50,14 @@ regardless of its branch name. Never commit secrets or unapproved personal data.
 If one request includes personal and upstream-worthy work, split the changes.
 Upstream branches must not depend on `fork/main` or merge `dev`/personal patches.
 
+## Pull request titles
+
+Prefix every PR title with its Conventional Commit type, for example `feat:`,
+`fix:`, `docs:`, `chore:` or `build:`. A scope is optional, as in
+`docs(fork):`; use lowercase type/scope and a concise summary. This title format
+is distinct from branch prefixes: fork-only PR branches still use `personal/*`,
+and release PR branches use `release/*`.
+
 ## Stages and destinations
 
 1. **Implement:** one scoped working branch, with focused tests.

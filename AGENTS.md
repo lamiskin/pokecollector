@@ -24,6 +24,16 @@ intentionally excludes tests, documentation and translation catalogs.
   `main`. Keep personal patches out of their ancestry and complete PR diff.
 - Fork-only work uses `personal/*` from `fork/main` (including personal fixes,
   documentation and deployment changes); never open an upstream PR for it.
+- Prefix every PR title with its Conventional Commit type (`feat:`, `fix:`,
+  `docs:`, `chore:`, `build:`, etc.; an optional scope is fine, e.g.
+  `docs(fork):`). Keep the summary concise and lowercase after the prefix.
+  This is separate from branch naming: fork-only branches remain `personal/*`
+  and release branches remain `release/*`.
+- PRs that change user-visible UI or visuals must include screenshots of the
+  affected states (desktop/mobile where relevant), or explain why screenshots
+  are not relevant or feasible. Release notes must include screenshots when
+  they materially clarify a user-visible visual change; use safe demo data and
+  follow `docs/RELEASES.md` for asset paths and privacy rules.
 - `sync/*` integrates upstream into `fork/main`; reconcile squash-merged PRs
   by code and behaviour, not SHA counts alone.
 - `dev` is disposable integration of explicitly selected durable source
