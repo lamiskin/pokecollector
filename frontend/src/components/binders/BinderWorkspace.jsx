@@ -15,7 +15,7 @@ function Artwork({ entry, readOnly }) {
   return readOnly ? <CardDisplay {...props} /> : <CollectionCardDisplay {...props} item={{ id: entry.collection_item_id, card, has_scan_photo: entry.has_scan_photo }} />
 }
 
-export function BinderPage({ number, layout, placements, entries, selected, highlight, arranging, busy, readOnly, filter, onActivate, onDragStart, onDragEnd, onDrop, t }) {
+export function BinderPage({ number, layout, placements, entries, selected, highlight, dragTarget, arranging, busy, readOnly, filter, onActivate, onDragStart, onDragEnd, onPointerDragStart, onDrop, t }) {
   const pageRef = useRef(null)
   const slots = Array.from({ length: layout.rows * layout.columns }, (_, i) => i + 1)
   const occupied = new Map(placements.filter(p => p.page === number).map(p => [p.slot, p]))
@@ -32,14 +32,14 @@ export function BinderPage({ number, layout, placements, entries, selected, high
         const placement = occupied.get(slot)
         const entry = entries.find(e => e.binder_card_id === placement?.binder_card_id)
         const isSelected = placement && selected?.placement_id === placement.id
-        const isHighlight = highlight?.page === number && highlight?.slot === slot
+        const isHighlight = (highlight?.page === number && highlight?.slot === slot) || (dragTarget?.page === number && dragTarget?.slot === slot)
         const matches = filter && entry?.name?.toLocaleLowerCase().includes(filter.toLocaleLowerCase())
         const name = `${binderMessage(t, 'location', { page: number, slot })} · ${entry ? [entry.name, entry.variant, entry.condition].filter(Boolean).join(' · ') : t('binderLayout.emptySlot')}`
         return <li key={slot} className={`binder-pocket relative ${isSelected ? 'binder-pocket-selected' : ''} ${isHighlight || matches ? 'binder-pocket-highlight' : ''}`}>
           <div className="pointer-events-none" aria-hidden="true">{entry ? <Artwork entry={entry} readOnly={readOnly} /> : <div className="binder-empty"><span>{slot}</span></div>}</div>
           <button type="button" data-slot={slot} data-page={number} data-placement={placement?.id} className="binder-pocket-action" aria-label={name} aria-pressed={arranging ? Boolean(isSelected) : undefined} disabled={busy || (readOnly && !entry)} onClick={() => onActivate({ page: number, slot, placement, entry })} onKeyDown={event => keyMove(event, slot)} onDragOver={event => { if (arranging && selected) event.preventDefault() }} onDrop={event => { event.preventDefault(); onDrop(number, slot) }} />
           <span className="binder-slot-number" aria-hidden="true">{slot}</span>
-          {arranging && placement && <button type="button" draggable={!busy} className="binder-drag-handle" aria-label={`${t('binderLayout.drag')} ${entry?.name || ''}`} onDragStart={event => onDragStart(event, { placement_id: placement.id, binder_card_id: placement.binder_card_id, entry })} onDragEnd={onDragEnd}><GripVertical size={15} aria-hidden /></button>}
+          {arranging && placement && <button type="button" draggable={!busy} className="binder-drag-handle" aria-label={`${t('binderLayout.drag')} ${entry?.name || ''}`} onDragStart={event => onDragStart(event, { placement_id: placement.id, binder_card_id: placement.binder_card_id, entry })} onDragEnd={onDragEnd} onPointerDown={event => onPointerDragStart(event, { placement_id: placement.id, binder_card_id: placement.binder_card_id, entry })}><GripVertical size={15} aria-hidden /></button>}
         </li>
       })}
     </ol>
@@ -64,9 +64,12 @@ export default function BinderWorkspace({ snapshot, readOnly = false, binderId, 
   const [error, setError] = useState('')
   const [width, setWidth] = useState(0)
   const [dwell, setDwell] = useState(null)
+  const [pointerTarget, setPointerTarget] = useState(null)
   const [direction, setDirection] = useState(1)
   const root = useRef(null)
   const dragSource = useRef(null)
+  const pointerDrag = useRef(null)
+  const handlers = useRef({})
   const dwellTimer = useRef(null)
   const dwellLatched = useRef(false)
   const query = params.toString()
@@ -110,6 +113,41 @@ export default function BinderWorkspace({ snapshot, readOnly = false, binderId, 
     return () => document.removeEventListener('keydown', cancel)
   }, [selected, chooser, confirmation, busy])
   useEffect(() => () => clearTimeout(dwellTimer.current), [])
+  useEffect(() => { handlers.current = { place, endDrag } })
+  useEffect(() => {
+    const destinationAt = (x, y) => {
+      const slot = document.elementFromPoint(x, y)?.closest?.('[data-slot]')
+      return slot ? { page: Number(slot.dataset.page), slot: Number(slot.dataset.slot) } : null
+    }
+    const move = event => {
+      const drag = pointerDrag.current
+      if (!drag || event.pointerId !== drag.pointerId) return
+      if (!drag.moved) {
+        if (Math.hypot(event.clientX - drag.x, event.clientY - drag.y) < 6) return
+        drag.moved = true
+      }
+      setPointerTarget(destinationAt(event.clientX, event.clientY))
+    }
+    const finish = event => {
+      const drag = pointerDrag.current
+      if (!drag || event.pointerId !== drag.pointerId) return
+      pointerDrag.current = null
+      setPointerTarget(null)
+      if (!drag.moved) return
+      const destination = destinationAt(event.clientX, event.clientY)
+      if (destination) handlers.current.place(destination, drag.source)
+      handlers.current.endDrag()
+    }
+    const cancel = () => { pointerDrag.current = null; setPointerTarget(null) }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', finish)
+    window.addEventListener('pointercancel', cancel)
+    return () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', finish)
+      window.removeEventListener('pointercancel', cancel)
+    }
+  }, [])
 
   const navigatePage = next => {
     const value = Math.max(1, Math.min(layout.page_count, next))
@@ -156,6 +194,14 @@ export default function BinderWorkspace({ snapshot, readOnly = false, binderId, 
   const cancelDwell = () => { clearTimeout(dwellTimer.current); dwellTimer.current = null; setDwell(null); dwellLatched.current = false }
   const endDrag = () => { dragSource.current = null; cancelDwell() }
   const startDrag = (event, source) => { const selection = { ...source, revision: snapshot.revision }; dragSource.current = selection; select(selection); event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', source.placement_id || String(source.binder_card_id)) }
+  // Touch has no HTML5 drag, so the same grip drives a pointer drag instead.
+  // touch-action:none on the grip keeps page scrolling on the card body.
+  const startPointerDrag = (event, source) => {
+    if (busy || event.pointerType === 'mouse') return
+    const selection = { ...source, revision: snapshot.revision }
+    select(selection)
+    pointerDrag.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, moved: false, source: selection }
+  }
   const dwellOver = (event, direction, next) => {
     if (!dragSource.current || busy) return
     event.preventDefault()
@@ -197,7 +243,7 @@ export default function BinderWorkspace({ snapshot, readOnly = false, binderId, 
     </nav>
     <div className="grid items-start gap-4" style={{ gridTemplateColumns: sideTray ? 'minmax(0,1fr) 280px' : 'minmax(0,1fr)' }}>
       <div className={`binder-spread grid gap-3 ${spread ? 'grid-cols-2' : 'grid-cols-1'}`}>
-        {pages.map(number => <div key={number} className="binder-page-reveal"><BinderPage number={number} layout={layout} placements={placements} entries={entries} selected={selected} highlight={highlighted} arranging={arranging} busy={busy} readOnly={readOnly} filter={filter} onActivate={activate} onDragStart={startDrag} onDragEnd={endDrag} onDrop={(page, slot) => { place({ page, slot }); endDrag() }} t={t} /></div>)}
+        {pages.map(number => <div key={number} className="binder-page-reveal"><BinderPage number={number} layout={layout} placements={placements} entries={entries} selected={selected} highlight={highlighted} dragTarget={pointerTarget} arranging={arranging} busy={busy} readOnly={readOnly} filter={filter} onActivate={activate} onDragStart={startDrag} onDragEnd={endDrag} onPointerDragStart={startPointerDrag} onDrop={(page, slot) => { place({ page, slot }); endDrag() }} t={t} /></div>)}
         {spread && pages.length === 1 && <div className="binder-page opacity-30" aria-hidden="true"><BookOpen className="mx-auto mt-12 text-text-muted" size={40} /></div>}
       </div>
       <section className="rounded-2xl border border-border bg-bg-card p-3 space-y-3" aria-label={t('binderLayout.notPlaced')}>
@@ -209,7 +255,7 @@ export default function BinderWorkspace({ snapshot, readOnly = false, binderId, 
           <ul className="max-h-[32rem] overflow-y-auto space-y-2">
             {trayEntries.filter(e => e.name?.toLocaleLowerCase().includes(trayFilter.toLocaleLowerCase())).map(entry => <li key={entry.binder_card_id} className="rounded-xl border border-border bg-bg-surface p-2">
               <div className="flex items-center gap-3"><div className="w-12 shrink-0" aria-hidden="true"><Artwork entry={entry} readOnly={readOnly} /></div><div className="min-w-0 flex-1"><button data-tray-member={entry.binder_card_id} className="min-h-11 text-left text-sm font-medium underline-offset-4 hover:underline" disabled={busy || (arranging && entry.unresolved)} onClick={() => arranging ? select({ binder_card_id: entry.binder_card_id, entry }) : onOpen?.(entry)}>{entry.name} <span className="text-text-secondary">×{entry.unplaced_quantity}</span></button><p className="text-xs text-text-secondary">{[entry.variant, entry.lang].filter(Boolean).join(' · ')}</p></div>
-                {arranging && !entry.unresolved && <button type="button" draggable={!busy} className="binder-tray-drag" aria-label={`${t('binderLayout.drag')} ${entry.name}`} onDragStart={event => startDrag(event, { binder_card_id: entry.binder_card_id, entry })} onDragEnd={endDrag}><GripVertical size={16} aria-hidden /></button>}
+                {arranging && !entry.unresolved && <button type="button" draggable={!busy} className="binder-tray-drag" aria-label={`${t('binderLayout.drag')} ${entry.name}`} onDragStart={event => startDrag(event, { binder_card_id: entry.binder_card_id, entry })} onDragEnd={endDrag} onPointerDown={event => startPointerDrag(event, { binder_card_id: entry.binder_card_id, entry })}><GripVertical size={16} aria-hidden /></button>}
               </div>
               {entry.unresolved && !readOnly && <p className="mt-2 text-xs text-yellow">{t('binderLayout.unresolved')}</p>}
             </li>)}

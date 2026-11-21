@@ -8,8 +8,8 @@
   .binder-pocket-selected { outline: 3px solid var(--color-blue); outline-offset: 2px; }
   .binder-pocket-highlight { box-shadow: 0 0 0 3px var(--color-yellow); }
   .binder-slot-number { position: absolute; bottom: .3rem; left: .3rem; z-index: 11; pointer-events: none; background: var(--color-surface); color: var(--color-text-primary); border: 1px solid var(--color-border); border-radius: .25rem; min-width: 1.2rem; text-align: center; font-size: .65rem; line-height: 1.2rem; }
-  .binder-drag-handle { position: absolute; top: .25rem; right: .25rem; z-index: 12; cursor: grab; border-radius: .35rem; padding: .4rem; background: var(--color-surface); color: var(--color-text-primary); }
-  .binder-tray-drag { padding: .6rem; cursor: grab; }
+  .binder-drag-handle { position: absolute; top: .25rem; right: .25rem; z-index: 12; cursor: grab; border-radius: .35rem; padding: .4rem; background: var(--color-surface); color: var(--color-text-primary); touch-action: none; }
+  .binder-tray-drag { padding: .6rem; cursor: grab; touch-action: none; }
   .binder-page-reveal { animation: binder-page-in 180ms ease-out; }
   .binder-dwell { background: var(--color-blue); color: white; animation: binder-dwell 650ms linear; }
   @keyframes binder-page-in { from { opacity: .4; transform: translateX(calc(var(--binder-direction, 1) * .5rem)); } to { opacity: 1; transform: none; } }

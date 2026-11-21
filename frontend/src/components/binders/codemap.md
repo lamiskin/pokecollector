@@ -24,7 +24,9 @@ gateway" between the user and the binder CSV import endpoint.
   Container width determines readable two-page spreads versus one-page viewing;
   the Not placed tray is alongside wide workspaces or expandable below a page.
 - Arrange mode separates browsing from selection. One-copy tap/place, a labelled
-  page/slot chooser, desktop grip dragging with deliberate dwell paging, occupied
+  page/slot chooser, grip dragging on both mouse (HTML5 drag) and touch (pointer
+  events with `touch-action: none` on the grip alone, so the card body still
+  scrolls), deliberate dwell paging, occupied
   destination confirmation, save/error status, and conflict-safe Undo share one
   mutation path. Native buttons support keyboard moves and arrow-key slot focus.
 - `BinderLayoutSettings` requires a server preview before saving. The preview's
