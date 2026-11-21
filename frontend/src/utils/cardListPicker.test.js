@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { aggregateCollectionItems, cardListPickerOptions, filterCollectionCards } from './cardListPicker'
+import { aggregateCollectionItems, cardListPickerOptions, filterCollectionCards, orderPickerEntries } from './cardListPicker'
 
 const collection = [
   { quantity: 2, lang: 'en', card: { id: 'pika', name: 'Pikachu', number: '025', supertype: 'Pokemon', lang: 'en', set_ref: { id: 'sv1', name: 'Scarlet & Violet' } } },
@@ -47,5 +47,16 @@ describe('card list picker utilities', () => {
       sets: [{ id: 'sv2', name: 'Paldea Evolved' }, { id: 'sv1', name: 'Scarlet & Violet' }],
       languages: ['de', 'en'],
     })
+  })
+
+  it('hides blocked picker entries unless they are requested, then places them last', () => {
+    const entries = [
+      { id: 'a', blocked: false },
+      { id: 'b', blocked: true },
+      { id: 'c', blocked: false },
+    ]
+
+    expect(orderPickerEntries(entries).map(entry => entry.id)).toEqual(['a', 'c'])
+    expect(orderPickerEntries(entries, true).map(entry => entry.id)).toEqual(['a', 'c', 'b'])
   })
 })

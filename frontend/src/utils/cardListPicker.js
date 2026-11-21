@@ -43,6 +43,12 @@ export function filterCollectionCards(items = [], { search = '', type = '', set 
   })
 }
 
+export function orderPickerEntries(entries = [], showBlocked = false) {
+  const available = entries.filter(entry => !entry.blocked)
+  const blocked = entries.filter(entry => entry.blocked)
+  return showBlocked ? [...available, ...blocked] : available
+}
+
 export function cardListPickerOptions(items = []) {
   const sets = new Map()
   const languages = new Set()

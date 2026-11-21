@@ -65,6 +65,11 @@ Two components share this job:
   `role="tab"`/`aria-selected`; filters use `aria-label`; the section has an
   `aria-controls`/`aria-expanded` collapse toggle; and there is a mobile-only
   sticky "add" bar (`sm:hidden`) duplicating the desktop header action.
+- **Blocked entries are opt-in.** Cards that cannot be added (already in the
+  list, or no free copies) are dropped by `orderPickerEntries` before
+  pagination. A toggle with a count badge (`aria-pressed`) reveals them, and
+  they are appended after the selectable cards so they never crowd the first
+  page.
 
 ## Flow
 
