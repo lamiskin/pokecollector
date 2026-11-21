@@ -7,7 +7,6 @@ from sqlalchemy.orm import Session
 from models import Binder, BinderCard
 from services.bulk_removal_errors import batch_detail, unavailable_blockers
 from services.binder_allocations import lock_user_card_allocations, trim_deck_allocations
-from services.binder_layouts import require_unplaced
 
 
 def remove_card_list_entries(db: Session, user_id: int, list_id: int, item_ids: list[int], *, deck: bool):
@@ -31,7 +30,6 @@ def remove_card_list_entries(db: Session, user_id: int, list_id: int, item_ids: 
             raise HTTPException(404, batch_detail('list_entries_unavailable',
                 'One or more entries were not found in this list. Nothing was removed.',
                 unavailable_blockers(item_ids, [entry.id for entry in entries], 'list_entry', list_id=list_id)))
-        require_unplaced(db, [entry.id for entry in entries])
         copies = sum(max(int(entry.required_quantity or 1), 1) for entry in entries)
         card_ids = {entry.card_id for entry in entries}
         for entry in entries:

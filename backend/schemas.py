@@ -305,31 +305,6 @@ class BinderCardUpdate(BaseModel):
     required_quantity: int
 
 
-class BinderLayoutPreview(BaseModel):
-    # A generous safety bound for the page selector/overview, not sheet count.
-    page_count: Optional[int] = Field(default=None, ge=1, le=500)
-    rows: Literal[3] = 3
-    columns: Literal[3, 4] = 3
-
-
-class BinderLayoutUpdate(BinderLayoutPreview):
-    expected_revision: str = Field(min_length=64, max_length=64)
-    confirmed_unplace_ids: List[str] = Field(default_factory=list, max_length=6000)
-
-
-class BinderPlacementMove(BaseModel):
-    binder_card_id: int = Field(gt=0)
-    placement_id: Optional[str] = Field(default=None, min_length=36, max_length=36)
-    page: Optional[int] = Field(default=None, ge=1, le=500)
-    slot: Optional[int] = Field(default=None, ge=1, le=12)
-    expected_revision: str = Field(min_length=64, max_length=64)
-    confirm_occupied: bool = False
-
-
-class BinderLayoutUndo(BaseModel):
-    expected_revision: str = Field(min_length=64, max_length=64)
-
-
 class BinderCardSwitch(BaseModel):
     card_id: Optional[str] = None
     collection_item_id: Optional[int] = None

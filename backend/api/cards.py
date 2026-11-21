@@ -1,4 +1,4 @@
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, func, cast, Integer, String, or_
 from sqlalchemy.exc import IntegrityError
@@ -472,11 +472,6 @@ def delete_custom_card(
             raise HTTPException(status_code=404, detail="Card not found")
         raise HTTPException(status_code=403, detail="Only the owner can delete this custom card")
 
-    from services.binder_allocations import lock_user_card_allocations
-    from services.binder_layouts import require_unplaced
-    lock_user_card_allocations(db, current_user.id)
-    require_unplaced(db, [row_id for row_id, in db.query(BinderCard.id).filter(BinderCard.card_id == card_id)])
-
     other_user_references = set(
         user_id for (user_id,) in db.query(CollectionItem.user_id).filter(
             CollectionItem.card_id == card_id,
@@ -929,13 +924,6 @@ def migrate_custom_card(
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to load API card: {e}")
 
-    # A catalogue correction can merge membership rows. Require an explicit
-    # return to tray first rather than letting that merge discard physical ids.
-    from services.binder_allocations import lock_user_card_allocations
-    from services.binder_layouts import require_unplaced
-    lock_user_card_allocations(db, current_user.id)
-    require_unplaced(db, [row_id for row_id, in db.query(BinderCard.id).filter(BinderCard.card_id == custom_card_id)])
-
     # 2. Re-assign collection items
     try:
         with db.begin_nested():
@@ -1223,20 +1211,6 @@ def update_card_manual_value(
     db.commit()
     db.refresh(card)
     return _card_to_dict(card)
-
-
-@router.get("/{card_id}/locations")
-def get_card_locations(
-    card_id: str,
-    collection_item_id: int | None = Query(default=None, gt=0),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-    response: Response = None,
-):
-    from services.binder_layouts import card_locations
-    if response is not None:
-        response.headers["Cache-Control"] = "no-store"
-    return card_locations(db, current_user.id, card_id, collection_item_id=collection_item_id)
 
 
 @router.get("/{card_id}", response_model=CardBase)

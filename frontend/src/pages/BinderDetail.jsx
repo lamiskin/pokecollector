@@ -26,8 +26,6 @@ import CardListPicker from '../components/card-lists/CardListPicker'
 import CardListGallery from '../components/card-lists/CardListGallery'
 import { useDynamicFilterUrlState } from '../hooks/useDynamicFilterUrlState'
 import PrintingDetailBadges from '../components/PrintingDetailBadges'
-import BinderLayoutPanel from '../components/binders/BinderLayoutPanel'
-import CardLocations from '../components/binders/CardLocations'
 
 const SPRITE_BASE_URL = 'https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/versions/generation-v/black-white/animated'
 const BINDER_FILTER_DEFINITIONS = {
@@ -68,7 +66,6 @@ export default function BinderDetail() {
   const label = (key, values) => Object.entries(values).reduce((text, [name, value]) => text.replace(`{${name}}`, value), t(key))
   const queryClient = useQueryClient()
   const [showSearch, setShowSearch] = useState(false)
-  const [binderView, setBinderView] = useState('cards')
   const [binderFilterQuery, setBinderFilterQuery] = useState('')
   const [binderSortBy, setBinderSortBy] = useState('recent')
   const {
@@ -167,7 +164,6 @@ export default function BinderDetail() {
       invalidateTcgdexFilterLanguages(queryClient)
       queryClient.invalidateQueries({ queryKey: ['binders'] })
     },
-    onError: e => toast.error(getApiErrorMessage(e, t('binderLayout.failed')), { duration: 10000 }),
   })
 
   const updateEntryMutation = useMutation({
@@ -413,10 +409,6 @@ export default function BinderDetail() {
     blocked: removeMutation.isPending || updateEntryMutation.isPending || importMutation.isPending || applyPrintOptimizationMutation.isPending,
   })
 
-  useEffect(() => {
-    if (binderView === 'pages' && bulkRemoval.active) bulkRemoval.cancel()
-  }, [binderView, bulkRemoval.active])
-
   if (isLoading) return <div className="skeleton h-64 rounded-xl" />
   if (binderType === 'deck') return <div className="skeleton h-64 rounded-xl" />
 
@@ -472,7 +464,7 @@ export default function BinderDetail() {
         </div>
         <BulkRemovalActions selection={bulkRemoval} empty={visibleCards.length === 0}>
           <div className="flex items-center gap-2 flex-wrap">
-          {(binderView !== 'pages' || !isCollection) && <BulkRemovalToggle selection={bulkRemoval} empty={visibleCards.length === 0} />}
+          <BulkRemovalToggle selection={bulkRemoval} empty={visibleCards.length === 0} />
           <button
             onClick={() => {
               if (showSearch) clearPickerSelection()
@@ -604,15 +596,6 @@ export default function BinderDetail() {
         label={label}
       />
 
-      {isCollection && binder && <BinderLayoutPanel
-        binder={binder}
-        membershipSnapshot={data}
-        onViewChange={setBinderView}
-        onOpen={entry => setSelectedCard(cards.find(card => card.binder_card_id === entry.binder_card_id) || { ...entry, id: entry.card_id })}
-      />}
-
-      {(binderView !== 'pages' || !isCollection) && <>
-
       {cards.length > 0 && (
         <>
           <div className="flex justify-end">
@@ -714,7 +697,6 @@ export default function BinderDetail() {
           pricePrimaryField={pricePrimaryField}
         />
       )}
-      </>}
 
       {showCsvImportModal && (
         <BinderCsvImportModal
@@ -916,7 +898,6 @@ export default function BinderDetail() {
         >
           {selectedCardTab === 'binder' && (
             <div className="space-y-4">
-              {isCollection && <CardLocations cardId={selectedCard.card_id || selectedCard.id} collectionItemId={selectedCard.collection_item_id} />}
                 <div className="space-y-3 text-sm">
                   <div className="grid grid-cols-2 gap-2">
                     <div className="rounded-lg bg-bg-card p-2"><p className="text-xs text-text-muted">{t('binderTypes.owned')}</p><p className="font-bold text-green">{isCollection ? (selectedCard.collection_quantity || 0) : (selectedCard.owned_quantity || 0)}</p></div>

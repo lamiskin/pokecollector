@@ -2,14 +2,11 @@ import { useEffect, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { ArrowLeft, HelpCircle } from 'lucide-react'
 import clsx from 'clsx'
-import { getPublicBinder, getPublicBinderLayout, getPublicProfile } from '../api/publicClient'
+import { getPublicBinder, getPublicProfile } from '../api/publicClient'
 import { groupCardsByPrint } from '../utils/groupCardsByPrint'
 import { formatBinderCountSummary } from '../utils/binderCounts'
 import { useSettings } from '../contexts/SettingsContext'
-import { CardDialog, CardLegend, CardStack } from '../components/card-system'
-import BinderWorkspace from '../components/binders/BinderWorkspace'
-import CardLocations from '../components/binders/CardLocations'
-import { resolveCardImageUrl } from '../utils/imageUrl'
+import { CardLegend, CardStack } from '../components/card-system'
 import PrintingDetailBadges from '../components/PrintingDetailBadges'
 import PublicProfileShell from '../components/public/PublicProfileShell'
 
@@ -19,31 +16,17 @@ export default function PublicBinderView() {
   const [profile, setProfile] = useState(null)
   const [error, setError] = useState(null)
   const [badgeLegendOpen, setBadgeLegendOpen] = useState(false)
-  const [layout, setLayout] = useState(null)
-  const [layoutError, setLayoutError] = useState(false)
-  const [selectedCard, setSelectedCard] = useState(null)
-  const [layoutRetry, setLayoutRetry] = useState(0)
   const { t, formatPrice } = useSettings()
 
   useEffect(() => {
     let cancelled = false
     setBinder(null)
     setError(null)
-    setSelectedCard(null)
     Promise.all([getPublicProfile(handle), getPublicBinder(handle, binderId)])
       .then(([profileData, binderData]) => { if (!cancelled) { setProfile(profileData); setBinder(binderData) } })
       .catch(() => { if (!cancelled) setError(true) })
     return () => { cancelled = true }
   }, [handle, binderId])
-
-  useEffect(() => {
-    let cancelled = false
-    setLayout(null)
-    setLayoutError(false)
-    getPublicBinderLayout(handle, binderId).then(data => { if (!cancelled) setLayout(data) })
-      .catch(() => { if (!cancelled) setLayoutError(true) })
-    return () => { cancelled = true }
-  }, [handle, binderId, layoutRetry])
 
   if (error) return <div className="min-h-screen flex items-center justify-center text-text-secondary">{t('publicProfiles.binderUnavailable')}</div>
   if (!binder || !profile) return <div className="min-h-screen flex items-center justify-center text-text-secondary">{t('common.loading')}</div>
@@ -68,8 +51,6 @@ export default function PublicBinderView() {
           )}
         </div>
 
-        {layoutError && <p role="alert" className="mb-4 text-sm text-text-secondary">{t('binderLayout.loadFailed')} <button className="btn-ghost" onClick={() => setLayoutRetry(n => n + 1)}>{t('binderLayout.retry')}</button></p>}
-        {!layout && !layoutError ? <p role="status" className="text-sm text-text-secondary">{t('common.loading')}</p> : layout?.layout ? <BinderWorkspace snapshot={layout} binderId={binderId} handle={handle} readOnly t={t} accent={binder.color} onOpen={entry => setSelectedCard({ ...entry, id: entry.card_id })} /> : <>
         <div className="mb-3 flex justify-end">
           <button
             type="button"
@@ -124,8 +105,6 @@ export default function PublicBinderView() {
           )
         })}
         </div>
-        </>}
-        {selectedCard && <CardDialog card={selectedCard} image={resolveCardImageUrl(selectedCard)} onClose={() => setSelectedCard(null)}><CardLocations cardId={selectedCard.card_id} handle={handle} /></CardDialog>}
     </PublicProfileShell>
   )
 }

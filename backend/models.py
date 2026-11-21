@@ -484,13 +484,6 @@ class Binder(Base):
     # Set only when importing Decks created by the original standalone PR #386
     # schema. Keeping the source id makes that data migration idempotent.
     legacy_deck_id = Column(Integer, nullable=True)
-    # Pages are numbered visible sides, not double-sided sheets. Disabled layouts
-    # leave memberships untouched; all associated copies then remain unplaced.
-    layout_pages = Column(Integer, nullable=True)
-    layout_rows = Column(Integer, nullable=True)
-    layout_columns = Column(Integer, nullable=True)
-    layout_revision = Column(Integer, nullable=False, default=0, server_default="0")
-    layout_undo = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
 
@@ -510,37 +503,10 @@ class Binder(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "(layout_pages IS NULL AND layout_rows IS NULL AND layout_columns IS NULL) OR "
-            "(layout_pages IS NOT NULL AND layout_rows IS NOT NULL AND layout_columns IS NOT NULL "
-            "AND layout_pages BETWEEN 1 AND 500 AND layout_rows = 3 AND layout_columns IN (3, 4) "
-            "AND COALESCE(binder_type, 'collection') = 'collection')",
-            name="ck_binders_layout",
-        ),
-        CheckConstraint(
             "target_size IS NULL OR target_size IN (20, 40, 60)",
             name="ck_binders_target_size",
         ),
         Index("ux_binders_legacy_deck_id", "legacy_deck_id", unique=True),
-    )
-
-
-class BinderPlacement(Base):
-    """One interchangeable owned copy in one physical pocket.
-
-    Deliberately no delete cascade: membership-changing workflows must preserve
-    locations or require the owner to explicitly return those copies to the tray.
-    """
-    __tablename__ = "binder_placements"
-
-    id = Column(String(36), primary_key=True)
-    binder_id = Column(Integer, ForeignKey("binders.id"), nullable=False, index=True)
-    binder_card_id = Column(Integer, ForeignKey("binder_cards.id"), nullable=False, index=True)
-    page = Column(Integer, nullable=False)
-    slot = Column(Integer, nullable=False)
-
-    __table_args__ = (
-        UniqueConstraint("binder_id", "page", "slot", name="uq_binder_placement_slot"),
-        CheckConstraint("page >= 1 AND slot BETWEEN 1 AND 12", name="ck_binder_placement_position"),
     )
 
 

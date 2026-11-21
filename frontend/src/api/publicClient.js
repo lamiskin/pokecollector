@@ -17,12 +17,6 @@ export const getPublicProfiles = () =>
 export const getPublicBinder = (handle, binderId) =>
   publicApi.get(`/profiles/${encodeURIComponent(handle)}/binders/${binderId}`).then(r => r.data)
 
-export const getPublicBinderLayout = (handle, binderId) =>
-  publicApi.get(`/profiles/${encodeURIComponent(handle)}/binders/${binderId}/layout`).then(r => r.data)
-
-export const getPublicCardLocations = (handle, cardId) =>
-  publicApi.get(`/profiles/${encodeURIComponent(handle)}/cards/${encodeURIComponent(cardId)}/locations`).then(r => r.data)
-
 export const getPublicWishlist = (handle, params = {}) =>
   publicApi.get(`/profiles/${encodeURIComponent(handle)}/wishlist`, { params }).then(r => r.data)
 

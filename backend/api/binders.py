@@ -32,15 +32,12 @@ from services.wishlist_missing import plan_missing_wishlist_additions
 from services.tcgdex_languages import SUPPORTED_TCGDEX_LANGUAGES, is_supported_tcgdex_language, normalize_tcgdex_language
 from services.public_profile_feature import public_profiles_enabled
 from services.public_profile import public_deck_accepts_card
-from services.binder_layouts import require_unplaced
-from api.binder_layouts import router as layout_router
 import datetime
 import csv
 import io
 import logging
 
 router = APIRouter()
-router.include_router(layout_router)
 logger = logging.getLogger(__name__)
 
 ALLOWED_BINDER_FORMATS = {"Standard", "Expanded", "Unlimited", "Casual"}
@@ -678,10 +675,6 @@ def update_binder(
             raise HTTPException(status_code=400, detail="Card list type cannot be changed after cards are added")
         if requested_type == "wishlist" and has_exact_cards:
             raise HTTPException(status_code=409, detail="Remove allocated deck copies before converting to a planned binder")
-        # Empty optional layouts carry no allocations and can safely be disabled
-        # when the ordinary type-change workflow turns this into a planning list.
-        binder.layout_pages = binder.layout_rows = binder.layout_columns = None
-        binder.layout_undo = None
 
     if "is_public" in update.model_fields_set:
         if not public_profiles_enabled(db):
@@ -858,7 +851,6 @@ def convert_collection_binder_to_wishlist(
     entries = db.query(BinderCard).filter(
         BinderCard.binder_id == binder.id,
     ).order_by(BinderCard.id.asc()).with_for_update(of=BinderCard).all()
-    require_unplaced(db, [entry.id for entry in entries])
 
     entries_by_card: dict[str, list[BinderCard]] = {}
     for entry in entries:
@@ -889,8 +881,6 @@ def convert_collection_binder_to_wishlist(
             db.delete(extra_entry)
 
     binder.binder_type = "wishlist"
-    binder.layout_pages = binder.layout_rows = binder.layout_columns = None
-    binder.layout_undo = None
     binder.is_public = False
     binder.auto_owned_set_id = None
     db.commit()
@@ -918,7 +908,6 @@ def delete_binder(
     if not binder:
         raise HTTPException(status_code=404, detail="Binder not found")
 
-    require_unplaced(db, [entry.id for entry in binder.binder_cards])
     db.delete(binder)
     db.commit()
     return {"message": "Binder deleted"}
@@ -1180,9 +1169,6 @@ def apply_binder_print_optimization(
     selected_ids = None
     if update and update.selected_binder_card_ids is not None:
         selected_ids = set(update.selected_binder_card_ids)
-    if binder_type == "collection":
-        require_unplaced(db, [r["binder_card_id"] for r in preview["recommendations"]
-                              if selected_ids is None or r["binder_card_id"] in selected_ids])
     applied = 0
     skipped = 0
     applied_total_savings = 0.0
@@ -1591,7 +1577,6 @@ def update_binder_entry(
     if not bc:
         raise HTTPException(status_code=404, detail="Binder entry not found")
     next_quantity = _safe_required_quantity(update.required_quantity)
-    require_unplaced(db, [bc.id], retained_quantity=next_quantity)
     if binder_type == "collection":
         if not bc.collection_item_id:
             raise HTTPException(status_code=409, detail="This legacy binder entry is not linked to an exact collection item")
@@ -1806,7 +1791,6 @@ def switch_binder_entry_card(
             raise HTTPException(status_code=409, detail="Binder entry changed while switching prints; please try again")
         if target_item.id == bc.collection_item_id:
             return {"message": "Binder entry already uses this print", "binder_card_id": bc.id, "merged": False}
-        require_unplaced(db, [bc.id])
 
         source_item_id = bc.collection_item_id
         locked_items = db.query(CollectionItem).filter(
@@ -2587,7 +2571,6 @@ def remove_binder_entry(
     bc = _deck_plan_query(entry_query, binder.binder_type or "collection").first()
     if not bc:
         raise HTTPException(status_code=404, detail="Binder entry not found")
-    require_unplaced(db, [bc.id])
 
     if (binder.binder_type or "collection") == "physical_deck":
         remaining_required = sum(
@@ -2634,7 +2617,6 @@ def remove_card_from_binder(
 
     if not plan_rows:
         raise HTTPException(status_code=404, detail="Card not in binder")
-    require_unplaced(db, [bc.id for bc in plan_rows])
 
     if binder_type == "physical_deck":
         _trim_deck_allocations(db, binder.id, card_id, 0)

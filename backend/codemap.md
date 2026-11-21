@@ -50,12 +50,6 @@ Key architectural decisions:
 - **Request/response contracts in `schemas.py`.** Pydantic `BaseModel` classes
   with `orm_mode` (`Config`) mirror the ORM for create/update/response shapes;
   endpoints do not expose raw ORM objects.
-- **Optional physical layouts.** `Binder` stores numbered-side/grid metadata and
-  undo state; `BinderPlacement` references a reserved `BinderCard` membership for
-  each occupied pocket. `services/binder_layout_schema.py` applies the fail-fast
-  layout migration after the legacy schema loop. PostgreSQL deferred triggers
-  enforce bounds, membership/owner identity and copy counts without rewriting
-  existing memberships. See `services/binder_layouts.py` and `api/binder_layouts.py`.
 - **Auth.** JWT bearer tokens (python-jose + bcrypt) via
   `OAuth2PasswordBearer(tokenUrl="/api/auth/login")` in `api/auth.py`. The
   shared dependencies are `get_current_user` (401 on missing/invalid token) and

@@ -1534,11 +1534,6 @@ def init_db():
     # browser-bound transaction store. Identity schema first, then transactions.
     migrate_oidc_transaction_schema()
 
-    # Physical locations are an inventory-integrity boundary, not a best-effort
-    # cleanup. Never serve writes if their schema/constraints failed to upgrade.
-    from services.binder_layout_schema import migrate_binder_layout_schema
-    migrate_binder_layout_schema(engine)
-
     # Migrate card IDs to composite format (idempotent)
     try:
         migrate_card_ids()

@@ -241,31 +241,6 @@ def get_public_binder(handle: str, binder_id: int, db: Session = Depends(get_db)
     return pp.serialize_binder_detail(db, binder, show_values=bool(user.public_show_values))
 
 
-@router.get("/profiles/{handle}/binders/{binder_id}/layout")
-def get_public_binder_layout(handle: str, binder_id: int, db: Session = Depends(get_db), response: Response = None):
-    from services.binder_layouts import layout_state
-    _require_public_profiles_enabled(db)
-    user = pp.get_live_profile(db, handle.lower())
-    if not user:
-        raise _not_found("Profile not found")
-    binder = pp.get_public_collection_binder(db, user.id, binder_id)
-    if not binder:
-        raise _not_found("Binder not found")
-    _set_public_cache(response)
-    return layout_state(db, binder, public=True)
-
-
-@router.get("/profiles/{handle}/cards/{card_id}/locations")
-def get_public_card_locations(handle: str, card_id: str, db: Session = Depends(get_db), response: Response = None):
-    from services.binder_layouts import card_locations
-    _require_public_profiles_enabled(db)
-    user = pp.get_live_profile(db, handle.lower())
-    if not user:
-        raise _not_found("Profile not found")
-    _set_public_cache(response)
-    return card_locations(db, user.id, card_id, public=True)
-
-
 @router.get("/profiles/{handle}/wishlist", response_model=PublicWishlist)
 def get_public_wishlist(
     handle: str,
