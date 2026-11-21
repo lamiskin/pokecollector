@@ -1,4 +1,5 @@
 <!-- Fork release 1.57.9-5 -->
+<!-- release-coverage: #10 #11 #12 #13 -->
 
 ### Features
 

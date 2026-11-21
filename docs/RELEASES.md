@@ -19,6 +19,7 @@ pulled by digest, never rebuilt on the server.
 | `fork-v1.57.9-1` | `72d5824` | `56cc1bb` (1.57.9) | `sha256:9ffc63c79145e70a71c6c5792c124f4ac979d015651da3fe321c4d35e82c7b1f` | `sha256:cfed8287399d526c7cb15f81a3f782960839ab0e50e881844733fd8be80fa002` | 2026-11-21 |
 | `fork-v1.57.9-2` | `b20e005` | `56cc1bb` (1.57.9) | `sha256:a2ff83d502c3ee05b9c197dfb434d33932b8ec734dfcbe392b5eedf441dc42a9` | `sha256:ebfed8986b86b03dc5b7c813fa27bffcc75fee5d755559be8d7797ea774ec364` | 2026-11-21 |
 | `fork-v1.57.9-3` | `f5e7608` | `56cc1bb` (1.57.9) | `sha256:a3bc05da75e69c7e3786fbd1407ce48c2a5756b3c8affee6df8fb8d75911dd37` | `sha256:3137e814afbeea1044d6c10e44a5a542c4e721f155f9dca56d04b8ab134b0a8d` | 2026-11-21 |
+| `fork-v1.57.9-4` | `f8b0fef` | `56cc1bb` (1.57.9) | `sha256:4af20b41bfc14a568cb54f85c39e3d8b33dd887b430a6fa098ce6d896e81ca64` | `sha256:0da5057abab4635182514973877161916c27eded70874e9f4fd0090c2a1c75e3` | 2026-11-21 |
 
 `fork-v1.55.1-1` is deliberately absent: it is a local annotated tag on
 `2f3c2b8` (the OIDC release candidate) and names the local images Prod ran
@@ -29,7 +30,18 @@ workflow.
 
 Before running either a dry run or a publish, commit
 `docs/release-notes/<exact-fork-tag>.md` with highlights verified against the
-tagged tree. Start from [`release-notes/TEMPLATE.md`](release-notes/TEMPLATE.md);
+tagged tree. The workflow enforces two checks before it builds anything:
+
+- **Coverage.** Every PR merged since the previous release that changed
+  application code must be named in the highlights file, otherwise the run fails
+  and lists what is missing. Docs-only and test-only PRs are exempt. Name PRs in
+  a hidden marker so the visible notes stay readable, for example
+  `<!-- release-coverage: #10 #11 #12 -->`; the marker may sit anywhere in the
+  file, and a plain mention such as `#12` also satisfies the check.
+- **Register.** The previously published release must already have its row in
+  this file; a release cannot be cut while the last one is unrecorded.
+
+Start from [`release-notes/TEMPLATE.md`](release-notes/TEMPLATE.md);
 do not treat ancestry as evidence that a feature shipped. The workflow fails if
 the exact-tag file is missing or empty. Review the generated GitHub notes and
 manifest in the dry-run artifact, including the point-in-time `origin/main`
@@ -37,9 +49,11 @@ mirror tip and lag, before publishing. After publication, add a row here on
 `fork/main` from the manifest. Record only public tags, commit SHAs, digests and
 dates; environment-specific detail belongs in the operator's private record.
 
-Include screenshots in the highlights where they make a user-visible feature or
-visual change clearer; skip them for internal fixes and when the text already
-says enough. Commit the images under
+Release highlights must include screenshots for user-visible visual changes
+when an image materially clarifies the change; they are expected for visual
+features and substantial UI changes. Omit them for internal/non-visual changes,
+when the prose is already clear, or when a safe screenshot cannot reasonably be
+made; briefly explain an omission for a visual change. Commit the images under
 `docs/release-notes/assets/<exact-fork-tag>/` before tagging and reference them
 inline by absolute, tag-pinned URL, for example
 `https://raw.githubusercontent.com/lamiskin/pokecollector/<exact-fork-tag>/docs/release-notes/assets/<exact-fork-tag>/<file>.png`;
