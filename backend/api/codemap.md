@@ -29,6 +29,11 @@ Routers are registered centrally in `backend/main.py` via
   endpoints check `current_user.role == "admin"` inline (403).
 - **Session dependency.** Every DB-touching endpoint takes
   `db: Session = Depends(get_db)` (SQLAlchemy session from `database.py`).
+- **OIDC completion.** `auth.py` redeems browser-bound provider handoffs. A new
+  identity without a usable profile name receives a naming challenge before
+  account creation; name submission retains the original handoff's expiry and
+  one-use protection. Existing identities and explicit linking do not rename or
+  merge accounts.
 - **Schema layer.** `schemas.py` holds shared Pydantic request/response models
   (`CardBase`, `CollectionItemCreate/Response`, `ProfileUpdate`, …). Small
   module-local request models are defined inline where they are only used once

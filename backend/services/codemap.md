@@ -65,6 +65,16 @@ endpoints behind one `generate_text` call site. `exchange_rates.py` wraps
 Frankfurter with a DB-backed, refresh-interval cache. `suruga_ya_pricing.py`
 scrapes Suruga-ya via the Byparr sidecar.
 
+**OIDC profile enrichment.** `oidc_provider.py` validates discovery and signed ID
+tokens, then retrieves JSON UserInfo when advertised. The bearer access token is
+transient; an exact subject match binds optional profile claims to the validated
+identity. `oidc_identity.py` uses a sanitized profile hint only when provisioning
+a new local account; existing accounts resolve by issuer and subject without
+renaming or merging users. When a new identity has no usable hint, completion
+waits for an available user-chosen name before creating the account.
+`oidc_transactions.py` owns browser-bound one-use login/link state and handoffs;
+`oidc_link.py` completes explicit account linking.
+
 **Persisted rate limiting without secrets.** `gemini_rate_limit.py` (token-bucket
 pacing with interactive/background priority) and `provider_rate_limit.py`
 (blocking backoff for non-Gemini providers) persist state in DB tables keyed by

@@ -28,6 +28,12 @@ of that routing table.
 
 ## Design
 
+- **OIDC completion.** `OidcComplete` finishes the cookie-bound provider handoff
+  outside the authenticated app shell. When the server requests a name for a new
+  account, it shows a retryable naming form without establishing a session until
+  the server returns the normal login response. Existing logins and linking keep
+  their usual completion paths.
+
 - **Physical binders.** Collection `BinderDetail` composes `BinderLayoutPanel`
   alongside its existing Cards gallery. The panel owns revisioned layout reads,
   preview/settings and placement changes; the page still owns membership edits
