@@ -165,9 +165,27 @@ export const recognizeCard = async (imageFile, requestTimeoutSeconds) => {
 // Persistent background card-scan queue. Each photo is downscaled in the
 // browser first when it is large; a 50-photo batch is several hundred megabytes
 // straight off a modern phone, which is slow to upload and can hit the job cap.
-export const enqueueScanJob = async (files = [], individualPositions = [], binderId = null) => {
+//
+// The upload gets its own long timeout: the client-wide 30 s covers ordinary API
+// calls, but even a downscaled batch is tens of megabytes and minutes of mobile
+// uplink. With 30 s the browser aborted mid-body, the proxy answered 400 with an
+// empty response, and a phone showed only "The scan batch could not be
+// submitted." The server and proxy already allow this endpoint 200/205 MB and
+// minutes of transfer; the client was the odd one out.
+const SCAN_JOB_UPLOAD_TIMEOUT_MS = 30 * 60 * 1000
+
+export const enqueueScanJob = async (
+  files = [],
+  individualPositions = [],
+  binderId = null,
+  { onProgress } = {},
+) => {
   const formData = new FormData()
-  const uploads = await prepareImagesForUpload(files)
+  const uploads = await prepareImagesForUpload(files, {
+    // Downscaling a phone batch takes long enough to need its own feedback;
+    // the caller reports it alongside the upload instead of one silent wait.
+    onProgress: (done, total) => onProgress?.({ phase: 'prepare', done, total }),
+  })
   uploads.forEach(file => formData.append('files', file))
   formData.append('individual_positions', JSON.stringify(individualPositions))
   // Optional destination card list. Omitted entirely when unset, so a batch
@@ -177,6 +195,12 @@ export const enqueueScanJob = async (files = [], individualPositions = [], binde
   }
   return api.post('/cards/recognize/jobs', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: SCAN_JOB_UPLOAD_TIMEOUT_MS,
+    onUploadProgress: event => onProgress?.({
+      phase: 'upload',
+      loaded: event.loaded,
+      total: event.total,
+    }),
   }).then(r => r.data)
 }
 export const getScanJobs = () => api.get('/cards/recognize/jobs').then(r => r.data)
