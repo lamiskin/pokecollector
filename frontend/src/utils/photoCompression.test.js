@@ -165,4 +165,15 @@ describe('prepareImagesForUpload', () => {
     expect(prepared[1].name).toBe('large-one.jpg')
     expect(prepared[2].name).toBe('large-two.jpg')
   })
+
+  it('reports how far a batch has got', async () => {
+    stubBrowser()
+    const calls = []
+    await prepareImagesForUpload(
+      [photoFile(), photoFile()],
+      { onProgress: (done, total) => calls.push([done, total]) },
+    )
+    expect(calls.map(([done]) => done).sort()).toEqual([1, 2])
+    expect(calls.every(([, total]) => total === 2)).toBe(true)
+  })
 })

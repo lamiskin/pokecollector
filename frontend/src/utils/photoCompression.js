@@ -188,18 +188,23 @@ export async function prepareImageForUpload(file, options = {}) {
 
 /**
  * Prepares a batch in input order, with bounded parallelism so a long staged
- * batch does not decode every photo at once.
+ * batch does not decode every photo at once. `onProgress(done, total)` fires
+ * after each photo, for callers that want to show the wait.
  */
-export async function prepareImagesForUpload(files, options = {}) {
+export async function prepareImagesForUpload(files, { onProgress, ...options } = {}) {
   const list = Array.from(files || [])
   const prepared = new Array(list.length)
+  const report = typeof onProgress === 'function' ? onProgress : null
   let next = 0
+  let done = 0
 
   const worker = async () => {
     while (next < list.length) {
       const index = next
       next += 1
       prepared[index] = await prepareImageForUpload(list[index], options)
+      done += 1
+      report?.(done, list.length)
     }
   }
 

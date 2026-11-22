@@ -53,6 +53,9 @@ function PhotoPositionGuide({ title, description }) {
 export default function UnifiedCardScanner({ isOpen, onClose }) {
   const [stagedFiles, setStagedFiles] = useState([])
   const [submitting, setSubmitting] = useState(false)
+  // { phase: 'prepare', done, total } while photos are downscaled, then
+  // { phase: 'upload', loaded, total } while the batch is sent.
+  const [submitProgress, setSubmitProgress] = useState(null)
   const [destinationBinderId, setDestinationBinderId] = useState('')
   const [confirmation, setConfirmation] = useState(null)
   const [photoGuidePinned, setPhotoGuidePinned] = useState(false)
@@ -194,12 +197,14 @@ export default function UnifiedCardScanner({ isOpen, onClose }) {
   const startScanning = async () => {
     if (mode !== 'staging' || !stagedFiles.length || submitting) return
     setSubmitting(true)
+    setSubmitProgress(null)
     setMode('staging')
     try {
       const job = await enqueueScanJob(
         stagedFiles.map(item => item.file),
         individualPositions(stagedFiles, scannerConfiguration),
         destinationBinder ? destinationBinder.id : null,
+        { onProgress: setSubmitProgress },
       )
       setDestinationBinderId('')
       clearFiles()
@@ -209,7 +214,24 @@ export default function UnifiedCardScanner({ isOpen, onClose }) {
       toast.error(error?.response?.data?.detail || t('scanner.batchSubmitFailed'))
     } finally {
       setSubmitting(false)
+      setSubmitProgress(null)
     }
+  }
+
+  // The generic label already says what is happening; a count during
+  // downscaling and a percentage during the upload keep a phone batch from
+  // looking frozen for minutes. Both are numbers, so no extra translation.
+  const submitLabel = () => {
+    if (!submitting) return t('scanner.startScanning')
+    const label = t('scanner.submittingBatch')
+    if (submitProgress?.phase === 'prepare' && submitProgress.total) {
+      return `${label} ${submitProgress.done}/${submitProgress.total}`
+    }
+    if (submitProgress?.phase === 'upload' && submitProgress.total) {
+      const percent = Math.min(99, Math.floor((submitProgress.loaded / submitProgress.total) * 100))
+      return `${label} ${percent}%`
+    }
+    return label
   }
 
   return (
@@ -478,7 +500,7 @@ export default function UnifiedCardScanner({ isOpen, onClose }) {
                 className="btn-primary flex w-full items-center justify-center gap-2 py-3"
               >
                 {submitting ? <Loader2 size={16} className="animate-spin" /> : <ImagePlus size={16} />}
-                <span>{submitting ? t('scanner.submittingBatch') : t('scanner.startScanning')}</span>
+                <span>{submitLabel()}</span>
               </button>
             </>
           )}
