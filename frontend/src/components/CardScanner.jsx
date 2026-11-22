@@ -7,13 +7,14 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSettings } from '../contexts/SettingsContext'
 import { useConfirmDialog } from '../contexts/ConfirmDialogContext'
 import toast from 'react-hot-toast'
-import { CARD_VARIANTS, getDefaultVariant } from '../utils/cardVariants'
+import { CARD_VARIANTS, getSelectableVariants, getDefaultVariant } from '../utils/cardVariants'
 import TcgdexLanguageSelect from './TcgdexLanguageSelect'
 import { invalidateCardState, invalidateTcgdexFilterLanguages } from '../utils/queryInvalidation'
 import MoneyInput from './MoneyInput'
 import { parseMoneyInputValue } from '../utils/moneyInput'
 import { CardDisplay } from './card-system'
-import { tcgdexLanguageLabel } from '../utils/tcgdexLanguages'
+import { normalizeTcgdexLanguage, tcgdexLanguageLabel } from '../utils/tcgdexLanguages'
+import { useScanCatalogue } from '../hooks/useScanCatalogue'
 import { isSupportedScannerImage, SCANNER_IMAGE_ACCEPT } from '../utils/scannerImages'
 import { useDialogBehavior } from './ui/dialogBehavior'
 import PrintingDetailSelector from './PrintingDetailSelector'
@@ -126,22 +127,19 @@ export function ScanDestinationSummary({ binder }) {
 // catalogue's reference image is a different printing/copy. Skipped only
 // when the card already has a saved own photo (never overwritten).
 // A failed photo attach must never block adding the card itself.
-export function ScanAddModal({
-  match,
-  defaultLang,
-  getPhoto,
-  onClose,
-  onAdded,
-  addCard,
-  binderName = null,
-  preservePhotoBeforeAdd = false,
-}) {
+export function ScanAddModal(props) {
+  const initialLang = normalizeTcgdexLanguage(props.match.lang || props.match._lang || props.defaultLang)
+  return <ScanAddForm key={`${props.match.id}:${initialLang}`} {...props} initialLang={initialLang} />
+}
+
+function ScanAddForm({ match, initialLang, getPhoto, onClose, onAdded, addCard, binderName = null, preservePhotoBeforeAdd = false }) {
   const { t, exchangeRate, exchangeRateReady } = useSettings()
   const [quantity, setQuantity] = useState(1)
   const [condition, setCondition] = useState('NM')
-  const [variant, setVariant] = useState(() => getDefaultVariant(match))
+  const [variantChoice, setVariantChoice] = useState(null)
   const [printingDetails, setPrintingDetails] = useState([])
-  const [lang, setLang] = useState(match.lang || defaultLang || 'en')
+  const [lang, setLang] = useState(initialLang)
+  const { id: catalogueId, loading: catalogueLoading, card: catalogueCard } = useScanCatalogue(match.id, lang)
   const [purchasePrice, setPurchasePrice] = useState('')
   const [adding, setAdding] = useState(false)
   const queryClient = useQueryClient()
@@ -153,12 +151,24 @@ export function ScanAddModal({
     return () => { document.body.style.overflow = previousOverflow }
   }, [])
 
+  // Scanner flags, prices and finish guesses are deliberately never consulted.
+  const selectableVariants = getSelectableVariants(catalogueCard)
+  const selectableVariantKey = selectableVariants.join('|')
+  const validChoice = selectableVariants.includes(variantChoice)
+  const variant = validChoice ? variantChoice : (catalogueLoading ? '' : getDefaultVariant(catalogueCard))
+
+  // Reconcile late metadata/language changes without a disabled selected value
+  // or a stale payload. A still-supported nondefault choice is left untouched.
+  useEffect(() => {
+    if (!catalogueLoading && variantChoice && !validChoice) setVariantChoice(null)
+  }, [catalogueLoading, selectableVariantKey, variantChoice, validChoice])
+
   const handleAdd = async () => {
-    if (!exchangeRateReady) return
+    if (adding || catalogueLoading || !exchangeRateReady) return
     setAdding(true)
     try {
       const payload = {
-        card_id: match.id,
+        card_id: catalogueId,
         quantity,
         condition,
         variant,
@@ -244,10 +254,10 @@ export function ScanAddModal({
 
           <div className="space-y-3">
             {/* Language */}
-            <div>
-              <label className="text-xs text-text-muted mb-1.5 block font-medium">🌐 {t('lang.filter')}</label>
+            <label className="block">
+              <span className="text-xs text-text-muted mb-1.5 block font-medium">🌐 {t('lang.filter')}</span>
               <TcgdexLanguageSelect value={lang} onChange={setLang} className="select w-full" />
-            </div>
+            </label>
 
             {/* Quantity + Condition */}
             <div className="grid grid-cols-2 gap-3">
@@ -268,12 +278,13 @@ export function ScanAddModal({
             </div>
 
             {/* Variant */}
-            <div>
-              <label className="text-xs text-text-muted mb-1 block">✨ {t('card.variant')}</label>
-              <select value={variant} onChange={e => setVariant(e.target.value)} className="select">
-                {CARD_VARIANTS.map(v => <option key={v} value={v}>{v}</option>)}
+            <label className="block">
+              <span className="text-xs text-text-muted mb-1 block">✨ {t('card.variant')}</span>
+              <select value={variant} onChange={e => setVariantChoice(e.target.value)} className="select" disabled={adding}>
+                {catalogueLoading && <option value="" disabled>{t('common.loading')}</option>}
+                {CARD_VARIANTS.map(v => <option key={v} value={v} disabled={!selectableVariants.includes(v)} className="disabled:text-text-muted">{v}</option>)}
               </select>
-            </div>
+            </label>
 
             <div>
               <label className="text-xs text-text-muted mb-1 block">{t('printingDetails.label')}</label>
@@ -295,12 +306,12 @@ export function ScanAddModal({
           <div className="flex gap-2 mt-5">
             <button
               onClick={handleAdd}
-              disabled={adding || !exchangeRateReady}
+              disabled={adding || catalogueLoading || !exchangeRateReady}
               className="flex-1 py-3 rounded-xl font-black text-white flex items-center justify-center gap-2 transition-all"
               style={{ background: adding ? '#555' : '#e3000b', boxShadow: adding ? 'none' : '0 0 16px rgba(227,0,11,0.3)' }}
             >
-              {adding ? <Loader2 size={16} className="animate-spin" /> : <Plus size={16} />}
-              {adding ? t('scanner.adding') : t('scanner.addToCollection')}
+              {adding || catalogueLoading ? <Loader2 size={16} className="animate-spin" /> : <Plus size={16} />}
+              {adding ? t('scanner.adding') : catalogueLoading ? t('common.loading') : t('scanner.addToCollection')}
             </button>
             <button onClick={onClose} className="btn-ghost px-3">
               <X size={16} />

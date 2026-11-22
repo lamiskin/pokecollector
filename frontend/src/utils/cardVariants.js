@@ -59,6 +59,21 @@ export const getAvailableVariants = (card) => [
   card?.variants_first_edition && 'First Edition',
 ].filter(Boolean)
 
+// An incomplete catalogue is not a negative: only explicit false flags rule a
+// finish out, and only when at least one finish has positive catalogue evidence.
+// Contradictory positive prices win; an all-false/empty row remains unknown.
+export const getSelectableVariants = (card) => {
+  const available = getAvailableVariants(card)
+  if (!available.length) return CARD_VARIANTS
+  const flags = {
+    Normal: 'variants_normal',
+    Holo: 'variants_holo',
+    'Reverse Holo': 'variants_reverse',
+    'First Edition': 'variants_first_edition',
+  }
+  return CARD_VARIANTS.filter(variant => card?.[flags[variant]] !== false || available.includes(variant))
+}
+
 export const getDefaultVariant = (card) => {
   // Normal availability means the safest default is the plain/non-holo card.
   if (card?.variants_normal || hasVariantPriceEvidence(card, 'Normal')) return 'Normal'

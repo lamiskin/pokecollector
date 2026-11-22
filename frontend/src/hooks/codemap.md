@@ -16,7 +16,8 @@ the derived state + callbacks they need.
 
 The hooks fall into a few families:
 
-- **Debounce / data** — `useDebouncedValue`, `useVisibleTcgdexLanguages`
+- **Debounce / data** — `useDebouncedValue`, `useVisibleTcgdexLanguages`,
+  `useScanCatalogue` (language-specific catalogue finish evidence for scanner adds)
 - **Persistence / server sync** — `useDeckQuantitySync`
 - **URL state** — `useDynamicFilterUrlState`
 - **Navigation / scroll** — `useListScrollRestoration` (module of helpers + hooks)
@@ -82,6 +83,14 @@ against `getTcgdexFilterLanguages()` and returns an array-like object
 (`Object.assign([...languages], { isLoading })`) so consumers can `.map()` it
 while still reading `isLoading`. Consumers (`Collection`, `CardSearch`, `Sets`,
 `PokedexSpecies`) extract language `code`s from entries.
+
+**Scanner catalogue evidence (read path).**
+`useScanCatalogue(cardId, lang)` resolves a language-suffixed card identity and
+fetches canonical detail through `getCard`. Both `ScanAddModal` and `ScanQueue`'s
+express add use it; scanner-provided finish flags/prices are never inputs.
+Stale card/language responses are ignored, and explicitly foreign-source flags
+and prices are excluded independently. Unknown/error evidence remains an
+editable Normal fallback; acceptance waits for the initial lookup.
 
 **Deck quantity (write path).**
 `changeQuantity(entryId, renderedQuantity, delta)` clamps the next value to
