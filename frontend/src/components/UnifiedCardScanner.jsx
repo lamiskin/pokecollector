@@ -8,6 +8,7 @@ import { enqueueScanJob, getBinders, getScannerConfiguration } from '../api/clie
 import { ScanDestinationField, ScanDestinationSummary } from './CardScanner'
 import { useSettings } from '../contexts/SettingsContext'
 import { isSupportedScannerImage, SCANNER_IMAGE_ACCEPT } from '../utils/scannerImages'
+import { scanSubmitLabel } from '../utils/scanSubmitLabel'
 import {
   individualPositions,
   nextIndividualChoice,
@@ -218,21 +219,10 @@ export default function UnifiedCardScanner({ isOpen, onClose }) {
     }
   }
 
-  // The generic label already says what is happening; a count during
-  // downscaling and a percentage during the upload keep a phone batch from
-  // looking frozen for minutes. Both are numbers, so no extra translation.
-  const submitLabel = () => {
-    if (!submitting) return t('scanner.startScanning')
-    const label = t('scanner.submittingBatch')
-    if (submitProgress?.phase === 'prepare' && submitProgress.total) {
-      return `${label} ${submitProgress.done}/${submitProgress.total}`
-    }
-    if (submitProgress?.phase === 'upload' && submitProgress.total) {
-      const percent = Math.min(99, Math.floor((submitProgress.loaded / submitProgress.total) * 100))
-      return `${label} ${percent}%`
-    }
-    return label
-  }
+  // Two different waits share one button: shrinking the photos and uploading
+  // them. Naming them separately, each with a number, keeps a phone batch from
+  // looking frozen for minutes.
+  const submitLabel = () => scanSubmitLabel(t, { submitting, progress: submitProgress })
 
   return (
     <>
