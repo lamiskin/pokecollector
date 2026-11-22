@@ -8,6 +8,11 @@ thin and the same rule is applied identically everywhere.
 
 ## Responsibility
 
+- `oidcAuth.js`: strict completion-response parsing for login, linking and the
+  first-account naming challenge. Its injected-request completion runner only
+  applies a session for a token response; allowlisted status/code pairs identify
+  retryable name errors without rendering provider/server detail text.
+
 - `binderLayout.js`: numbered-side spread pairing, localized layout messages,
   private/public identity-aware location URLs, and stale deep-link resolution.
   It preserves physical gaps and never resolves coordinates to an unrelated

@@ -19,6 +19,11 @@ directly — they import typed helper functions from here instead. It encapsulat
 
 ## Design
 
+- **OIDC completion.** `completeOidcLogin` sends an empty object initially and a
+  chosen `username` only for the fallback naming step. The server-side handoff
+  cookie remains authoritative; completion failures preserve any existing local
+  session instead of invoking the generic unauthorized-session reset.
+
 - **Physical binder snapshots.** `getBinderLayout` bypasses HTTP caches;
   `previewBinderLayout`, `saveBinderLayout`, `moveBinderPlacement` and
   `undoBinderLayout` use `/binders/:id/layout` and `/placements`. Writes carry
