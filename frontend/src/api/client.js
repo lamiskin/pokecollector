@@ -1,4 +1,5 @@
 import axios from 'axios'
+import { prepareImageForUpload, prepareImagesForUpload } from '../utils/photoCompression'
 import { isPublicSharePath } from '../utils/publicRoutes'
 import {
   scannerRecognitionRequestTimeoutMs,
@@ -148,20 +149,26 @@ export const deleteCustomCard = (cardId) => api.delete(`/cards/custom/${cardId}`
 export const getCustomCards = () => api.get('/cards/custom')
 export const cloneCustomCard = (cardId) => api.post(`/cards/custom/${cardId}/clone`).then(r => r.data)
 
-// Card recognition via Gemini Vision
-export const recognizeCard = (imageFile, requestTimeoutSeconds) => {
+// Card recognition via Gemini Vision.
+// Large phone photos are downscaled here first, to the same edge the server
+// would shrink them to anyway: it cuts the upload, and the bytes the provider
+// sees are unchanged.
+export const recognizeCard = async (imageFile, requestTimeoutSeconds) => {
   const formData = new FormData()
-  formData.append('file', imageFile)
+  formData.append('file', await prepareImageForUpload(imageFile))
   return api.post('/cards/recognize', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
     timeout: scannerRecognitionRequestTimeoutMs(requestTimeoutSeconds),
   }).then(r => r.data)
 }
 
-// Persistent background card-scan queue.
-export const enqueueScanJob = (files = [], individualPositions = [], binderId = null) => {
+// Persistent background card-scan queue. Each photo is downscaled in the
+// browser first when it is large; a 50-photo batch is several hundred megabytes
+// straight off a modern phone, which is slow to upload and can hit the job cap.
+export const enqueueScanJob = async (files = [], individualPositions = [], binderId = null) => {
   const formData = new FormData()
-  files.forEach(file => formData.append('files', file))
+  const uploads = await prepareImagesForUpload(files)
+  uploads.forEach(file => formData.append('files', file))
   formData.append('individual_positions', JSON.stringify(individualPositions))
   // Optional destination card list. Omitted entirely when unset, so a batch
   // that was not given a destination behaves exactly as before.
@@ -221,10 +228,11 @@ export const fetchCollectionItemPhoto = (itemId) =>
 
 // For cards collected before the scanner kept photos, added by hand, or scanned
 // and resolved earlier — resolve discards the photo, so there is otherwise no
-// way to give those a picture. The backend strips EXIF and bounds the size.
-export const uploadCollectionItemPhoto = (itemId, file) => {
+// way to give those a picture. The backend strips EXIF and bounds the size;
+// downscaling large photos here avoids uploading megabytes it will discard.
+export const uploadCollectionItemPhoto = async (itemId, file) => {
   const form = new FormData()
-  form.append('file', file)
+  form.append('file', await prepareImageForUpload(file))
   // The header is required, not decoration: this client defaults every request
   // to application/json, so without the override the multipart body is sent
   // under the wrong content type and the server rejects it as a missing field.
