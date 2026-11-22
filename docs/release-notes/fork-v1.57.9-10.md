@@ -1,5 +1,5 @@
 <!-- Fork release 1.57.9-10 -->
-<!-- release-coverage: #36 -->
+<!-- release-coverage: #32 #36 -->
 
 ### Fixes and changes
 
@@ -36,6 +36,11 @@ application token is issued.
 schema migrations now run only when an OIDC mode is configured, so a database
 carried over from an earlier release keeps starting in `local` mode, including a
 SQLite database whose password column predates nullable SSO accounts.
+
+**The instance backup script is tracked in the repository.**
+`scripts/backup-instance.sh`, the wrapper the nightly Dev/Prod backup runs, now
+lives in the checkout instead of only on the host, so the same backup can be
+reproduced from a clone.
 
 ### Limitations and notes
 
