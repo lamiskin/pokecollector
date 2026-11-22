@@ -24,7 +24,7 @@ import { cardNumberMatches } from '../utils/cardNumbers'
 import { normalizeSearchText, textIncludes } from '../utils/textSearch'
 import { getEffectiveCardPrice } from '../utils/prices'
 import TcgdexLanguageSelect from '../components/TcgdexLanguageSelect'
-import { tcgdexLanguageLabel } from '../utils/tcgdexLanguages'
+import { normalizeTcgdexLanguage, tcgdexLanguageLabel } from '../utils/tcgdexLanguages'
 import { invalidateCardState, invalidateCollectionPhotoState, invalidateTcgdexFilterLanguages } from '../utils/queryInvalidation'
 import { useVisibleTcgdexLanguages } from '../hooks/useVisibleTcgdexLanguages'
 import { formatMoneyInputValue, parseMoneyInputValue } from '../utils/moneyInput'
@@ -33,8 +33,9 @@ import { useDebouncedValue } from '../hooks/useDebouncedValue'
 import PrintingDetailBadges from '../components/PrintingDetailBadges'
 import PrintingDetailSelector from '../components/PrintingDetailSelector'
 import PrintingDetailTagManager from '../components/PrintingDetailTagManager'
+import { getScanCatalogueEvidence } from '../hooks/useScanCatalogue'
 import { normalizePrintingDetailName, printingDetailNames } from '../utils/printingDetails'
-import { CARD_VARIANTS } from '../utils/cardVariants'
+import { CARD_VARIANTS, getAvailableVariants, getEditableVariants } from '../utils/cardVariants'
 import CardGroupSection from '../components/CardGroupSection'
 import { cardDexIds, formatDexNumber, formatSpeciesCounts, groupCollectionBySpecies, speciesSpriteUrl } from '../utils/species'
 
@@ -301,7 +302,7 @@ function CsvImportModal({ t, onClose, onChooseFile, onDownloadTemplate, isImport
 
 // ─── CollectionEditModal ────────────────────────────────────────────────────
 // Opens when clicking any card in the collection. Allows editing + deleting.
-function CollectionEditModal({ item, onClose }) {
+export function CollectionEditModal({ item, onClose }) {
   const { t, formatPrice, pricePrimaryField, exchangeRate, exchangeRateReady, settings } = useSettings()
   const confirmDialog = useConfirmDialog()
   const queryClient = useQueryClient()
@@ -335,7 +336,29 @@ function CollectionEditModal({ item, onClose }) {
   )
   const customImageInputId = useId()
   const ownPhotoInputId = useId()
+  const manageVariantId = useId()
+  const newVersionVariantId = useId()
   const photoItem = { ...item, has_scan_photo: hasOwnPhoto }
+
+  // Finish evidence only describes the row's own language. Switching language in
+  // this form repoints the row at a printing whose flags this modal has not
+  // fetched, so treat that as unknown rather than applying the old language's
+  // restrictions. The stored finish always stays selectable (getEditableVariants);
+  // with quantity > 1 a finish change retags every copy in the row.
+  const cardIdParts = String(item.card_id || card?.id || '').split('_')
+  const cardLanguage = card?.lang
+    ? normalizeTcgdexLanguage(card.lang, '')
+    : (cardIdParts.length > 1 ? normalizeTcgdexLanguage(cardIdParts.at(-1), '') : '')
+  const selectedLanguage = normalizeTcgdexLanguage(lang || 'en')
+  const variantEvidence = cardLanguage === selectedLanguage ? getScanCatalogueEvidence(card, selectedLanguage) : null
+  const availableVariants = getAvailableVariants(variantEvidence)
+  const selectableVariants = getEditableVariants(variantEvidence, item.variant || 'Normal')
+  const newVersionSelectedLanguage = normalizeTcgdexLanguage(newVersionLang || 'en')
+  const newVersionVariantEvidence = cardLanguage === newVersionSelectedLanguage
+    ? getScanCatalogueEvidence(card, newVersionSelectedLanguage)
+    : null
+  const newVersionAvailableVariants = getAvailableVariants(newVersionVariantEvidence)
+  const newVersionSelectableVariants = getEditableVariants(newVersionVariantEvidence, item.variant || 'Normal')
 
   useEffect(() => {
     setHasOwnPhoto(Boolean(item.has_scan_photo))
@@ -859,10 +882,15 @@ function CollectionEditModal({ item, onClose }) {
               </div>
 
               <div>
-                <label className="text-xs text-text-muted mb-1 block">✨ {t('card.variant')}</label>
-                <select value={variant} onChange={e => setVariant(e.target.value)} className="select">
-                  {CARD_VARIANTS.map(v => <option key={v} value={v}>{v}</option>)}
+                <label htmlFor={manageVariantId} className="text-xs text-text-muted mb-1 block">✨ {t('card.variant')}</label>
+                <select id={manageVariantId} value={variant} onChange={e => setVariant(e.target.value)} className="select">
+                  {CARD_VARIANTS.map(v => <option key={v} value={v} disabled={!selectableVariants.includes(v)} className="disabled:text-text-muted">{v}</option>)}
                 </select>
+                {availableVariants.length > 0 && (
+                  <p className="text-[10px] text-text-muted mt-1">
+                    📋 {t('card.availableVariants')}: {availableVariants.join(', ')}
+                  </p>
+                )}
               </div>
 
               <div>
@@ -1017,10 +1045,15 @@ function CollectionEditModal({ item, onClose }) {
               </div>
 
               <div>
-                <label className="text-xs text-text-muted mb-1 block">✨ {t('card.variant')}</label>
-                <select value={newVersionVariant} onChange={e => setNewVersionVariant(e.target.value)} className="select">
-                  {CARD_VARIANTS.map(v => <option key={v} value={v}>{v}</option>)}
+                <label htmlFor={newVersionVariantId} className="text-xs text-text-muted mb-1 block">✨ {t('card.variant')}</label>
+                <select id={newVersionVariantId} value={newVersionVariant} onChange={e => setNewVersionVariant(e.target.value)} className="select">
+                  {CARD_VARIANTS.map(v => <option key={v} value={v} disabled={!newVersionSelectableVariants.includes(v)} className="disabled:text-text-muted">{v}</option>)}
                 </select>
+                {newVersionAvailableVariants.length > 0 && (
+                  <p className="text-[10px] text-text-muted mt-1">
+                    📋 {t('card.availableVariants')}: {newVersionAvailableVariants.join(', ')}
+                  </p>
+                )}
               </div>
 
               <div>

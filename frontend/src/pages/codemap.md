@@ -175,5 +175,6 @@ of that routing table.
 - **`utils/scanJobs`** centralizes the scan-queue query key and polling helpers so
   `HomeScreen`, `CardSearch`, and `ScanQueue` agree on the same job state.
 - **`hooks/useScanCatalogue`** supplies language-specific finish evidence to
-  `ScanQueue`'s express acceptance and the editable scan-add form; the button
-  label and submitted variant use the same catalogue result, not scanner guesses.
+  `ScanQueue`'s express acceptance, the editable scan-add form, and the collection
+  edit modal's finish selects; labels and submitted variants use the same
+  catalogue result, not scanner guesses.

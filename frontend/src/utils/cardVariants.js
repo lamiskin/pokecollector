@@ -74,6 +74,16 @@ export const getSelectableVariants = (card) => {
   return CARD_VARIANTS.filter(variant => card?.[flags[variant]] !== false || available.includes(variant))
 }
 
+// Edit forms keep the stored finish selectable even when today's evidence
+// contradicts it: the catalogue may have been corrected after the row was
+// recorded, and disabling it would either trap the existing value or silently
+// rewrite every copy in the row.
+export const getEditableVariants = (card, storedVariant) => {
+  const selectable = getSelectableVariants(card)
+  if (!storedVariant || selectable.includes(storedVariant)) return selectable
+  return [...selectable, storedVariant]
+}
+
 export const getDefaultVariant = (card) => {
   // Normal availability means the safest default is the plain/non-holo card.
   if (card?.variants_normal || hasVariantPriceEvidence(card, 'Normal')) return 'Normal'

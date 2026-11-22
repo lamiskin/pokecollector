@@ -414,6 +414,13 @@ choices reset to the catalogue default before submission. The card-detail form
 also treats a different selected card language as unknown rather than applying
 the original printing's restrictions.
 
+The collection edit modal (`Collection` → **Manage copies**, including **Add
+another version**) applies the same language-aware gate. It differs in one
+respect: the row's stored finish always stays selectable, because the catalogue
+may have been corrected after the row was recorded and a disabled option would
+trap or silently rewrite it. Changing the finish on a row with quantity > 1
+retags every copy in that row.
+
 Both paths atomically add and resolve the scan before opening the next
 unresolved photo (`openNextReview` in `ScanQueue.jsx`); a failed request stays
 on the current review. A candidate whose printed set total contradicts the
