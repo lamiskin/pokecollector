@@ -455,7 +455,11 @@ test('pocket artwork names the printing and shows the owner photo only in privat
   // The public snapshot carries no variant and no scan-photo flag, so neither
   // marker may appear, and no private photo may be requested.
   const publicPhotos = []
-  page.on('request', request => { if (request.url().includes('/photo')) publicPhotos.push(request.url()) })
+  // Match the endpoint path, not a substring: the module that shrinks uploads is
+  // served as /src/utils/photoCompression.js and is not a photo request.
+  page.on('request', request => {
+    if (new URL(request.url()).pathname.endsWith('/photo')) publicPhotos.push(request.url())
+  })
   await page.goto('/u/example/binder/11')
   const publicTile = page.locator('li.binder-pocket', { has: page.locator('[data-page="1"][data-slot="2"]') })
   await expect(publicTile).toBeVisible()
