@@ -1,0 +1,27 @@
+name: Pull Request Title
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  pr-title:
+    if: github.event.deleted != true
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test the title check
+        run: node --test scripts/check-pr-title.test.mjs
+
+      - name: Check the pull request title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+          node scripts/check-pr-title.mjs
+          echo "::notice::Title: $PR_TITLE"
