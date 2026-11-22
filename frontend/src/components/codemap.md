@@ -74,10 +74,14 @@ and `../api`, and `../pages` owns routing and orchestration.
    `enqueueScanJob`, then navigates to `/scans`. `ScanReview` renders each queued
    item (`ScanItemPanel`) with candidate matches (`CandidateGrid`) and a
    linked-zoom `CardZoomModal`. Confirming a match opens `ScanAddModal`
-   (`CardScanner.jsx`); the comparison's **Add as NM · Normal** action skips
-   that form and files one NM/normal copy directly. `ScanQueue`'s `JobDetail`
-   sends either request and both best-effort attach the scan photo via
-   `attachScanFallbackPhoto` — a photo failure never blocks the add.
+   (`CardScanner.jsx`); both the form and `ScanQueue`'s express add read canonical
+   finish availability through `useScanCatalogue`, ignoring scanner foil guesses.
+   The comparison's **Add as NM · {variant}** action displays and files that
+   catalogue default, with quantity one and NM condition. `JobDetail` sends
+   either request and both best-effort attach the scan photo via
+   `attachScanFallbackPhoto` — a photo failure never blocks the add. Both scan-add
+   and card-detail add forms use `getSelectableVariants` to disable explicitly
+   excluded finishes while leaving unknown evidence editable.
 2. **Display.** Pages fetch collection/search/set rows, normalize them with
    `withCollectionItemState` (owned/quantity/variant), and render through
    `CollectionCardDisplay` / `CollectionCardIdentity` / `CollectionCardRow` or a

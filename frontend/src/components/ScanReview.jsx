@@ -256,6 +256,7 @@ const zoomStyle = ({ scale, x, y }) => scale === 1 ? undefined : {
 
 export function CardZoomModal({
   card, photoUrl, onClose, t, matches, index = 0, onIndex, onAccept, onQuickAdd, quickAddPending = false,
+  quickAddVariant = null, quickAddLoading = false,
   jobId, itemId, nameEn, footer,
 }) {
   const canNavigate = Array.isArray(matches) && matches.length > 1 && onIndex
@@ -611,9 +612,8 @@ export function CardZoomModal({
               </button>
             )}
           </div>
-          {/* One tap, no add form: the reviewer has already said this is the
-              card, and only wants it counted. NM/normal are the defaults the
-              form would have offered anyway. On a wide screen the hairline
+          {/* One tap, no add form: use the same catalogue finish default as the
+              form, with NM still assumed. On a wide screen the hairline
               separates it from the stepper so the two read as different
               kinds of action rather than one cluster. */}
           {onQuickAdd && (
@@ -623,15 +623,15 @@ export function CardZoomModal({
             <button
               type="button"
               onClick={() => onQuickAdd(card)}
-              disabled={quickAddPending}
-              aria-busy={quickAddPending || undefined}
-              title={t('scanner.quickAddHint')}
+              disabled={quickAddPending || quickAddLoading || !quickAddVariant}
+              aria-busy={quickAddPending || quickAddLoading || undefined}
+              title={quickAddLoading ? t('common.loading') : t('scanner.quickAddHint').replace('{variant}', quickAddVariant || '')}
               className="flex cursor-pointer items-center gap-1.5 rounded-xl border border-white/25 bg-white/[0.06] px-3.5 py-2 text-sm font-semibold text-white/90 transition-colors hover:border-white/40 hover:bg-white/15 disabled:cursor-default disabled:opacity-60"
             >
-              {quickAddPending
+              {quickAddPending || quickAddLoading
                 ? <Loader2 size={15} className="animate-spin" aria-hidden />
                 : <Plus size={15} aria-hidden />}
-              {t('scanner.quickAdd')}
+              {quickAddLoading ? t('common.loading') : t('scanner.quickAdd').replace('{variant}', quickAddVariant || '')}
             </button>
           )}
         </div>

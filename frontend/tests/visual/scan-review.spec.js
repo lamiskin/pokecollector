@@ -313,8 +313,8 @@ test('a failed atomic add keeps the current review open and does not advance', a
 })
 
 // The quick add sits beside Accept match and deliberately skips the add form:
-// one NM, normal-printing copy of the candidate on screen, with the match's own
-// language. It must not open the form, must send exactly those defaults, and
+// one NM copy of the candidate on screen, with the match's own language. With
+// unknown catalogue evidence it falls back to Normal. It must not open the form,
 // must leave the resolved item without the action (that view is read-only).
 test('quick add files the card as NM normal without opening the add form', async ({ page }) => {
   const api = await installScanReviewApi(page)
@@ -326,7 +326,7 @@ test('quick add files the card as NM normal without opening the add form', async
   await expect(quickAdd).toBeVisible()
   await expect(quickAdd).toHaveAttribute(
     'title',
-    'Add this card now as Near Mint, normal printing — no details to fill in.',
+    'Add this card now as Near Mint, Normal — using the catalogue finish default, not a scanner guess.',
   )
 
   await quickAdd.click()

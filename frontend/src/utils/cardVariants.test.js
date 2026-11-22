@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { getAvailableVariants, getOwnedVariants } from './cardVariants'
+import { getAvailableVariants, getDefaultVariant, getOwnedVariants } from './cardVariants'
 
 const row = (over = {}) => ({
   id: 1, card_id: 'sv01-003_en', card: { id: 'sv01-003_en', name: 'Card' },
@@ -86,6 +86,24 @@ describe('getOwnedVariants', () => {
 
   it('returns an empty array for no rows', () => {
     expect(getOwnedVariants([])).toEqual([])
+  })
+})
+
+describe('getDefaultVariant (manual and scan catalogue defaults)', () => {
+  it.each([
+    ['holo only', { variants_holo: true }, 'Holo'],
+    ['reverse only', { variants_reverse: true }, 'Reverse Holo'],
+    ['Normal and reverse', { variants_normal: true, variants_reverse: true }, 'Normal'],
+    ['holo and reverse', { variants_holo: true, variants_reverse: true }, 'Reverse Holo'],
+    ['missing metadata', undefined, 'Normal'],
+    ['null metadata', null, 'Normal'],
+    ['empty metadata', {}, 'Normal'],
+    ['all false', { variants_normal: false, variants_reverse: false, variants_holo: false, variants_first_edition: false }, 'Normal'],
+    ['Normal pricing contradicts holo-only flags', { variants_holo: true, variants_normal: false, price_tcg_normal_market: 0.5 }, 'Normal'],
+    ['positive reverse pricing only', { variants_reverse: false, price_tcg_reverse_market: 0.5 }, 'Reverse Holo'],
+    ['positive holo pricing only', { variants_holo: false, price_tcg_holo_market: '0.5' }, 'Holo'],
+  ])('defaults %s to %s', (_description, card, expected) => {
+    expect(getDefaultVariant(card)).toBe(expected)
   })
 })
 

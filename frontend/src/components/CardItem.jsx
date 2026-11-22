@@ -10,11 +10,12 @@ import { useConfirmDialog } from '../contexts/ConfirmDialogContext'
 import toast from 'react-hot-toast'
 import clsx from 'clsx'
 import { cardImageUrl, resolveCardImageUrl } from '../utils/imageUrl'
-import { CARD_VARIANTS, getAvailableVariants, getDefaultVariant } from '../utils/cardVariants'
+import { CARD_VARIANTS, getAvailableVariants, getSelectableVariants, getDefaultVariant } from '../utils/cardVariants'
+import { getScanCatalogueEvidence, getScanCatalogueId } from '../hooks/useScanCatalogue'
 import MoneyInput from './MoneyInput'
 import CardLocations from './binders/CardLocations'
 import { getCardPriceValue, getEffectiveCardPrice, getPrimaryCardPrice } from '../utils/prices'
-import { tcgdexLanguageLabel } from '../utils/tcgdexLanguages'
+import { normalizeTcgdexLanguage, tcgdexLanguageLabel } from '../utils/tcgdexLanguages'
 import TcgdexLanguageSelect from './TcgdexLanguageSelect'
 import { invalidateCardState, invalidateTcgdexFilterLanguages } from '../utils/queryInvalidation'
 import { parseMoneyInputValue } from '../utils/moneyInput'
@@ -548,7 +549,7 @@ export function CardModal({ card, onClose, onEdit, defaultLang = 'en', ownedItem
   const [actionError, setActionError] = useState(null)
   const [quantity, setQuantity] = useState(1)
   const [condition, setCondition] = useState('NM')
-  const [variant, setVariant] = useState(() => getDefaultVariant(card))
+  const [variantChoice, setVariantChoice] = useState(null)
   const [printingDetails, setPrintingDetails] = useState([])
   const [collectionLang, setCollectionLang] = useState(card.lang || defaultLang || 'en')
   const [purchasePrice, setPurchasePrice] = useState('')
@@ -558,6 +559,7 @@ export function CardModal({ card, onClose, onEdit, defaultLang = 'en', ownedItem
   const [customImageVersion, setCustomImageVersion] = useState(0)
   const [localOwnedItems, setLocalOwnedItems] = useState(() => ownedItems || card.owned_items || [])
   const customImageInputId = useId()
+  const variantInputId = useId()
   const { t, formatPrice, pricePrimary, pricePrimaryField, exchangeRate, exchangeRateReady } = useSettings()
   const queryClient = useQueryClient()
   const navigate = useNavigate()
@@ -618,15 +620,24 @@ export function CardModal({ card, onClose, onEdit, defaultLang = 'en', ownedItem
   const modalOwnedItems = localOwnedItems
   const detailedOwnedQuantity = modalOwnedItems.reduce((sum, item) => sum + (Number(item.quantity) || 0), 0)
   const ownedQuantity = modalOwnedItems.length > 0 ? detailedOwnedQuantity : (card.owned_quantity ?? 0)
-  const availableVariants = getAvailableVariants(card)
-  const selectableVariants = availableVariants.length > 0 ? availableVariants : CARD_VARIANTS
-  const availableVariantKey = availableVariants.join('|')
+  const selectedLanguage = normalizeTcgdexLanguage(collectionLang)
+  const cardIdParts = String(card.id).split('_')
+  const cardLanguage = card.lang
+    ? normalizeTcgdexLanguage(card.lang, '')
+    : (cardIdParts.length > 1 ? normalizeTcgdexLanguage(cardIdParts.at(-1), '') : '')
+  // This modal has not fetched the selected language's printing. Legacy null
+  // source fields only trust evidence for the catalogue card's own language.
+  const variantEvidence = cardLanguage === selectedLanguage
+    ? getScanCatalogueEvidence(card, selectedLanguage)
+    : null
+  const availableVariants = getAvailableVariants(variantEvidence)
+  const selectableVariants = getSelectableVariants(variantEvidence)
+  const selectableVariantKey = selectableVariants.join('|')
+  const variant = selectableVariants.includes(variantChoice) ? variantChoice : getDefaultVariant(variantEvidence)
 
   useEffect(() => {
-    if (availableVariants.length > 0 && !availableVariants.includes(variant)) {
-      setVariant(getDefaultVariant(card))
-    }
-  }, [card.id, availableVariantKey, variant])
+    if (variantChoice && !selectableVariants.includes(variantChoice)) setVariantChoice(null)
+  }, [card.id, selectableVariantKey, variantChoice])
 
   const addMutation = useMutation({
     mutationFn: (data) => addToCollection(data),
@@ -891,9 +902,9 @@ export function CardModal({ card, onClose, onEdit, defaultLang = 'en', ownedItem
                 </div>
               </div>
               <div>
-                <label className="text-xs text-text-muted mb-1 block font-medium">✨ {t('card.variant')}</label>
-                <select value={variant} onChange={(e) => setVariant(e.target.value)} className="select">
-                  {selectableVariants.map(v => <option key={v} value={v}>{v}</option>)}
+                <label htmlFor={variantInputId} className="text-xs text-text-muted mb-1 block font-medium">✨ {t('card.variant')}</label>
+                <select id={variantInputId} value={variant} onChange={(e) => setVariantChoice(e.target.value)} className="select">
+                  {CARD_VARIANTS.map(v => <option key={v} value={v} disabled={!selectableVariants.includes(v)} className="disabled:text-text-muted">{v}</option>)}
                 </select>
                 {availableVariants.length > 0 && (
                   <p className="text-[10px] text-text-muted mt-1">
@@ -928,11 +939,11 @@ export function CardModal({ card, onClose, onEdit, defaultLang = 'en', ownedItem
 
               <div className="flex gap-2">
                 <button className="btn-primary flex-1" onClick={() => addMutation.mutate({
-                  card_id: resolvedCardId, quantity, condition,
+                  card_id: card.is_custom ? resolvedCardId : getScanCatalogueId(resolvedCardId, selectedLanguage), quantity, condition,
                   variant,
                   printing_details: printingDetails,
                   purchase_price: parseMoneyInputValue(purchasePrice, exchangeRate),
-                  lang: collectionLang,
+                  lang: selectedLanguage,
                 })} disabled={addMutation.isPending || !exchangeRateReady}>
                   <Plus size={16} /> {addMutation.isPending ? t('card.adding') : t('card.addToCollection')}
                 </button>

@@ -168,3 +168,6 @@ of that routing table.
   page (e.g. editing a collection item) refreshes dependent views in another.
 - **`utils/scanJobs`** centralizes the scan-queue query key and polling helpers so
   `HomeScreen`, `CardSearch`, and `ScanQueue` agree on the same job state.
+- **`hooks/useScanCatalogue`** supplies language-specific finish evidence to
+  `ScanQueue`'s express acceptance and the editable scan-add form; the button
+  label and submitted variant use the same catalogue result, not scanner guesses.

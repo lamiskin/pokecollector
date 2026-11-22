@@ -69,7 +69,9 @@ transform for display:
   `cardmarket.prices` / `pricing.cardmarket`.
 - `cardVariants.getAvailableVariants` / `getOwnedVariants` / `getCardOwnedVariants`
   determine which of the four canonical prints exist and which the user owns, collapsing
-  condition-only duplicates; `getCardVariantEffectClass` maps a variant to a CSS animation
+  condition-only duplicates. `getSelectableVariants` keeps unknown finishes editable,
+  excluding only explicit false flags with positive catalogue evidence and no
+  contradictory finish price. `getCardVariantEffectClass` maps a variant to a CSS animation
   class, with `EFFECT_PRIORITY` keeping grouped tiles to a single stable effect.
 - `groupCardsByPrint` folds a public binder's flat one-entry-per-print list into
   one-tile-per-card (relying on the API's set→number→variant ordering for contiguity) and

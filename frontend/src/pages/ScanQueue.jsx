@@ -27,6 +27,9 @@ import { formatRetryCountdown } from '../utils/retryCountdown'
 import { searchGoogleByPhoto } from '../utils/cardLookup'
 import { allocationNotice } from '../utils/scanAllocationNotice'
 import { invalidateCardState, invalidateTcgdexFilterLanguages } from '../utils/queryInvalidation'
+import { useScanCatalogue } from '../hooks/useScanCatalogue'
+import { getDefaultVariant } from '../utils/cardVariants'
+import { normalizeTcgdexLanguage } from '../utils/tcgdexLanguages'
 
 function useRetryClock(enabled) {
   const [now, setNow] = useState(() => Date.now())
@@ -199,6 +202,9 @@ function JobDetail({ jobId, onObscuredChange }) {
   // Called unconditionally and above the early returns below: hooks cannot
   // sit behind a loading branch. It no-ops until a review is actually open.
   const reviewPhoto = useScanItemPhoto(jobId, reviewItem)
+  const reviewLang = normalizeTcgdexLanguage(reviewMatch?.lang || reviewMatch?._lang || reviewItem?.recognized?.language)
+  const reviewCatalogue = useScanCatalogue(reviewItem?.resolved ? null : reviewMatch?.id, reviewLang)
+  const quickAddVariant = reviewCatalogue.loading ? null : getDefaultVariant(reviewCatalogue.card)
 
   // Walk to the next photo still worth looking at, so a batch can be cleared
   // without going back to the list between cards. Anything already resolved or
@@ -228,12 +234,10 @@ function JobDetail({ jobId, onObscuredChange }) {
     toast(t('scanner.searchByPhotoSaved'), { duration: 6000 })
   }
 
-  // Add the shown candidate exactly as the reviewer's default would be — one
-  // NM, normal-printing copy — without opening the add form. Everything the
-  // form would have prefilled is what the payload says, so this is the same
-  // request the form sends, just without the round trip through a dialog.
+  // The displayed finish and submitted finish share the same catalogue result.
+  // NM and quantity one remain express defaults, not scanner predictions.
   const quickAdd = async (item, card) => {
-    if (quickAddItemId != null) return
+    if (quickAddItemId != null || reviewCatalogue.loading || !quickAddVariant || card.id !== reviewMatch?.id) return
     setQuickAddItemId(item.id)
     try {
       // Resolving a queued scan deletes its stored source photo, so the bytes
@@ -243,13 +247,13 @@ function JobDetail({ jobId, onObscuredChange }) {
         ? await fetchScanJobItemImageBlob(jobId, item.id).catch(() => null)
         : null
       const result = await resolveAndAddScanJobItem(jobId, item.id, {
-        card_id: card.id,
+        card_id: reviewCatalogue.id,
         confirmed_card_id: card.tcg_card_id,
         quantity: 1,
         condition: 'NM',
-        variant: 'Normal',
+        variant: quickAddVariant,
         printing_details: [],
-        lang: card.lang || item.recognized?.language || 'en',
+        lang: reviewLang,
       })
       // Never allowed to undo the add.
       await attachScanFallbackPhoto({
@@ -373,6 +377,8 @@ function JobDetail({ jobId, onObscuredChange }) {
             ? undefined
             : card => quickAdd(reviewItem, card)}
           quickAddPending={quickAddItemId === reviewItem.id}
+          quickAddVariant={quickAddVariant}
+          quickAddLoading={reviewCatalogue.loading}
           // Dismissing mid-add would let the finished request walk the batch on
           // under a closed viewer, so the comparison stays put until it settles.
           onClose={() => { if (quickAddItemId == null) setReview(null) }}
