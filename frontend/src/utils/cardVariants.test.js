@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { getAvailableVariants, getDefaultVariant, getOwnedVariants } from './cardVariants'
+import { CARD_VARIANTS, getAvailableVariants, getDefaultVariant, getOwnedVariants } from './cardVariants'
 
 const row = (over = {}) => ({
   id: 1, card_id: 'sv01-003_en', card: { id: 'sv01-003_en', name: 'Card' },
@@ -128,7 +128,7 @@ describe('getAvailableVariants', () => {
   })
 })
 
-import { getCardOwnedVariants } from './cardVariants'
+import { getCardOwnedVariants, getEditableVariants } from './cardVariants'
 
 describe('card tile ownership normalization', () => {
   it('prefers owned_variants over owned_items', () => {
@@ -147,6 +147,19 @@ describe('card tile ownership normalization', () => {
   })
 })
 
+
+describe('getEditableVariants', () => {
+  it('keeps the stored finish selectable when the catalogue contradicts it', () => {
+    const card = { variants_normal: false, variants_reverse: false, variants_holo: true, variants_first_edition: false }
+    expect(getEditableVariants(card, 'Normal')).toEqual(['Holo', 'Normal'])
+    expect(getEditableVariants(card, 'Holo')).toEqual(['Holo'])
+  })
+
+  it('leaves every finish editable without positive evidence', () => {
+    expect(getEditableVariants(null, 'Reverse Holo')).toEqual(CARD_VARIANTS)
+    expect(getEditableVariants({}, 'Normal')).toEqual(CARD_VARIANTS)
+  })
+})
 
 describe('advanced effect independence', () => {
   it('does not introduce a synthetic physical finish', () => {
