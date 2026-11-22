@@ -113,10 +113,15 @@ git log --oneline main..feature/scanner-rotation
 git diff main...feature/scanner-rotation
 # Only when the user authorizes publishing and opening the PR:
 git push -u origin feature/scanner-rotation
-gh pr create --repo Git-Romer/pokecollector --base main --head lamiskin:feature/scanner-rotation
+gh pr create --repo Git-Romer/pokecollector --base main \
+  --head lamiskin:feature/scanner-rotation \
+  --title 'feat: rotate scanner batches between providers'
 ```
 
-Use the existing upstream PR template and report validation. Never submit
+Give every PR, upstream or fork, a title that starts with its Conventional
+Commit type (`feat:`, `fix:`, `docs:`, `chore:`, `build:`, `ci:` and so on). The
+`Pull Request Title` workflow enforces this on fork PRs. Use the existing
+upstream PR template and report validation. Never submit
 `personal/*`, `sync/*`, `release/*`, `dev` or `fork/main` upstream.
 
 For acceptance into the fork, in the clean stable worktree, merge only an

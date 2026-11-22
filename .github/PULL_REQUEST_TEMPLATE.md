@@ -1,3 +1,10 @@
+<!--
+Title: start it with a Conventional Commit type and a colon, for example
+"feat: add binder pages", "fix: keep scan batches uploading" or
+"docs(fork): register fork-v1.57.9-7". The Pull Request Title check fails other
+forms; see AGENTS.md and docs/FORK_WORKFLOW.md.
+-->
+
 ## What and why
 
 <!-- Describe the user problem and how this change addresses it. -->

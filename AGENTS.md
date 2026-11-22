@@ -28,7 +28,8 @@ intentionally excludes tests, documentation and translation catalogs.
   `docs:`, `chore:`, `build:`, etc.; an optional scope is fine, e.g.
   `docs(fork):`). Keep the summary concise and lowercase after the prefix.
   This is separate from branch naming: fork-only branches remain `personal/*`
-  and release branches remain `release/*`.
+  and release branches remain `release/*`. The `Pull Request Title` workflow
+  enforces this; fix a failing title before review instead of merging around it.
 - PRs that change user-visible UI or visuals must include screenshots of the
   affected states (desktop/mobile where relevant), or explain why screenshots
   are not relevant or feasible. Release notes must include screenshots when

@@ -56,7 +56,9 @@ Prefix every PR title with its Conventional Commit type, for example `feat:`,
 `fix:`, `docs:`, `chore:` or `build:`. A scope is optional, as in
 `docs(fork):`; use lowercase type/scope and a concise summary. This title format
 is distinct from branch prefixes: fork-only PR branches still use `personal/*`,
-and release PR branches use `release/*`.
+and release PR branches use `release/*`. The `Pull Request Title` workflow
+(`.github/workflows/pr-title.yml`, `scripts/check-pr-title.mjs`) fails a PR whose
+title does not follow this format.
 
 ## Stages and destinations
 
