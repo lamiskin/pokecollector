@@ -1793,6 +1793,7 @@
     "noPhotosStaged": "Take photos or choose them from your gallery.",
     "startScanning": "Start scanning",
     "submittingBatch": "Uploading photos…",
+    "preparingPhotos": "Preparing photos…",
     "discardStagedConfirm": "Discard all staged photos and close the scanner?",
     "batchSubmitFailed": "The scan batch could not be submitted.",
     "batchLimitReached": "A batch can contain at most 50 photos.",
