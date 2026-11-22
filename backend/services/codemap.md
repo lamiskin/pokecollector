@@ -170,4 +170,5 @@ back to the `api/recognize.py` and `api/scan_jobs.py` routers.
   `collection_variants`, `binder_allocations`, `binder_csv`, `wishlist_missing`,
   `public_profile`, `public_profile_feature`, `text_search`.
 - **Ops**: `auth`, `scheduler`, `telegram`, `pre_upgrade_backup`, `postgres_cli`,
-  `debug_logging`, `analytics`.
+  `debug_logging`, `analytics`, `access_log` (uvicorn access-log query redaction
+  for OIDC paths).

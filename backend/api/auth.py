@@ -1,4 +1,6 @@
 import json
+import hashlib
+import itertools
 import logging
 import os
 import threading
@@ -21,6 +23,7 @@ from services.auth import (
     decode_token,
     has_valid_password_hash,
     hash_password,
+    secret_fingerprint,
     verify_password,
 )
 from services.auth_admin import (
@@ -63,6 +66,7 @@ from services.oidc_transactions import (
     decrypted_code_verifier,
     decrypted_nonce,
     generate_transaction_secret,
+    handoff_operation,
     invalidate_identity_transactions,
     invalidate_user_transactions,
     preview_handoff_transaction,
@@ -263,13 +267,52 @@ _OIDC_ALLOWED_ERROR_CODES = frozenset(
 _OIDC_RATE_LIMIT_MAX = 10
 _OIDC_RATE_LIMIT_WINDOW_SECONDS = 60.0
 _OIDC_RATE_LIMIT_MAX_BUCKETS = 2048
+# Entries inspected per request once the map is over its bound.
+_OIDC_RATE_LIMIT_PRUNE_BATCH = 64
 _oidc_rate_state: dict[tuple[str, str], list[float]] = {}
 _oidc_rate_lock = threading.Lock()
 
 
+def _oidc_provider_cache_key(config) -> tuple:
+    """Everything that changes the adapter's behaviour, and nothing else.
+
+    The client secret is keyed by a keyed fingerprint rather than stored raw, so
+    the module-level cache never holds a secret; a changed secret still yields a
+    new key (and therefore a new adapter).
+    """
+    return (
+        config.issuer_url,
+        config.client_id,
+        secret_fingerprint("oidc-provider-cache", config.client_secret),
+        config.redirect_uri,
+        config.display_name,
+    )
+
+
+_oidc_provider_cache: dict[tuple, OidcProvider] = {}
+_oidc_provider_cache_lock = threading.Lock()
+
+
 def _build_oidc_provider(config):
-    """Construct the provider adapter (tests patch this boundary)."""
-    return OidcProvider(config)
+    """Return the process-wide provider adapter for this configuration.
+
+    Discovery metadata and JWKS are cached inside the adapter for a bounded
+    window; building a fresh adapter per request would re-fetch both on every
+    sign-in. A deployment has one configured provider, so the cache keeps only
+    the active key and drops an adapter built for a previous configuration
+    (for example after the issuer, client or redirect URI changed).
+
+    Tests patch this boundary to supply a synthetic provider.
+    """
+    key = _oidc_provider_cache_key(config)
+    with _oidc_provider_cache_lock:
+        provider = _oidc_provider_cache.get(key)
+        if provider is None:
+            # Construction is pure validation; all network work is lazy.
+            provider = OidcProvider(config)
+            _oidc_provider_cache.clear()
+            _oidc_provider_cache[key] = provider
+        return provider
 
 
 def _oidc_json(status_code: int, content: dict) -> JSONResponse:
@@ -365,18 +408,46 @@ def _purge_expired_bounded(db: Session) -> None:
         logger.warning("OIDC expired-transaction cleanup failed")
 
 
+def _oidc_rate_limit_key(request: Request, bucket: str) -> tuple[str, str]:
+    """Rate-limit bucket: the browser-binding cookie when present, else the IP.
+
+    The HttpOnly browser-binding cookie is issued by ``/oidc/start`` and only a
+    digest of it is used here, so it is never logged or rendered. Keying on it
+    keeps one browser from exhausting another's budget behind a shared proxy
+    (the bundled nginx forwards every user from one container address).
+
+    Requests without the cookie (including the first ``/oidc/start`` of a new
+    browser, which mints it) fall back to the client address. Anonymous starts
+    therefore stay IP-keyed, so an OIDC-only deployment exposed beyond loopback
+    must still enforce a shared limit at its ingress.
+
+    ``X-Forwarded-For`` is deliberately ignored: it is client-controlled here.
+    """
+    cookie = request.cookies.get(OIDC_BROWSER_COOKIE)
+    if cookie:
+        digest = hashlib.sha256(cookie.encode("utf-8")).hexdigest()
+        return (bucket, "browser:" + digest)
+    client = request.client
+    host = client.host if client is not None and client.host else "unknown"
+    return (bucket, "ip:" + host)
+
+
 def _consume_oidc_rate_limit(request: Request, bucket: str) -> bool:
     """Per-process fixed-window limiter; returns False when throttled."""
     now = time.monotonic()
-    client = request.client
-    client_key = client.host if client is not None and client.host else "unknown"
-    key = (bucket, client_key)
+    key = _oidc_rate_limit_key(request, bucket)
     with _oidc_rate_lock:
         if len(_oidc_rate_state) > _OIDC_RATE_LIMIT_MAX_BUCKETS:
             cutoff = now - _OIDC_RATE_LIMIT_WINDOW_SECONDS
-            for existing_key, stamps in list(_oidc_rate_state.items()):
+            # Bounded sweep: at most a fixed slice of keys is inspected per
+            # request, never the whole map, and nothing mutates mid-iteration.
+            victims = list(
+                itertools.islice(_oidc_rate_state, _OIDC_RATE_LIMIT_PRUNE_BATCH)
+            )
+            for existing_key in victims:
+                stamps = _oidc_rate_state.get(existing_key)
                 if not stamps or stamps[-1] < cutoff:
-                    del _oidc_rate_state[existing_key]
+                    _oidc_rate_state.pop(existing_key, None)
         stamps = [
             stamp
             for stamp in _oidc_rate_state.get(key, [])
@@ -624,6 +695,18 @@ async def oidc_complete(
 
     current_user = _bearer_user_for_completion(db, token)
     current_user_id = current_user.id if current_user is not None else None
+    if current_user_id is None and request.headers.get("authorization") is not None:
+        # A supplied bearer that does not resolve to an active user is an
+        # authentication failure for a link handoff: tell the client to renew its
+        # session instead of reporting a malformed request. Login handoffs ignore
+        # the header, because their own browser binding is authoritative.
+        if (
+            handoff_operation(
+                db, handoff_secret=handoff_secret, browser_secret=browser_secret
+            )
+            == OPERATION_LINK
+        ):
+            return _oidc_json(401, {"detail": "Authentication required"})
     binding = {
         "handoff_secret": handoff_secret,
         "browser_secret": browser_secret,
@@ -671,6 +754,10 @@ async def oidc_complete(
         user = resolve_identity_user(
             db, transaction.issuer, transaction.subject
         )
+        # The handoff is live at claim time; provisioning below commits
+        # internally, so the deadline is captured now and re-checked before
+        # any JWT is minted (it is never extended).
+        deadline = transaction.expires_at
         if user is None:
             # An identity seen by preview may have been removed after claim.
             # This already-consumed legacy path cannot safely prompt now: fail
@@ -695,6 +782,11 @@ async def oidc_complete(
         # account must never receive an application JWT.
         if not user.is_active:
             return _oidc_json(403, {"detail": "Account is not available"})
+
+        # Never mint a JWT after the one-use deadline, even if slow provisioning
+        # or index contention outlasted the original completion window.
+        if deadline <= datetime.utcnow():
+            return _oidc_json(400, {"detail": "Sign-in could not be completed"})
 
         return _oidc_login_response(user)
 
@@ -776,8 +868,12 @@ def _complete_oidc_with_username(
         return _oidc_json(409, {
             "code": "username_taken", "detail": "Username already taken",
         })
-    except Exception:
+    except Exception as exc:
         db.rollback()
+        # Class name only: exception text could echo a username or SQL.
+        logger.warning(
+            "OIDC username completion failed (%s)", type(exc).__name__
+        )
         return _oidc_json(500, {"detail": "Sign-in failed"})
     # No JWT is minted until the atomic unit is durably committed.
     return _oidc_login_response(user)

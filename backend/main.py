@@ -17,6 +17,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Normal access logging stays enabled; only the OIDC query string (one-time
+# callback code/state) is stripped at the logging boundary.
+from services.access_log import install_oidc_access_log_redaction  # noqa: E402
+
+install_oidc_access_log_redaction()
+
 # Rate limiter: uses client IP, default 60 requests/minute
 limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
 
@@ -76,6 +82,10 @@ async def lifespan(app: FastAPI):
     from services.auth_admin import initialize_admin_accounts
     from services.pre_upgrade_backup import maybe_create_pre_upgrade_backup, record_successful_app_version
     maybe_create_pre_upgrade_backup(engine, DATABASE_URL, current_version)
+    # init_db() resolves the same policy itself: the OIDC schema migrations only
+    # run when OIDC is configured, so a local-mode deployment starts unchanged
+    # against a pre-OIDC database (including an existing SQLite file whose
+    # users.hashed_password is still NOT NULL).
     init_db()
     logger.info("Database initialized")
 

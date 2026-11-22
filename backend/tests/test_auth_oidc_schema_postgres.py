@@ -301,8 +301,8 @@ class OidcAuthSchemaPostgresTests(unittest.TestCase):
         # The focused migration, not the legacy swallowing loop, must repair the
         # schema. It is then run again through init_db() to prove idempotency.
         migrate_oidc_auth_schema(self.engine)
-        init_db()
-        init_db()
+        init_db(enable_oidc_schema=True)
+        init_db(enable_oidc_schema=True)
 
         with self.engine.connect() as conn:
             nullable = conn.execute(text("""
@@ -352,11 +352,35 @@ class OidcAuthSchemaPostgresTests(unittest.TestCase):
             side_effect=RuntimeError("synthetic auth schema failure"),
         ):
             with self.assertRaises(RuntimeError) as exc:
-                init_db()
+                init_db(enable_oidc_schema=True)
         self.assertIn("synthetic auth schema failure", str(exc.exception))
 
+    def _created_at_default(self, conn):
+        return conn.execute(text("""
+            SELECT column_default FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'oidc_auth_transactions'
+              AND column_name = 'created_at'
+        """)).scalar()
+
+    def test_upgrade_drops_the_transaction_created_at_default(self):
+        # Model the previous release, where created_at carried a DB default that
+        # could mask a caller forgetting to supply it.
+        Base.metadata.create_all(self.engine)
+        with self.engine.begin() as conn:
+            conn.execute(text(
+                "ALTER TABLE oidc_auth_transactions "
+                "ALTER COLUMN created_at SET DEFAULT NOW()"
+            ))
+            self.assertIsNotNone(self._created_at_default(conn))
+
+        database.migrate_oidc_transaction_schema(self.engine)
+
+        with self.engine.connect() as conn:
+            self.assertIsNone(self._created_at_default(conn))
+
     def test_identity_uniqueness_and_fk_cascade(self):
-        init_db()
+        init_db(enable_oidc_schema=True)
         db = self.SessionLocal()
         try:
             first = self._user(db, "first")
@@ -398,7 +422,7 @@ class OidcAuthSchemaPostgresTests(unittest.TestCase):
             db.close()
 
     def test_user_deletion_removes_identity_and_preserves_other_ownership(self):
-        init_db()
+        init_db(enable_oidc_schema=True)
         db = self.SessionLocal()
         try:
             caller = self._user(db, "caller", password="caller-password", role="admin")
@@ -450,7 +474,7 @@ class OidcAuthSchemaPostgresTests(unittest.TestCase):
             db.close()
 
     def test_concurrent_admin_demotions_cannot_remove_the_last_usable_admin(self):
-        init_db()
+        init_db(enable_oidc_schema=True)
         db = self.SessionLocal()
         try:
             first = self._user(db, "first-admin", password="first-password", role="admin")
@@ -574,7 +598,7 @@ class OidcAuthTestDatabaseGuardTests(unittest.TestCase):
     def test_rejects_non_literal_or_remote_hosts(self):
         remote_hosts = (
             "db.example.test",
-            "10.0.0.5",
+            "192.0.2.5",
             "0.0.0.0",
             "127.0.0.2",
             "localhost.example.test",
@@ -610,7 +634,7 @@ class OidcAuthTestDatabaseGuardTests(unittest.TestCase):
     def test_rejects_query_parameter_connection_overrides(self):
         for query in (
             "host=evil.example.test",
-            "hostaddr=10.0.0.5",
+            "hostaddr=192.0.2.5",
             "port=5432",
             "dbname=postgres",
             "service=prod",
@@ -678,7 +702,7 @@ class OidcAuthTestDatabaseGuardTests(unittest.TestCase):
     def test_every_rejected_target_never_connects_or_drops(self):
         targets = (
             self._url(database="pokemon_tcg"),
-            self._url(host="10.0.0.5"),
+            self._url(host="192.0.2.5"),
             "postgresql+psycopg2://scratch:scratch@127.0.0.1:55432",
             f"postgresql+psycopg2://scratch:scratch@127.0.0.1/{self.approved_name}",
             f"sqlite:///tmp/{self.approved_name}.db",

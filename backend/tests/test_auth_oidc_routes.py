@@ -6,6 +6,7 @@ provider suite). The database is SQLite with ``PRAGMA foreign_keys=ON``.
 No network provider, live instance or real credentials are used.
 """
 import json
+import dataclasses
 import os
 import secrets
 import shutil
@@ -22,6 +23,10 @@ from unittest.mock import patch
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 os.environ.setdefault("JWT_SECRET_KEY", "focused-oidc-routes-test-secret")
+
+# The real-nginx checks need a container runtime and a local nginx image, so they
+# only run when explicitly requested. They never masquerade as passing coverage.
+_NGINX_RUNTIME_TEST_ENABLED = os.environ.get("OIDC_AUTH_NGINX_TEST") == "1"
 
 try:
     # Third-party dependencies only; internal import errors below must fail.
@@ -650,6 +655,22 @@ class CompletionRouteTests(RouteTestCase):
         self.assertEqual(second.status_code, 400)
         self.assertEqual(self.db.query(User).count(), 1)
 
+    def test_mixed_mode_provisions_any_provider_authenticated_identity(self):
+        """Documented behaviour: the provider is the access gate in mixed mode.
+
+        Any identity the provider authenticates receives a trainer account on its
+        first sign-in. PokéCollector does not consult provider groups or an
+        allowlist, so a deployment must restrict access to the client at the
+        provider (see docs/OIDC_AUTHENTICATION.md).
+        """
+        self.login_handoff(subject="never-seen-subject", name="New Person")
+
+        response = self.complete()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["user"]["role"], "trainer")
+        self.assertIsNotNone(find_identity(self.db, ISSUER, "never-seen-subject"))
+
     def test_login_completion_works_with_an_existing_bearer(self):
         user = self.add_user("linked")
         self.link(user)
@@ -856,6 +877,66 @@ class CompletionRouteTests(RouteTestCase):
         self.assertEqual(success.status_code, 200)
         self.assertEqual(success.json(), {"linked": True})
 
+    def test_link_completion_with_an_unresolvable_bearer_returns_401(self):
+        admin = self.add_user("admin", role="admin", password="local-password")
+        bearer = create_access_token({"sub": str(admin.id), "role": admin.role})
+        self._link_handoff(admin, bearer)
+        expired = create_access_token(
+            {"sub": str(admin.id), "role": admin.role},
+            expires_delta=timedelta(seconds=-60),
+        )
+
+        for bad_token in (expired, "not-a-jwt"):
+            with self.subTest(token=bad_token[:12]):
+                response = self.complete(token=bad_token)
+                self.assertEqual(response.status_code, 401)
+                self.assertEqual(
+                    response.json(), {"detail": "Authentication required"}
+                )
+                self.assert_security_headers(response)
+
+        # The handoff was not consumed by the failed attempts.
+        self.assertIsNone(find_identity(self.db, ISSUER, "link-subject"))
+        success = self.complete(token=bearer)
+        self.assertEqual(success.status_code, 200)
+        self.assertEqual(success.json(), {"linked": True})
+
+    def test_login_handoff_ignores_an_unresolvable_bearer(self):
+        # Login handoffs are bound to the browser, not to a bearer; a stale token
+        # left in the browser must not block sign-in.
+        user = self.add_user("trainer", password="local-password")
+        self.link(user)
+        self.login_handoff()
+
+        response = self.complete(token="not-a-jwt")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("access_token", response.json())
+
+    def test_login_handoff_past_its_deadline_never_mints_a_token(self):
+        user = self.add_user("trainer", password="local-password")
+        self.link(user)
+        self.login_handoff()
+        real_claim = auth_api.claim_handoff_transaction
+
+        def claim_then_expire(db, **kwargs):
+            transaction = real_claim(db, **kwargs)
+            transaction.expires_at = datetime.utcnow() - timedelta(seconds=1)
+            return transaction
+
+        with patch.object(
+            auth_api, "claim_handoff_transaction", claim_then_expire
+        ):
+            with patch.object(auth_api, "create_access_token") as mint:
+                response = self.complete()
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json(), {"detail": "Sign-in could not be completed"}
+        )
+        self.assert_security_headers(response)
+        mint.assert_not_called()
+
     def test_link_conflict_does_not_change_role_or_session(self):
         admin = self.add_user("admin", role="admin", password="local-password")
         bearer = create_access_token({"sub": str(admin.id), "role": admin.role})
@@ -909,7 +990,9 @@ class CompletionRouteTests(RouteTestCase):
 
         response = self.complete(token=bearer)
 
-        self.assertEqual(response.status_code, 400)
+        # A bearer that no longer resolves to an active user is an
+        # authentication failure, not a malformed request.
+        self.assertEqual(response.status_code, 401)
         self.assertNotIn("access_token", response.json())
         self.assertIsNone(find_identity(self.db, ISSUER, "link-subject"))
 
@@ -1225,7 +1308,10 @@ class UsernameFallbackCompletionTests(RouteTestCase):
 
 class RateLimitTests(RouteTestCase):
     def test_start_throttle_is_generic_and_no_store(self):
-        for _ in range(auth_api._OIDC_RATE_LIMIT_MAX):
+        # The first request only has the client address; every later request
+        # carries the browser-binding cookie this client received, so that
+        # browser's bucket is the one that fills up.
+        for _ in range(auth_api._OIDC_RATE_LIMIT_MAX + 1):
             self.assertEqual(self.start().status_code, 302)
 
         response = self.start()
@@ -1252,24 +1338,60 @@ class ServingConfigurationTests(unittest.TestCase):
     def setUp(self):
         self.repo_root = Path(__file__).resolve().parents[2]
 
-    def test_uvicorn_access_log_is_disabled(self):
+    def test_uvicorn_access_log_is_enabled(self):
+        # Access logging must stay on; the OIDC query string is redacted by the
+        # uvicorn.access filter instead of by disabling logging for the app.
         dockerfile = (self.repo_root / "backend" / "Dockerfile").read_text(
             encoding="utf-8"
         )
-        self.assertIn("--no-access-log", dockerfile)
+        self.assertNotIn("--no-access-log", dockerfile)
+        self.assertIn('CMD ["uvicorn", "main:app"', dockerfile)
+        main_source = (self.repo_root / "backend" / "main.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("install_oidc_access_log_redaction", main_source)
 
-    def test_nginx_callback_is_path_only_logged_with_no_referrer(self):
+    def test_nginx_callback_is_path_only_logged_without_query(self):
         nginx = (self.repo_root / "frontend" / "nginx.conf").read_text(
             encoding="utf-8"
         )
-        self.assertIn("location ^~ /api/auth/oidc/", nginx)
+        # A dedicated format logs the method and path only ($uri excludes the
+        # query string), and the OIDC location must use it with logging on.
+        self.assertIn("log_format oidc_path_only", nginx)
+        log_format = nginx.split("log_format oidc_path_only", 1)[1]
+        log_format = log_format.split(";", 1)[0]
+        self.assertIn("$request_method $uri", log_format)
+        self.assertNotIn("$request_uri", log_format)
+        self.assertNotIn("$request ", log_format)
+        self.assertIn(
+            "access_log /var/log/nginx/access.log oidc_path_only;", nginx
+        )
+        self.assertNotIn("access_log off;", nginx)
+        self.assertIn(
+            "location ^~ /api/auth/oidc/", nginx, "OIDC location is required"
+        )
         oidc_block = nginx.split("location ^~ /api/auth/oidc/", 1)[1]
         oidc_block = oidc_block.split("}", 1)[0]
-        self.assertIn("access_log off;", oidc_block)
-        self.assertIn("proxy_hide_header Referrer-Policy;", oidc_block)
         self.assertIn("error_log /dev/null crit;", oidc_block)
-        self.assertIn('Cache-Control "no-store"', oidc_block)
-        self.assertIn('Referrer-Policy "no-referrer"', oidc_block)
+        # The backend's no-store and no-referrer reach the browser: the location
+        # hides neither and declares no add_header. A path-scoped map suppresses
+        # the duplicated server-level policy for OIDC only.
+        self.assertNotIn("proxy_hide_header Referrer-Policy;", oidc_block)
+        self.assertNotIn("proxy_hide_header Cache-Control;", oidc_block)
+        self.assertIn("map $uri $referrer_policy", nginx)
+        self.assertIn('~^/api/auth/oidc(/|$) "";', nginx)
+        self.assertIn("add_header Referrer-Policy $referrer_policy always;", nginx)
+        # No location-level add_header: it would suppress the inherited
+        # server-level CSP/frame/permissions headers.
+        self.assertEqual(
+            [
+                line.strip()
+                for line in oidc_block.splitlines()
+                if line.strip().startswith("add_header")
+            ],
+            [],
+        )
+        self.assertNotIn("proxy_hide_header Cache-Control;", oidc_block)
 
     def _podman_nginx_image(self):
         if shutil.which("podman") is None:
@@ -1284,6 +1406,10 @@ class ServingConfigurationTests(unittest.TestCase):
             self.skipTest("nginx:alpine image is not available locally")
         return "docker.io/library/nginx:alpine"
 
+    @unittest.skipUnless(
+        _NGINX_RUNTIME_TEST_ENABLED,
+        "set OIDC_AUTH_NGINX_TEST=1 to run the real-nginx serving checks",
+    )
     def test_nginx_config_syntax_with_real_nginx(self):
         image = self._podman_nginx_image()
         nginx_conf = self.repo_root / "frontend" / "nginx.conf"
@@ -1312,7 +1438,11 @@ class ServingConfigurationTests(unittest.TestCase):
         )
         self.assertIn("syntax is ok", (result.stdout + result.stderr).lower())
 
-    def test_nginx_error_path_does_not_log_callback_uri(self):
+    @unittest.skipUnless(
+        _NGINX_RUNTIME_TEST_ENABLED,
+        "set OIDC_AUTH_NGINX_TEST=1 to run the real-nginx serving checks",
+    )
+    def test_nginx_error_path_logs_path_only_without_query(self):
         image = self._podman_nginx_image()
         nginx_conf = self.repo_root / "frontend" / "nginx.conf"
         name = f"oidc-nginx-{secrets.token_hex(4)}"
@@ -1374,15 +1504,151 @@ class ServingConfigurationTests(unittest.TestCase):
                 timeout=20,
             )
             combined = logs.stdout + logs.stderr
+            # The attempt is recorded, but only as method plus path.
+            self.assertIn("/api/auth/oidc/callback", combined)
             self.assertNotIn("URI_SECRET_VALUE", combined)
             self.assertNotIn("STATE_SECRET_VALUE", combined)
-            self.assertNotIn("/api/auth/oidc/callback", combined)
+            self.assertNotIn("?code=", combined)
         finally:
             subprocess.run(
                 ["podman", "rm", "-f", name],
                 capture_output=True,
                 timeout=30,
             )
+
+
+@unittest.skipUnless(DEPS_AVAILABLE, "backend dependencies are not installed")
+class OidcRateLimitBucketTests(unittest.TestCase):
+    """The OIDC limiter keys per browser, not per shared proxy address."""
+
+    def setUp(self):
+        from types import SimpleNamespace
+
+        self._SimpleNamespace = SimpleNamespace
+        auth_api._oidc_rate_state.clear()
+        self.addCleanup(auth_api._oidc_rate_state.clear)
+
+    def _request(self, *, cookie=None, host="192.0.2.5"):
+        cookies = {} if cookie is None else {auth_api.OIDC_BROWSER_COOKIE: cookie}
+        return self._SimpleNamespace(
+            cookies=cookies, client=self._SimpleNamespace(host=host)
+        )
+
+    def _consume(self, request, times, bucket="start"):
+        return [
+            auth_api._consume_oidc_rate_limit(request, bucket) for _ in range(times)
+        ]
+
+    def test_browsers_behind_one_proxy_address_have_independent_budgets(self):
+        first = self._request(cookie="browser-secret-one")
+        second = self._request(cookie="browser-secret-two")
+
+        allowed = self._consume(first, auth_api._OIDC_RATE_LIMIT_MAX)
+        self.assertTrue(all(allowed))
+        self.assertFalse(auth_api._consume_oidc_rate_limit(first, "start"))
+
+        # Same source address, different browser: still has its own budget.
+        self.assertTrue(auth_api._consume_oidc_rate_limit(second, "start"))
+
+    def test_requests_without_a_cookie_share_the_address_bucket(self):
+        anonymous = self._request()
+
+        allowed = self._consume(anonymous, auth_api._OIDC_RATE_LIMIT_MAX)
+        self.assertTrue(all(allowed))
+        self.assertFalse(auth_api._consume_oidc_rate_limit(anonymous, "start"))
+
+        # A different proxy address is a different fallback bucket.
+        other = self._request(host="192.0.2.6")
+        self.assertTrue(auth_api._consume_oidc_rate_limit(other, "start"))
+
+    def test_browser_bucket_does_not_collide_with_the_address_fallback(self):
+        anonymous = self._request()
+        self._consume(anonymous, auth_api._OIDC_RATE_LIMIT_MAX)
+        self.assertFalse(auth_api._consume_oidc_rate_limit(anonymous, "start"))
+
+        bound = self._request(cookie="browser-secret-three")
+        self.assertTrue(auth_api._consume_oidc_rate_limit(bound, "start"))
+
+    def test_cookie_value_is_not_stored_verbatim(self):
+        secret = "browser-cookie-secret-value"
+        self._consume(self._request(cookie=secret), 1)
+
+        keys = [key for key in auth_api._oidc_rate_state if key[0] == "start"]
+        self.assertEqual(len(keys), 1)
+        self.assertNotIn(secret, keys[0][1])
+        self.assertTrue(keys[0][1].startswith("browser:"))
+
+    def test_prune_is_bounded_per_request(self):
+        # An over-full map must not be swept wholesale on the request path.
+        auth_api._oidc_rate_state.clear()
+        for index in range(auth_api._OIDC_RATE_LIMIT_MAX_BUCKETS + 200):
+            auth_api._oidc_rate_state[("start", f"ip:192.0.2.{index}")] = [0.0]
+        before = len(auth_api._oidc_rate_state)
+
+        self.assertTrue(
+            auth_api._consume_oidc_rate_limit(
+                self._request(cookie="prune-cookie"), "start"
+            )
+        )
+
+        removed = before - len(auth_api._oidc_rate_state)
+        self.assertGreater(removed, 0)
+        self.assertLessEqual(removed, auth_api._OIDC_RATE_LIMIT_PRUNE_BATCH)
+
+    def test_buckets_are_separate_per_endpoint(self):
+        request = self._request(cookie="browser-secret-four")
+        self._consume(request, auth_api._OIDC_RATE_LIMIT_MAX, bucket="start")
+
+        self.assertFalse(auth_api._consume_oidc_rate_limit(request, "start"))
+        self.assertTrue(auth_api._consume_oidc_rate_limit(request, "complete"))
+
+
+@unittest.skipUnless(DEPS_AVAILABLE, "backend dependencies are not installed")
+class ProviderAdapterCacheTests(unittest.TestCase):
+    """The route layer must reuse one adapter per configuration."""
+
+    def setUp(self):
+        from services.auth_policy import OidcConfig
+
+        self.config = OidcConfig(
+            issuer_url=ISSUER,
+            client_id="pokecollector",
+            client_secret=CLIENT_SECRET,
+            redirect_uri=REDIRECT_URI,
+        )
+        self.addCleanup(auth_api._oidc_provider_cache.clear)
+
+    def test_same_configuration_reuses_the_adapter(self):
+        first = auth_api._build_oidc_provider(self.config)
+        second = auth_api._build_oidc_provider(self.config)
+
+        self.assertIs(first, second)
+
+    def test_cached_key_never_holds_the_client_secret(self):
+        auth_api._build_oidc_provider(self.config)
+
+        keys = list(auth_api._oidc_provider_cache)
+        self.assertEqual(len(keys), 1)
+        self.assertNotIn(CLIENT_SECRET, repr(keys[0]))
+
+        # A changed secret still produces a new key and a new adapter.
+        changed = dataclasses.replace(self.config, client_secret="other-secret")
+        self.assertIsNot(
+            auth_api._build_oidc_provider(changed),
+            auth_api._build_oidc_provider(self.config),
+        )
+
+    def test_changed_configuration_replaces_the_cached_adapter(self):
+        first = auth_api._build_oidc_provider(self.config)
+        changed = dataclasses.replace(self.config, client_id="other-client")
+
+        second = auth_api._build_oidc_provider(changed)
+
+        self.assertIsNot(first, second)
+        self.assertIs(auth_api._build_oidc_provider(changed), second)
+        # Only the active configuration stays cached, so a changed issuer or
+        # client can never be served by a stale adapter.
+        self.assertEqual(len(auth_api._oidc_provider_cache), 1)
 
 
 @unittest.skipUnless(
