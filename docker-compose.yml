@@ -71,6 +71,11 @@ services:
       ARTWORK_INDEX_DIR: /app/data/artwork-index
       ARTWORK_CANDIDATES_ENABLED: ${ARTWORK_CANDIDATES_ENABLED:-0}
       BYPARR_URL: http://byparr:8191/v1
+      # Dev-only capture lab (frontend page /capture-lab). Every route answers
+      # 404 unless CAPTURE_LAB_ENABLED is set on the instance; the directory is
+      # bind-mounted per instance so captures survive a container recreate.
+      CAPTURE_LAB_ENABLED: ${CAPTURE_LAB_ENABLED:-}
+      CAPTURE_LAB_DIR: /app/data/capture-lab
     depends_on:
       postgres:
         condition: service_healthy

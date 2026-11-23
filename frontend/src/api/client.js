@@ -539,4 +539,46 @@ export const subscribePush = (subscription) => api.post('/push/subscribe', subsc
 export const unsubscribePush = (endpoint) => api.delete('/push/subscribe', { data: { endpoint } })
 export const sendTestPush = () => api.post('/push/test').then(r => r.data)
 
+// Dev-only capture lab. Uploads are deliberately not downscaled or re-encoded:
+// the point is to compare the exact phone capture, so the original bytes are
+// sent as-is. Disabled instances answer 404 for every route.
+const CAPTURE_LAB_PREFIX = '/dev/capture-lab'
+const CAPTURE_LAB_UPLOAD_TIMEOUT_MS = 5 * 60 * 1000
+
+export const listCaptureLabEntries = () =>
+  api.get(`${CAPTURE_LAB_PREFIX}/captures`).then(r => r.data)
+
+export const uploadCaptureLabImage = (file, fields = {}, { onProgress } = {}) => {
+  const form = new FormData()
+  form.append('file', file)
+  Object.entries(fields).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== '') form.append(key, value)
+  })
+  return api.post(`${CAPTURE_LAB_PREFIX}/capture`, form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: CAPTURE_LAB_UPLOAD_TIMEOUT_MS,
+    onUploadProgress: event => {
+      if (!event.total) return
+      onProgress?.(Math.round((event.loaded / event.total) * 100))
+    },
+  }).then(r => r.data)
+}
+
+export const deleteCaptureLabEntry = name =>
+  api.delete(`${CAPTURE_LAB_PREFIX}/captures/${encodeURIComponent(name)}`).then(r => r.data)
+
+// Explicit edit: the server re-encodes the stored file as JPEG.
+export const rotateCaptureLabEntry = name =>
+  api.post(`${CAPTURE_LAB_PREFIX}/captures/${encodeURIComponent(name)}/rotate`).then(r => r.data)
+
+// One-click upload of the page's live-detection recording; never sent implicitly.
+export const uploadCaptureLabDiagnostics = payload =>
+  api.post(`${CAPTURE_LAB_PREFIX}/diagnostics`, payload, { timeout: 5 * 60 * 1000 }).then(r => r.data)
+
+// Downloaded through the authenticated client, because an <img src> or plain
+// link cannot carry the bearer token.
+export const fetchCaptureLabFileBlob = name =>
+  api.get(`${CAPTURE_LAB_PREFIX}/captures/${encodeURIComponent(name)}`, { responseType: 'blob' })
+    .then(r => r.data)
+
 export default api

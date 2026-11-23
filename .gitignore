@@ -35,6 +35,9 @@ data/auth/
 .env.dev
 .env.prod
 
+# Card detector model and ONNX runtime assets (fetched, large, reproducible).
+frontend/public/detector/
+
 # Local codemap change-detection state (codemap.md files are committed)
 /.slim/codemap.json
 

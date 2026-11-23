@@ -37,6 +37,7 @@ const Settings = lazy(() => import('./pages/Settings'))
 const CardMigration = lazy(() => import('./pages/CardMigration'))
 const ScanQueue = lazy(() => import('./pages/ScanQueue'))
 const OfflineCenter = lazy(() => import('./pages/OfflineCenter'))
+const CaptureLab = lazy(() => import('./pages/CaptureLab'))
 const Login = lazy(() => import('./pages/Login'))
 const OidcComplete = lazy(() => import('./pages/OidcComplete'))
 const Leaderboard = lazy(() => import('./pages/Leaderboard'))
@@ -228,6 +229,7 @@ function ProtectedRoutes() {
         <Route path="scans" element={lazyRoute(<ScanQueue />)} />
         <Route path="scans/:jobId" element={lazyRoute(<ScanQueue />)} />
         <Route path="offline" element={lazyRoute(<OfflineCenter />)} />
+        <Route path="capture-lab" element={lazyRoute(<CaptureLab />)} />
       </Route>
     </Routes>
   )
