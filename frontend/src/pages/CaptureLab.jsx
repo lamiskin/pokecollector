@@ -28,6 +28,7 @@ import {
   PATCH_RADIUS,
   PATCH_VARIANCE_RATIO,
   SEARCH_RADIUS,
+  shouldAcceptCapture,
   shouldKeepTracking,
   TENTATIVE_CONFIRM_TRACKS,
   TENTATIVE_MAX_MISSES,
@@ -74,9 +75,9 @@ const DIAG_SNAPSHOT_EDGE = 320
 const LIVE_MAX_EDGE = 640
 const LIVE_MIN_INTERVAL_MS = 120
 const LIVE_SEQ_BASE = 1_000_000
-// A tracked quad is only used for manual capture while the last model result is
-// this fresh; older than that, the model quad is the safer fallback.
-const CAPTURE_MAX_AGE_MS = 1500
+// Capture waits at most this long for a video frame newer than the last one it
+// used; a frozen feed must not be captured twice or reported as success.
+const CAPTURE_FRAME_WAIT_MS = 200
 // Solid-ring confirmation pulse after an accepted model result; long enough to
 // register, short enough that the dashed tracking state still dominates.
 const CONFIRM_PULSE_MS = 300
@@ -117,6 +118,10 @@ const AUTO_STABLE_MS = 1200
 const AUTO_FIRE_CHECK_MS = 100
 const AUTO_REARM_MOVE = 0.2
 const AUTO_REARM_MS = 1500
+// Auto-capture stability may follow the tracker for up to this long between
+// model results. Separate from capture geometry freshness so changing capture
+// rules cannot silently change the hold rule.
+const AUTO_TRACK_OBS_MAX_AGE_MS = 1500
 // How long the overlay's success beat stays on screen; the overlay itself fades
 // the ring inside this window, so it only needs to outlive that animation.
 const CAPTURE_BEAT_MS = 420
@@ -406,6 +411,8 @@ export default function CaptureLab() {
   const trackedQuadRef = useRef(null)
   const trackerFailuresRef = useRef(0)
   const tentativeRef = useRef(null)
+  const lastCapturedFrameTimeRef = useRef(null)
+  const captureInFlightRef = useRef(false)
   const trackerStatsRef = useRef({ hits: 0, attempts: 0, reason: 'frame' })
   const diagRef = useRef({ startedAt: null, samples: [], events: [], meta: null, frames: 0 })
   const diagTimerRef = useRef(null)
@@ -1111,73 +1118,211 @@ export default function CaptureLab() {
     }, 'image/jpeg', 0.92)
   }
 
-  const captureRectified = (result, { auto = false } = {}) => {
-    const video = videoRef.current
-    if (!video || !video.videoWidth || !video.videoHeight) {
-      setCaptureNote('The video frame is not ready; try again.')
-      return
-    }
-    // The one visual moment of a capture: the overlay plays a 380 ms success
-    // beat from here. Presentation only — it never touches the crop.
-    setCaptureBeatAt(performance.now())
-    const frameCanvas = document.createElement('canvas')
-    // Cap the sampling source at the crop's own resolution: a 12 MP frame costs a
-    // ~48 MB ImageData allocation on a phone for no extra detail in a 1146×1600
-    // crop, and large canvas allocations are a known cause of tab reloads.
-    const sourceScale = Math.min(1, CARD_TARGET_HEIGHT / Math.max(video.videoWidth, video.videoHeight))
-    frameCanvas.width = Math.max(1, Math.round(video.videoWidth * sourceScale))
-    frameCanvas.height = Math.max(1, Math.round(video.videoHeight * sourceScale))
-    const frameContext = frameCanvas.getContext('2d', { willReadFrequently: true })
-    frameContext.drawImage(video, 0, 0, frameCanvas.width, frameCanvas.height)
-
-    let warped
-    try {
-      const frame = frameContext.getImageData(0, 0, frameCanvas.width, frameCanvas.height)
-      const quad = result.corners.map(([x, y]) => [x * frameCanvas.width, y * frameCanvas.height])
-      warped = warpQuad(frame, quad, CARD_TARGET_WIDTH, CARD_TARGET_HEIGHT, CARD_CROP_INSET)
-    } catch (error) {
-      setCaptureNote(`Perspective correction failed (${error.message}); captured the full frame.`)
-      captureFullFrame({ mode: auto ? 'auto' : 'manual' })
-      return
-    }
-
-    const output = document.createElement('canvas')
-    output.width = CARD_TARGET_WIDTH
-    output.height = CARD_TARGET_HEIGHT
-    output.getContext('2d').putImageData(warped, 0, 0)
-    output.toBlob(blob => {
-      if (!blob) {
-        setCaptureNote('The rectified crop could not be encoded; captured the full frame.')
-        captureFullFrame({ mode: auto ? 'auto' : 'manual' })
+  // Single acquisition path for rectified captures. requestVideoFrameCallback
+  // is unavailable on Firefox for Android, so currentTime is compared around
+  // drawImage; the same decoded frame time is never captured twice.
+  const acquireVideoFrame = () => new Promise(resolve => {
+    const started = performance.now()
+    const canvas = document.createElement('canvas')
+    const context = canvas.getContext('2d', { willReadFrequently: true })
+    const attempt = () => {
+      const video = videoRef.current
+      if (!video || !video.videoWidth || !video.videoHeight) {
+        resolve({
+          ok: false,
+          reason: 'no-video',
+          waitedMs: Math.round(performance.now() - started),
+          frameTime: null,
+        })
         return
       }
-      addFiles([new File([blob], `card-${Date.now()}.jpg`, { type: 'image/jpeg' })])
-      recordDiagEvent('capture', {
-        mode: auto ? 'auto' : 'manual',
-        rectified: true,
-        corners: result.corners,
+      // Cap the sampling source at the crop's own resolution: a 12 MP frame
+      // costs a ~48 MB ImageData allocation on a phone for no extra detail in a
+      // 1146×1600 crop, and large canvas allocations can reload the tab.
+      const scale = Math.min(1, CARD_TARGET_HEIGHT / Math.max(video.videoWidth, video.videoHeight))
+      const width = Math.max(1, Math.round(video.videoWidth * scale))
+      const height = Math.max(1, Math.round(video.videoHeight * scale))
+      if (canvas.width !== width) canvas.width = width
+      if (canvas.height !== height) canvas.height = height
+      const before = video.currentTime
+      context.drawImage(video, 0, 0, width, height)
+      const after = video.currentTime
+      const waitedMs = Math.round(performance.now() - started)
+      if (after === before && before === lastCapturedFrameTimeRef.current) {
+        if (waitedMs >= CAPTURE_FRAME_WAIT_MS) {
+          resolve({ ok: false, reason: 'stalled', waitedMs, frameTime: after })
+          return
+        }
+        window.requestAnimationFrame(attempt)
+        return
+      }
+      resolve({ ok: true, reason: 'ok', canvas, context, frameTime: after, waitedMs })
+    }
+    attempt()
+  })
+
+  const rearmAutoCapture = () => {
+    const state = autoStateRef.current
+    state.disarmed = false
+    state.captureCorners = null
+    state.anchorCorners = null
+    state.anchorTs = null
+    state.lastCorners = null
+    state.lastQualifyingTs = null
+    state.absentSince = null
+    setAutoDisarmed(false)
+    setAutoHoldStartTs(null)
+  }
+
+  const disarmAutoCapture = corners => {
+    const state = autoStateRef.current
+    state.disarmed = true
+    state.captureCorners = corners
+    state.anchorCorners = null
+    state.anchorTs = null
+    state.lastCorners = null
+    state.lastQualifyingTs = null
+    setAutoDisarmed(true)
+    setAutoHoldStartTs(null)
+    setCaptureNote('Auto-captured the card. Waiting for the card to move.')
+  }
+
+  const captureWithFreshGeometry = async ({ auto = false } = {}) => {
+    if (captureInFlightRef.current) return false
+    captureInFlightRef.current = true
+    const mode = auto ? 'auto' : 'manual'
+    try {
+      const acquisition = await acquireVideoFrame()
+      if (!acquisition.ok) {
+        setCaptureNote(
+          acquisition.reason === 'stalled'
+            ? 'The camera did not deliver a new frame; nothing captured.'
+            : 'The video frame is not ready; nothing captured.',
+        )
+        recordDiagEvent('capture-attempt', {
+          ok: false,
+          reason: acquisition.reason,
+          waitedMs: acquisition.waitedMs,
+          quadAgeMs: null,
+          frameTime: acquisition.frameTime,
+        })
+        if (auto) rearmAutoCapture()
+        return false
+      }
+
+      const now = performance.now()
+      const hasTracked = trackedQuadRef.current != null
+      const trackedAgeMs = hasTracked && trackerLastTsRef.current != null
+        ? now - trackerLastTsRef.current
+        : null
+      const modelAgeMs = lastDetectionAtRef.current != null
+        ? now - lastDetectionAtRef.current
+        : null
+      const decision = shouldAcceptCapture({ hasTracked, trackedAgeMs, modelAgeMs })
+      const quadAgeMs = decision.source === 'tracked'
+        ? (trackedAgeMs == null ? null : Math.round(trackedAgeMs))
+        : (modelAgeMs == null ? null : Math.round(modelAgeMs))
+      if (!decision.ok) {
+        setCaptureNote('Waiting for a fresh look at the card; nothing captured.')
+        recordDiagEvent('capture-attempt', {
+          ok: false,
+          reason: decision.reason,
+          waitedMs: acquisition.waitedMs,
+          quadAgeMs,
+          frameTime: acquisition.frameTime,
+        })
+        if (auto) rearmAutoCapture()
+        return false
+      }
+      const corners = decision.source === 'tracked'
+        ? trackedQuadRef.current
+        : liveResultRef.current?.corners
+      if (!corners) {
+        setCaptureNote('Waiting for a fresh look at the card; nothing captured.')
+        recordDiagEvent('capture-attempt', {
+          ok: false,
+          reason: 'no-quad',
+          waitedMs: acquisition.waitedMs,
+          quadAgeMs,
+          frameTime: acquisition.frameTime,
+        })
+        if (auto) rearmAutoCapture()
+        return false
+      }
+
+      // The frame is now committed to this capture attempt; a retry must wait
+      // for a different decoded frame.
+      lastCapturedFrameTimeRef.current = acquisition.frameTime
+
+      let warped
+      try {
+        const frame = acquisition.context.getImageData(
+          0,
+          0,
+          acquisition.canvas.width,
+          acquisition.canvas.height,
+        )
+        const quad = corners.map(([x, y]) => [
+          x * acquisition.canvas.width,
+          y * acquisition.canvas.height,
+        ])
+        warped = warpQuad(frame, quad, CARD_TARGET_WIDTH, CARD_TARGET_HEIGHT, CARD_CROP_INSET)
+      } catch (error) {
+        setCaptureNote(`Perspective correction failed (${error.message}); nothing captured.`)
+        recordDiagEvent('capture-attempt', {
+          ok: false,
+          reason: 'warp',
+          waitedMs: acquisition.waitedMs,
+          quadAgeMs,
+          frameTime: acquisition.frameTime,
+        })
+        if (auto) rearmAutoCapture()
+        return false
+      }
+
+      const output = document.createElement('canvas')
+      output.width = CARD_TARGET_WIDTH
+      output.height = CARD_TARGET_HEIGHT
+      output.getContext('2d').putImageData(warped, 0, 0)
+      const blob = await new Promise(resolve => {
+        output.toBlob(resolve, 'image/jpeg', 0.92)
       })
-      if (!auto) setCaptureNote('Captured a rectified card crop.')
-    }, 'image/jpeg', 0.92)
+      if (!blob) {
+        setCaptureNote('The capture could not be encoded; nothing captured.')
+        recordDiagEvent('capture-attempt', {
+          ok: false,
+          reason: 'encode',
+          waitedMs: acquisition.waitedMs,
+          quadAgeMs,
+          frameTime: acquisition.frameTime,
+        })
+        if (auto) rearmAutoCapture()
+        return false
+      }
+
+      addFiles([new File([blob], `card-${Date.now()}.jpg`, { type: 'image/jpeg' })])
+      // The success beat starts only once the File exists and is staged.
+      setCaptureBeatAt(performance.now())
+      recordDiagEvent('capture', { mode, rectified: true, corners })
+      recordDiagEvent('capture-attempt', {
+        ok: true,
+        reason: 'ok',
+        waitedMs: acquisition.waitedMs,
+        quadAgeMs,
+        frameTime: acquisition.frameTime,
+      })
+      if (auto) disarmAutoCapture(corners)
+      else setCaptureNote('Captured a rectified card crop.')
+      return true
+    } finally {
+      captureInFlightRef.current = false
+    }
   }
 
   const captureFrame = () => {
     if (liveDetectionRef.current) {
-      const tracked = trackedQuadRef.current
-      const model = liveResultRef.current
-      const modelFresh = lastDetectionAtRef.current != null
-        && performance.now() - lastDetectionAtRef.current <= CAPTURE_MAX_AGE_MS
-      // Tracker corners absorb small hand motion between model frames; once the
-      // last model result is stale, fall back to the model quad.
-      if (tracked && modelFresh) {
-        captureRectified({ corners: tracked })
-        return
-      }
-      if (model?.usable) {
-        captureRectified(model)
-        return
-      }
-      setCaptureNote('Live detection is on but no usable card quad was found — captured the full frame.')
+      void captureWithFreshGeometry({ auto: false })
+      return
     }
     captureFullFrame()
   }
@@ -1192,37 +1337,22 @@ export default function CaptureLab() {
   const fireAutoCaptureIfDue = () => {
     const state = autoStateRef.current
     if (!autoCaptureRef.current || !liveDetectionRef.current) return
+    if (captureInFlightRef.current) return
     if (state.disarmed || state.anchorTs == null) return
     const now = performance.now()
     if (now - state.anchorTs < AUTO_STABLE_MS) return
     stopAutoFireTimer()
 
     // Clock-driven close: waiting for the next model result would leave the ring
-    // at 100% with nothing happening for up to another second.
-    const model = liveResultRef.current
-    const tracked = trackedQuadRef.current
-    const modelFresh = lastDetectionAtRef.current != null
-      && now - lastDetectionAtRef.current <= CAPTURE_MAX_AGE_MS
-    const corners = tracked && modelFresh ? tracked : (model?.usable ? model.corners : null)
-    if (!corners) {
-      // No trustworthy geometry to crop: abandon the window quietly.
-      state.anchorCorners = null
-      state.anchorTs = null
-      state.lastCorners = null
-      state.lastQualifyingTs = null
-      setAutoHoldStartTs(null)
-      return
-    }
+    // at 100% with nothing happening for up to another second. Geometry and
+    // frame freshness are checked inside the capture, which disarms on success
+    // and re-arms on a stale look.
     state.anchorCorners = null
     state.anchorTs = null
     state.lastCorners = null
     state.lastQualifyingTs = null
-    state.disarmed = true
-    state.captureCorners = corners
-    setAutoDisarmed(true)
     setAutoHoldStartTs(null)
-    setCaptureNote('Auto-captured the card. Waiting for the card to move.')
-    captureRectified({ corners }, { auto: true })
+    void captureWithFreshGeometry({ auto: true })
   }
 
   const startAutoFireTimer = () => {
@@ -1287,6 +1417,7 @@ export default function CaptureLab() {
   // Deliberate physical-presentation heuristic, not card identity: two identical
   // copies in a row still require the card to be removed and replaced.
   const evaluateAutoCapture = result => {
+    if (captureInFlightRef.current) return
     const state = autoStateRef.current
     const now = performance.now()
     const qualifies = result.usable && result.area >= MIN_CARD_AREA
@@ -1336,7 +1467,7 @@ export default function CaptureLab() {
     const tracked = trackedQuadRef.current
     const trackerFresh = tracked != null
       && trackerLastTsRef.current != null
-      && now - trackerLastTsRef.current <= CAPTURE_MAX_AGE_MS
+      && now - trackerLastTsRef.current <= AUTO_TRACK_OBS_MAX_AGE_MS
     noteAutoObservation(trackerFresh ? tracked : result.corners, now)
   }
 

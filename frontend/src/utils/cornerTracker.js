@@ -28,6 +28,11 @@ export const TRACK_PHASE_MAX_AGE_MS = 1000
 // live tracker; two failures discard it and leave the live tracker alone.
 export const TENTATIVE_CONFIRM_TRACKS = 2
 export const TENTATIVE_MAX_MISSES = 2
+// Capture geometry may not be older than the frame it is applied to. A tracked
+// quad is cheap and fresh; a model quad is only a fallback and only when no
+// tracked quad exists at all.
+export const CAPTURE_QUAD_MAX_AGE_MS = 120
+export const CAPTURE_MODEL_MAX_AGE_MS = 500
 export const MAX_FRAME_MOVE = 0.12
 // Relative score gate: accept a match only if it explains a useful share of the
 // patch's own variance, with a small absolute floor for low-signal patches.
@@ -125,6 +130,21 @@ export function derivePhase({
     }
   }
   return { phase: 'locked', reason: 'tracking' }
+}
+
+// Pure decision for the capture path: which quad, if any, is tied closely
+// enough to the frame about to be drawn.
+export function shouldAcceptCapture({ hasTracked = false, trackedAgeMs = null, modelAgeMs = null }) {
+  if (hasTracked) {
+    if (trackedAgeMs == null || trackedAgeMs > CAPTURE_QUAD_MAX_AGE_MS) {
+      return { ok: false, reason: 'stale-tracked', source: 'tracked' }
+    }
+    return { ok: true, reason: 'ok', source: 'tracked' }
+  }
+  if (modelAgeMs == null || modelAgeMs > CAPTURE_MODEL_MAX_AGE_MS) {
+    return { ok: false, reason: 'stale-model', source: 'model' }
+  }
+  return { ok: true, reason: 'ok', source: 'model' }
 }
 
 function pixelQuadArea(flat) {

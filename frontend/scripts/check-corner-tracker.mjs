@@ -4,10 +4,13 @@
 import assert from 'node:assert/strict'
 
 import {
+  CAPTURE_MODEL_MAX_AGE_MS,
+  CAPTURE_QUAD_MAX_AGE_MS,
   createTracker,
   derivePhase,
   evaluateTentative,
   isPatchMatchAcceptable,
+  shouldAcceptCapture,
   shouldKeepTracking,
   TRACK_LOST_AFTER,
 } from '../src/utils/cornerTracker.js'
@@ -274,6 +277,46 @@ assert.equal(isPatchMatchAcceptable(676, 300), false)
     'start',
   )
   assert.equal(decide(anchor, anchor, 2000, 0).reason, 'gap')
+}
+
+// Capture geometry may not outlive the frame it is applied to. A stale tracked
+// quad is a rejection, not a fallback to the model; the model is only usable
+// when no tracked quad exists at all.
+{
+  assert.deepEqual(
+    shouldAcceptCapture({ hasTracked: true, trackedAgeMs: 50, modelAgeMs: 900 }),
+    { ok: true, reason: 'ok', source: 'tracked' },
+  )
+  assert.deepEqual(
+    shouldAcceptCapture({
+      hasTracked: true,
+      trackedAgeMs: CAPTURE_QUAD_MAX_AGE_MS + 1,
+      modelAgeMs: 50,
+    }),
+    { ok: false, reason: 'stale-tracked', source: 'tracked' },
+  )
+  assert.deepEqual(
+    shouldAcceptCapture({ hasTracked: true, trackedAgeMs: null, modelAgeMs: 50 }),
+    { ok: false, reason: 'stale-tracked', source: 'tracked' },
+  )
+  assert.deepEqual(
+    shouldAcceptCapture({
+      hasTracked: false,
+      modelAgeMs: CAPTURE_MODEL_MAX_AGE_MS - 1,
+    }),
+    { ok: true, reason: 'ok', source: 'model' },
+  )
+  assert.deepEqual(
+    shouldAcceptCapture({
+      hasTracked: false,
+      modelAgeMs: CAPTURE_MODEL_MAX_AGE_MS + 1,
+    }),
+    { ok: false, reason: 'stale-model', source: 'model' },
+  )
+  assert.deepEqual(
+    shouldAcceptCapture({ hasTracked: false, modelAgeMs: null }),
+    { ok: false, reason: 'stale-model', source: 'model' },
+  )
 }
 
 console.log('corner tracker sanity check passed')
