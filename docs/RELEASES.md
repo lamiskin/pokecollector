@@ -25,6 +25,7 @@ pulled by digest, never rebuilt on the server.
 | `fork-v1.57.9-7` | `3415243` | `56cc1bb` (1.57.9) | `sha256:bc2f0aa0304502fe69f5b78fab717c0167d8c131fdfb621f7d54f1be586e0246` | `sha256:b62253e24f39a27558f9790e75c55a5e8630903686fbc12d924fe6f2bdc72e0b` | 2026-11-22 |
 | `fork-v1.57.9-8` | `45d99b6` | `56cc1bb` (1.57.9) | `sha256:2b7dfe716f94f39d7697aee92cb6791bf2aa3dfaeb1b64295a3261f0d821ad5b` | `sha256:adca34f67b92095b11fb6af7b30542c5f54d9ae41810dbc20418823e28b4f4bf` | 2026-11-22 |
 | `fork-v1.57.9-9` | `13896fb` | `56cc1bb` (1.57.9) | `sha256:be7ba02fe1b9162cad4f477a8cb9a62ded69ede7f1eccc84e5492a78e3c2f2f2` | `sha256:943ca20932ad19436778b21ace56218554886ca9673c22512deace9c43f264a2` | 2026-11-23 |
+| `fork-v1.57.9-10` | `c60997e` | `56cc1bb` (1.57.9) | `sha256:9ea3aa8e8c4353b47ee17a42e5e0d545f6789419cf027521093c5efd870654fc` | `sha256:f1efea36eb609ebe607739fdc1817d1216a7624eec6a33bca4e4db7ab9a19400` | 2026-11-23 |
 
 `fork-v1.55.1-1` is deliberately absent: it is a local annotated tag on
 `2f3c2b8` (the OIDC release candidate) and names the local images Prod ran
