@@ -197,6 +197,7 @@ export default function Analytics() {
   const { data: speciesDuplicates = null, isLoading: speciesLoading } = useQuery({
     queryKey: ['species-duplicates', pricePrimaryField],
     queryFn: () => getSpeciesDuplicates({ price_field: pricePrimaryField }).then(r => r.data),
+    enabled: activeTab === 'species',
   })
   const speciesRows = Array.isArray(speciesDuplicates?.species) ? speciesDuplicates.species : []
   const speciesSummary = speciesDuplicates?.summary || null
@@ -284,6 +285,9 @@ export default function Analytics() {
     rarity: printing.rarity,
     lang: printing.lang,
     images_small: printing.images_small,
+    // The endpoint returns one weighted unit price; expose it as the market
+    // price so the shared dialog's Prices tab has something to show.
+    price_market: printing.price,
   })
 
   const openPrinting = (printing) => {

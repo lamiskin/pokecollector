@@ -240,54 +240,6 @@ def _artist_lang_rank(lang: str | None) -> tuple:
     return (3, code)
 
 
-def _owned_printing_state(
-    db: Session, user_id: int, card_ids: List[str]
-) -> dict[str, list[tuple[int, str]]]:
-    """Owned (quantity, variant) rows per card id, queried in bounded chunks."""
-    state: dict[str, list[tuple[int, str]]] = {}
-    unique_ids = list(dict.fromkeys(card_id for card_id in card_ids if card_id))
-    for start in range(0, len(unique_ids), 5000):
-        chunk = unique_ids[start:start + 5000]
-        rows = db.query(
-            CollectionItem.card_id,
-            CollectionItem.quantity,
-            CollectionItem.variant,
-        ).filter(
-            CollectionItem.user_id == user_id,
-            CollectionItem.card_id.in_(chunk),
-        ).all()
-        for card_id, quantity, variant in rows:
-            if not card_id:
-                continue
-            amount = max(int(quantity or 0), 0)
-            if amount:
-                state.setdefault(card_id, []).append((amount, variant or "Normal"))
-    return state
-
-
-def _wishlisted_card_ids(db: Session, user_id: int, card_ids: List[str]) -> set[str]:
-    '''Wishlisted card ids among ``card_ids``, queried in bounded IN chunks.'''
-    wanted: set[str] = set()
-    unique_ids = list(dict.fromkeys(card_id for card_id in card_ids if card_id))
-    for start in range(0, len(unique_ids), 5000):
-        chunk = unique_ids[start:start + 5000]
-        rows = db.query(WishlistItem.card_id).filter(
-            WishlistItem.user_id == user_id,
-            WishlistItem.card_id.in_(chunk),
-        ).all()
-        wanted.update(card_id for (card_id,) in rows if card_id)
-    return wanted
-
-
-def _owned_variant_summary(variant_totals: dict[str, int]) -> list[dict]:
-    """Shape variant totals like card_state_summaries, in canonical order."""
-    return [
-        {"variant": variant, "quantity": variant_totals[variant]}
-        for variant in CANONICAL_VARIANTS
-        if variant_totals.get(variant, 0) > 0
-    ]
-
-
 def _pick_artist_representative(
     printings: List[dict], specific_lang: str | None, display_lang: str
 ) -> dict:
@@ -304,16 +256,21 @@ def _pick_artist_representative(
 def _artist_index_representative_price(
     printings: dict[str, float | None], display_lang: str
 ) -> float | None:
-    """Market price of the printing that represents a card identity.
+    """Market price of the first printing that has one.
 
     Mirrors the artist checklist: display language, then ``en``, then ``ja``,
-    then any language in canonical order.
+    then any language in canonical order. Printings without a price are
+    skipped so an unpriced preferred printing does not hide a priced one.
     """
     for preferred in (display_lang, "en", "ja"):
-        if preferred in printings:
+        if printings.get(preferred) is not None:
             return printings[preferred]
-    fallback_lang = min(printings, key=lambda code: (_artist_lang_rank(code), code))
-    return printings[fallback_lang]
+    fallback_lang = min(
+        (code for code in printings if printings[code] is not None),
+        key=lambda code: (_artist_lang_rank(code), code),
+        default=None,
+    )
+    return printings[fallback_lang] if fallback_lang is not None else None
 
 
 def _empty_artist_index(page: int, page_size: int) -> dict:
@@ -985,7 +942,7 @@ def search_cards(
 
 @router.get("/artist-checklist")
 def artist_checklist(
-    artist: str = Query(..., min_length=1, max_length=100, description="Artist name substring"),
+    artist: str = Query(..., min_length=1, description="Artist name substring"),
     lang: Optional[str] = Query("all", description="Language filter: supported TCGdex language code or 'all'"),
     ownership: Optional[str] = Query(None, description="Ownership filter: 'owned' or 'missing'"),
     page: int = 1,
@@ -1068,8 +1025,7 @@ def artist_checklist(
             if current is None or rank < current[0]:
                 set_fallback[tcg_set_id] = (rank, set_name, release_date)
 
-        owned_state = _owned_printing_state(db, current_user.id, [row.id for row in rows])
-        wishlist_ids = _wishlisted_card_ids(db, current_user.id, [row.id for row in rows])
+        summaries = card_state_summaries(db, current_user.id, [row.id for row in rows])
 
         def set_meta(set_id: str | None, row_lang: str | None):
             if not set_id:
@@ -1099,11 +1055,13 @@ def artist_checklist(
                 }
                 groups[group_key] = group
 
-            owned_rows = owned_state.get(row.id, [])
-            row_quantity = sum(amount for amount, _variant in owned_rows)
-            row_variants: dict[str, int] = {}
-            for amount, variant in owned_rows:
-                row_variants[variant] = row_variants.get(variant, 0) + amount
+            summary = summaries.get(row.id, {})
+            row_quantity = summary.get("owned_quantity", 0)
+            row_variants = {
+                item["variant"]: item["quantity"]
+                for item in summary.get("owned_variants", [])
+            }
+            for variant, amount in row_variants.items():
                 group["variant_totals"][variant] = (
                     group["variant_totals"].get(variant, 0) + amount
                 )
@@ -1119,8 +1077,8 @@ def artist_checklist(
                 "set_id": row.set_id,
                 "owned": row_quantity > 0,
                 "owned_quantity": row_quantity,
-                "owned_variants": _owned_variant_summary(row_variants),
-                "wishlisted": row.id in wishlist_ids,
+                "owned_variants": summary.get("owned_variants", []),
+                "wishlisted": summary.get("wishlisted", False),
                 "price_market": row.price_market,
                 "_name": row.name,
             })
@@ -1160,15 +1118,33 @@ def artist_checklist(
         owned_count = sum(1 for group in scope if group["owned"])
         list_count = len(filtered)
         progress = round(owned_count / total_count * 100, 1) if total_count else 0
-        missing_value = round(
-            sum(
-                float(group["representative"]["price_market"])
-                for group in scope
-                if not group["owned"]
-                and group["representative"]["price_market"] is not None
-            ),
-            2,
-        )
+        def representative_price(group: dict) -> float | None:
+            """First priced printing, preferring the display language.
+
+            The representative printing can lack a price while another
+            language's printing has one; use that price rather than treating
+            the whole card as priceless.
+            """
+            printings = group["printings"]
+            for preferred in (display_lang, "en", "ja"):
+                for printing in printings:
+                    if printing["lang"] == preferred and printing["price_market"] is not None:
+                        return printing["price_market"]
+            for printing in sorted(
+                printings, key=lambda item: (_artist_lang_rank(item["lang"]), item["id"])
+            ):
+                if printing["price_market"] is not None:
+                    return printing["price_market"]
+            return None
+
+        missing_value = 0.0
+        for group in scope:
+            if group["owned"]:
+                continue
+            price = representative_price(group)
+            if price is not None:
+                missing_value += float(price)
+        missing_value = round(missing_value, 2)
         languages = sorted({
             printing["lang"]
             for group in scope
@@ -1272,7 +1248,11 @@ def artist_checklist(
             card_dict.update({
                 "owned": group["owned"],
                 "owned_quantity": group["owned_quantity"],
-                "owned_variants": _owned_variant_summary(group["variant_totals"]),
+                "owned_variants": [
+                    {"variant": variant, "quantity": group["variant_totals"][variant]}
+                    for variant in CANONICAL_VARIANTS
+                    if group["variant_totals"].get(variant, 0) > 0
+                ],
                 "wishlisted": group["wishlisted"],
                 "set_name": (
                     group["set_name"]

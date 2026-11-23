@@ -35,6 +35,8 @@ class ArtistChecklistTests(unittest.TestCase):
     - sv8-99_fr: hidden (fr is not a configured language and no fr pair is pinned).
     - custom-1_en: user custom card, always excluded.
     - sv6-20_en: artist "Éclair Baron" for accent-insensitive matching.
+    - sv10-1: en/de printings priced only in de (price fallback).
+    - sv10-3: en/ja printings without a tcg_card_id (stripped-id grouping).
     """
 
     def setUp(self):
@@ -217,6 +219,50 @@ class ArtistChecklistTests(unittest.TestCase):
                 lang="en",
                 is_custom=False,
                 price_market=0.75,
+            ),
+            Card(
+                id="sv10-1_en",
+                tcg_card_id="sv10-1",
+                name="Price Fallback",
+                set_id="sv6",
+                number="1",
+                artist="Fallback Artist",
+                lang="en",
+                is_custom=False,
+                price_market=None,
+            ),
+            Card(
+                id="sv10-1_de",
+                tcg_card_id="sv10-1",
+                name="Price Fallback",
+                set_id="sv6",
+                number="1",
+                artist="Fallback Artist",
+                lang="de",
+                is_custom=False,
+                price_market=7.5,
+            ),
+            Card(
+                id="sv10-3_en",
+                tcg_card_id=None,
+                name="No TCGdex Id",
+                set_id="sv6",
+                number="3",
+                artist="Suffix Artist",
+                lang="en",
+                is_custom=False,
+                price_market=1.25,
+            ),
+            Card(
+                id="sv10-3_ja",
+                tcg_card_id=None,
+                name="No TCGdex Id",
+                set_id="sv6",
+                number="3",
+                artist="Suffix Artist",
+                lang="ja",
+                is_custom=False,
+                price_market=2.0,
             ),
         ])
         self.db.commit()
@@ -470,6 +516,32 @@ class ArtistChecklistTests(unittest.TestCase):
         self.assertNotIn("custom-1_en", visible_ids)
         self.assertNotIn("sv8-99_fr", visible_ids)
         self.assertEqual(payload["total_count"], 6)
+
+    def test_missing_value_falls_back_to_a_priced_printing(self):
+        payload = self._checklist(artist="Fallback Artist", lang="all")
+
+        self.assertEqual(payload["total_count"], 1)
+        self.assertEqual(payload["owned_count"], 0)
+        # The display-language (en) printing has no price, but de does.
+        self.assertEqual(payload["missing_value"], 7.5)
+
+    def test_card_without_tcg_card_id_groups_by_stripped_id(self):
+        payload = self._checklist(artist="Suffix Artist", lang="all")
+
+        self.assertEqual(payload["total_count"], 1)
+        card = payload["cards"][0]
+        self.assertIsNone(card["tcg_card_id"])
+        self.assertEqual(card["id"], "sv10-3_en")
+        self.assertEqual(
+            [printing["id"] for printing in card["printings"]],
+            ["sv10-3_en", "sv10-3_ja"],
+        )
+
+    def test_overlong_artist_is_rejected_with_400(self):
+        response = self.client.get(
+            "/api/cards/artist-checklist", params={"artist": "a" * 101}
+        )
+        self.assertEqual(response.status_code, 400, response.text)
 
 
 @unittest.skipUnless(
