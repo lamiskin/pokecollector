@@ -49,10 +49,9 @@ import {
 } from '../utils/cornerTracker'
 import {
   autoHoldDecision,
-  AUTO_DRIFT_WINDOW_MOVE,
-  AUTO_DRIFT_WINDOW_MS,
   AUTO_STABLE_GAP_MS,
-  AUTO_JUMP_MOVE,
+  AUTO_STEP_MOVE,
+  AUTO_TOTAL_MOVE,
   maxCornerMovement,
 } from '../utils/autoHold'
 import { computeMotionScore, toGrayscale } from '../utils/webcamStability'
@@ -202,7 +201,6 @@ function newAutoState() {
     anchorTs: null,
     lastCorners: null,
     lastQualifyingTs: null,
-    history: [],
     lastSource: 'tracked',
     presentSince: null,
     disarmed: false,
@@ -623,9 +621,8 @@ export default function CaptureLab() {
       // produced its hold-reset events.
       auto_hold: {
         stable_ms: AUTO_STABLE_MS,
-        drift_window_ms: AUTO_DRIFT_WINDOW_MS,
-        drift_move: AUTO_DRIFT_WINDOW_MOVE,
-        jump_move: AUTO_JUMP_MOVE,
+        step_move: AUTO_STEP_MOVE,
+        total_move: AUTO_TOTAL_MOVE,
         gap_ms: AUTO_STABLE_GAP_MS,
       },
       tracker: {
@@ -1260,7 +1257,6 @@ export default function CaptureLab() {
     state.lastCorners = null
     state.lastQualifyingTs = null
     state.absentSince = null
-    state.history = []
     state.lastSource = 'tracked'
     state.presentSince = null
     setAutoDisarmed(false)
@@ -1603,16 +1599,13 @@ export default function CaptureLab() {
     state.lastCorners = corners
     state.lastQualifyingTs = now
     state.lastSource = source
-    state.history = source === 'tracked' ? [{ corners, t: now, source }] : []
     setAutoHoldStartTs(now)
     startAutoFireTimer()
   }
 
   // One observation of the held card: a model result, or a fresh tracked quad.
-  // Judge tracked motion against the median quad of the last 500 ms so a
-  // tracker correction or one rogue sample cannot cancel a calm hold. A model
-  // observation re-baselines the history at the detector's frame without
-  // stopping the hold clock.
+  // Judge tracked speed (motion blur) and a loose pan distance; positional drift
+  // is free because the warp uses the same frame's geometry.
   const noteAutoObservation = (corners, now, source = 'tracked') => {
     const state = autoStateRef.current
     if (!autoCaptureRef.current || state.disarmed || !corners) return
@@ -1622,11 +1615,9 @@ export default function CaptureLab() {
       corners,
       now,
       lastQualifyingTs: state.lastQualifyingTs,
-      history: state.history || [],
       source,
       lastSource: state.lastSource || 'tracked',
     })
-    lastHoldDriftRef.current = decision.drift == null ? null : decision.drift
     if (decision.action === 'start') {
       setHoldHint('')
       startAutoWindow(corners, now, source)
@@ -1641,7 +1632,7 @@ export default function CaptureLab() {
           reason: decision.reason,
           heldMs: Math.round(heldMs),
           step: decision.step == null ? null : Number(decision.step.toFixed(4)),
-          drift: decision.drift == null ? null : Number(decision.drift.toFixed(4)),
+          total: decision.total == null ? null : Number(decision.total.toFixed(4)),
         })
       }
       // Only sustained motion earns the hint; gap resets are a stalled loop.
@@ -1652,16 +1643,6 @@ export default function CaptureLab() {
     state.lastCorners = corners
     state.lastQualifyingTs = now
     state.lastSource = source
-    const history = state.history || (state.history = [])
-    // The drift history is tracked-only. A model observation keeps the clock but
-    // clears the old frame; it never becomes a baseline itself.
-    if (decision.reanchor) history.length = 0
-    if (source === 'tracked') {
-      history.push({ corners, t: now, source })
-      const cutoff = now - AUTO_DRIFT_WINDOW_MS
-      while (history.length > 0 && history[0].t < cutoff) history.shift()
-      if (history.length > 60) history.splice(0, history.length - 60)
-    }
     setHoldHint('')
     // The clock-driven fire check owns closing; observations only judge motion.
   }
@@ -1678,7 +1659,6 @@ export default function CaptureLab() {
       state.anchorTs = null
       state.lastCorners = null
       state.lastQualifyingTs = null
-      state.history = []
       state.lastSource = 'tracked'
       stopAutoFireTimer()
       setAutoHoldStartTs(null)
@@ -2088,8 +2068,8 @@ export default function CaptureLab() {
               recordDiagEvent('track-recovered', { via: 'adopt' })
             }
             applyQuadToPolygon(tentativeQuad, { tracked: true })
-            // The adopted quad is the detector's coordinate frame; re-baseline
-            // the hold history here instead of reading the correction as motion.
+            // The adopted quad is the detector's coordinate frame; the hold
+            // clock continues and its step is not judged as movement.
             noteAutoObservation(tentativeQuad, performance.now(), 'model')
             trackerRafRef.current = window.requestAnimationFrame(() => trackerLoopRef.current?.())
             return

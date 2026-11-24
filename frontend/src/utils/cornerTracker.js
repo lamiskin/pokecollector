@@ -37,11 +37,11 @@ export const TENTATIVE_MAX_MISSES = 2
 // Capture geometry may not be older than the frame it is applied to. A tracked
 // quad is cheap and fresh; a model quad is only a fallback and only when no
 // tracked quad exists at all.
-export const CAPTURE_QUAD_MAX_AGE_MS = 120
+export const CAPTURE_QUAD_MAX_AGE_MS = 250
 export const CAPTURE_MODEL_MAX_AGE_MS = 500
 // An automatic capture needs the detector itself to have confirmed the geometry
 // recently; a quad carried only by the tracker is not enough.
-export const CAPTURE_CORROBORATE_MS = 1500
+export const CAPTURE_CORROBORATE_MS = 2500
 export const MAX_FRAME_MOVE = 0.12
 // Relative score gate: accept a match only if it explains a useful share of the
 // patch's own variance, with a small absolute floor for low-signal patches.

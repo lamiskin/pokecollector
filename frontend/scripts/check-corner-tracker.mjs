@@ -16,7 +16,7 @@ import {
   shouldKeepTracking,
   TRACK_LOST_AFTER,
 } from '../src/utils/cornerTracker.js'
-import { autoHoldDecision, AUTO_DRIFT_WINDOW_MS, medianQuad } from '../src/utils/autoHold.js'
+import { autoHoldDecision, AUTO_STEP_MOVE, AUTO_TOTAL_MOVE } from '../src/utils/autoHold.js'
 
 const width = 160
 const height = 160
@@ -221,24 +221,19 @@ assert.equal(isPatchMatchAcceptable(676, 300), false)
   assert.deepEqual(derivePhase({ hasModel: false }), { phase: 'none', reason: 'no-quad' })
 }
 
-// Auto-capture hold: judge smoothness against the median of a rolling window so
-// tracker jitter, one correction, and a couple of rogue samples survive while
-// sustained displacement cancels. Model adoptions re-baseline the window.
+// Auto-capture hold: positional drift is free because the warp uses the same
+// frame's geometry; only speed (motion blur) and a large pan reset the window.
 {
   const quadAt = dx => [
     [0.2 + dx, 0.2], [0.8 + dx, 0.2], [0.8 + dx, 0.8], [0.2 + dx, 0.8],
   ]
   const base = quadAt(0)
-  // Mirrors the caller: tracked observations fill history; a model observation
-  // keeps the hold clock but discards the old coordinate frame.
-  const simulate = (observations, stepMs = 33) => {
+  const run = (observations, stepMs = 33) => {
     let t = 0
     let anchor = base
     let last = base
     let lastSource = 'tracked'
-    let history = [{ corners: base, t: 0, source: 'tracked' }]
     let decision = null
-    let firstRestart = null
     for (const observation of observations) {
       t += stepMs
       const corners = quadAt(observation.dx)
@@ -249,88 +244,36 @@ assert.equal(isPatchMatchAcceptable(676, 300), false)
         corners,
         now: t,
         lastQualifyingTs: t - stepMs,
-        history,
         source,
         lastSource,
       })
-      if (decision.action === 'restart') {
-        if (!firstRestart) firstRestart = decision
-        anchor = corners
-        history = [{ corners, t, source }]
-      } else if (decision.action === 'keep') {
-        if (decision.reanchor) history = []
-        if (source === 'tracked') {
-          history.push({ corners, t, source })
-          const cutoff = t - AUTO_DRIFT_WINDOW_MS
-          while (history.length > 0 && history[0].t < cutoff) history.shift()
-        }
-      }
+      if (decision.action === 'restart') anchor = corners
       last = corners
       lastSource = source
     }
-    return firstRestart || decision
+    return decision
   }
 
-  // Ten observations of ±2 % jitter inside 500 ms: ordinary tremor keeps it.
-  const jitter = Array.from({ length: 10 }, (_, i) => ({
-    dx: i % 3 === 0 ? 0.02 : i % 2 === 0 ? 0.01 : 0,
-  }))
-  assert.equal(simulate(jitter, 50).action, 'keep')
+  // 0.7 %/frame for 800 ms is the real hand-tremor case: it must keep.
+  const creep = Array.from({ length: 24 }, (_, i) => ({ dx: 0.007 * (i + 1) }))
+  assert.equal(run(creep).action, 'keep')
 
-  // A single 7 % model adoption step keeps the window: the correction is a
-  // coordinate-frame change, not the card jumping, and the history restarts at
-  // the adopted quad.
-  const adoption = [
-    ...Array.from({ length: 10 }, () => ({ dx: 0 })),
-    { dx: 0.07, source: 'model' },
-    ...Array.from({ length: 6 }, () => ({ dx: 0.07 })),
+  // 3 % in one tracked-to-tracked step is fast movement and cancels.
+  const fast = [...Array.from({ length: 5 }, () => ({ dx: 0 })), { dx: 0.03 }]
+  assert.equal(run(fast).reason, 'step')
+
+  // A 26 % pan built from 2 % steps cancels on the cumulative guard, not speed.
+  const pan = Array.from({ length: 13 }, (_, i) => ({ dx: 0.02 * (i + 1) }))
+  assert.equal(run(pan).reason, 'total')
+
+  // A model result neither enters the step comparison nor restarts the window,
+  // even when its quad is far from the tracked one.
+  const modelJump = [
+    { dx: 0, source: 'tracked' },
+    { dx: 0.2, source: 'model' },
+    { dx: 0.2, source: 'tracked' },
   ]
-  assert.equal(simulate(adoption).action, 'keep')
-
-  // 1 %/frame creep for 800 ms stays below the median drift threshold.
-  const creep = Array.from({ length: 8 }, (_, i) => ({ dx: 0.01 * (i + 1) }))
-  assert.equal(simulate(creep, 100).action, 'keep')
-
-  // 4 % sustained movement within 200 ms: the median still sits at the old
-  // position, so this cancels as drift.
-  const sustained = [
-    ...Array.from({ length: 10 }, () => ({ dx: 0 })),
-    ...Array.from({ length: 6 }, () => ({ dx: 0.04 })),
-  ]
-  assert.equal(simulate(sustained).reason, 'drift')
-
-  // 8 % in one tracked-to-tracked step is a discontinuity.
-  const jump = [...Array.from({ length: 5 }, () => ({ dx: 0 })), { dx: 0.08 }]
-  assert.equal(simulate(jump).reason, 'jump')
-
-  // Two anomalous samples among fifteen cannot move the median, so the window
-  // survives when the card itself has not moved.
-  const outliers = [
-    ...Array.from({ length: 13 }, (_, i) => ({ corners: base, t: i * 33, source: 'tracked' })),
-    ...Array.from({ length: 2 }, (_, i) => ({ corners: quadAt(0.06), t: 430 + i * 33, source: 'tracked' })),
-  ]
-  assert.equal(
-    autoHoldDecision({
-      anchorCorners: base,
-      lastCorners: quadAt(0.06),
-      corners: base,
-      now: 500,
-      lastQualifyingTs: 480,
-      history: outliers,
-      source: 'tracked',
-      lastSource: 'tracked',
-    }).action,
-    'keep',
-  )
-
-  // A model observation never enters the median; the baseline stays tracker
-  // geometry only.
-  const trackedHistory = Array.from({ length: 5 }, (_, i) => ({
-    corners: base,
-    t: i * 33,
-    source: 'tracked',
-  }))
-  assert.equal(medianQuad([...trackedHistory, { corners: quadAt(0.2), t: 160, source: 'model' }])[0][0], 0.2)
+  assert.equal(run(modelJump).action, 'keep')
 
   // No window yet, and a stalled loop, both restart the clock.
   assert.equal(
@@ -350,10 +293,13 @@ assert.equal(isPatchMatchAcceptable(676, 300), false)
       corners: base,
       now: 2000,
       lastQualifyingTs: 0,
-      history: [{ corners: base, t: 0, source: 'tracked' }],
     }).reason,
     'gap',
   )
+
+  // The constants themselves are the reported contract.
+  assert.equal(AUTO_STEP_MOVE, 0.025)
+  assert.equal(AUTO_TOTAL_MOVE, 0.25)
 }
 
 // Capture geometry may not outlive the frame it is applied to. A stale tracked
@@ -407,7 +353,7 @@ assert.equal(isPatchMatchAcceptable(676, 300), false)
     true,
   )
   assert.equal(
-    isCorroborated({ lastConfirmTs: 1000, now: 2600, quadAgreement: 0.02 }),
+    isCorroborated({ lastConfirmTs: 1000, now: 4000, quadAgreement: 0.02 }),
     false,
   )
   assert.equal(
