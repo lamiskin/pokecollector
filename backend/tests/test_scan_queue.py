@@ -110,6 +110,33 @@ class ScanQueueTests(unittest.TestCase):
         )
         self.db.commit()
 
+    def test_completing_single_item_marks_job_done_in_same_session(self):
+        job = self._job(self.users[0], positions=(0,))
+        claim = claim_next_scan_item(self.db)
+
+        self.assertTrue(complete_claim(
+            self.db,
+            claim,
+            {"recognized": {"name": "A"}, "matches": []},
+        ))
+        # The completion happens in this session: the status query in
+        # _refresh_job_status must see the flushed item and close the job now,
+        # not leave a stale running job behind.
+        self.assertEqual(job.status, "done")
+        self.assertIsNotNone(job.finished_at)
+
+    def test_job_stays_pending_until_every_item_completes(self):
+        job = self._job(self.users[0], positions=(0, 1))
+        first = claim_next_scan_item(self.db)
+
+        self.assertTrue(complete_claim(
+            self.db,
+            first,
+            {"recognized": {"name": "A"}, "matches": []},
+        ))
+        self.assertEqual(job.status, "pending")
+        self.assertIsNone(job.finished_at)
+
     def test_dispatch_rotates_between_users(self):
         self._job(self.users[0], positions=(0, 1))
         self._job(self.users[1], positions=(0,))

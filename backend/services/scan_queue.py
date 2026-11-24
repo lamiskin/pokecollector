@@ -235,6 +235,12 @@ def _leased_items(db: Session, claim: ClaimedScanItem) -> list[ScanJobItem]:
 
 
 def _refresh_job_status(db: Session, job: ScanJob, now: datetime.datetime) -> None:
+    # Flush first: the session is configured with autoflush=False, so without
+    # this the status query below reads the pre-change item rows (usually still
+    # "processing") and the commit then persists a stale "running" job. Do not
+    # remove this to "tidy up" the query: the flush is what makes every caller
+    # see its in-transaction item updates.
+    db.flush()
     statuses = [row[0] for row in db.query(ScanJobItem.status).filter(ScanJobItem.job_id == job.id).all()]
     if not statuses:
         job.status = "failed"
