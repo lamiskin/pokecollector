@@ -126,8 +126,9 @@ export function CardArtworkFrame({
   const label = fallbackAriaLabel(t, kinds)
   const resolvedActionLabel = actionLabel || [alt, label].filter(Boolean).join(' · ') || undefined
   // Derived from the card rather than a caller prop, so every frame that shows
-  // the catalogue large proxy gets the small-scan underlay for free.
-  const underlayImage = resolveCardArtworkUnderlay(card, image)
+  // the catalogue large proxy gets the small-scan underlay for free. Compact
+  // thumbnails are single-image surfaces: a second load there is pure cost.
+  const underlayImage = thumbnail ? null : resolveCardArtworkUnderlay(card, image)
 
   return (
     <div

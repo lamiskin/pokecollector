@@ -92,6 +92,7 @@ describe('catalogue artwork underlay', () => {
     ['a card with no small scan', { card: { ...card, images_small: null } }],
     ['a card with only a TCGdex image base', { card: { ...card, images_small: null, image: 'https://assets.tcgdex.net/en/sv/sv1/1' } }],
     ['a card without a catalogue id', { card: { ...card, id: 42, card_id: null } }],
+    ['a compact thumbnail', { thumbnail: true }],
   ])('leaves %s on the existing skeleton', (_name, props) => {
     const markup = renderFrame(props)
 
