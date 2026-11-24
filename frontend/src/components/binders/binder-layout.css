@@ -96,12 +96,33 @@
      tray (296px = 280px column + 16px gap), so the tray's grips stay clickable.
      A bounded, centred width leaves the outer pockets of the bottom row clear. */
   .binder-selection { position: fixed; z-index: 40; left: var(--binder-bar-left, .75rem); right: var(--binder-bar-right, .75rem); bottom: calc(4.75rem + var(--safe-area-bottom)); margin-inline: auto; max-width: 42rem; }
-  @media (min-width: 1024px) { .binder-selection { bottom: .75rem; max-width: 46rem; } }
+  /* A fourth control (move, return, remove, cancel) needs a little more room
+     before the selected card's name starts wrapping into three lines. */
+  @media (min-width: 1024px) { .binder-selection { bottom: .75rem; max-width: 50rem; } }
   .binder-selection-art { width: 2.5rem; flex: none; }
 
-  /* Keep the last rows of the workspace scrollable clear of the fixed bar. */
-  @media (max-width: 1023px) { .binder-has-selection { padding-bottom: calc(13rem + var(--safe-area-bottom)); } }
+  /* Keep the last rows of the workspace scrollable clear of the fixed bar.
+     On a phone the actions form a two-row block, so the bar is about 192px
+     tall and sits 76px up; the reserve is 192 + 76 + 4. */
+  @media (max-width: 1023px) { .binder-has-selection { padding-bottom: calc(17rem + var(--safe-area-bottom)); } }
   @media (min-width: 1024px) { .binder-has-selection { padding-bottom: 6rem; } }
+
+  /* ── Remove-copy chooser ────────────────────────────────────────────────
+     The dialog is portalled, so it carries its own row styling instead of
+     borrowing workspace rules. Every target is at least 44px tall. */
+  .binder-remove-action { display: flex; width: 100%; align-items: flex-start; gap: .75rem; min-height: 3.5rem; border: 1px solid var(--color-border); border-radius: .75rem; background: var(--color-surface); padding: .7rem .75rem; text-align: left; transition: border-color 160ms ease-out, background-color 160ms ease-out; }
+  .binder-remove-action:hover:not(:disabled) { border-color: var(--color-text-muted); background: var(--color-elevated); }
+  .binder-remove-action:focus-visible { outline: 2px solid var(--color-blue); outline-offset: 2px; }
+  .binder-remove-action:disabled { opacity: .55; cursor: not-allowed; }
+  .binder-remove-icon { display: grid; place-items: center; flex: none; width: 2.25rem; height: 2.25rem; border-radius: .6rem; background: var(--color-elevated); color: var(--color-text-secondary); }
+  .binder-remove-action-danger { border-color: color-mix(in srgb, var(--color-brand-red) 38%, var(--color-border)); background: color-mix(in srgb, var(--color-brand-red) 6%, var(--color-surface)); }
+  .binder-remove-action-danger:hover:not(:disabled) { border-color: color-mix(in srgb, var(--color-brand-red) 70%, var(--color-border)); background: color-mix(in srgb, var(--color-brand-red) 12%, var(--color-surface)); }
+  .binder-remove-icon-danger { background: color-mix(in srgb, var(--color-brand-red) 14%, transparent); color: var(--color-brand-red); }
+  .binder-remove-confirm { display: inline-flex; align-items: center; justify-content: center; gap: .5rem; min-height: 2.75rem; border: 1px solid transparent; border-radius: .5rem; background: var(--color-brand-red); color: #fff; padding: .625rem 1rem; font-size: .875rem; font-weight: 600; transition: filter 160ms ease-out; }
+  .binder-remove-confirm:hover:not(:disabled) { filter: brightness(1.08); }
+  .binder-remove-confirm:disabled { opacity: .5; cursor: not-allowed; }
+  .binder-remove-confirm:focus-visible { outline: 2px solid var(--color-blue); outline-offset: 2px; }
+  .binder-remove-pill { display: inline-flex; align-items: center; border: 1px solid var(--color-border); border-radius: 999px; background: var(--color-card); padding: .05rem .45rem; font-size: .6875rem; font-variant-numeric: tabular-nums; color: var(--color-text-secondary); }
 
   /* ── Motion ───────────────────────────────────────────────────────────── */
   .binder-page-reveal { animation: binder-page-in 180ms ease-out; }
@@ -115,6 +136,7 @@
   @media (prefers-reduced-motion: reduce) {
     .binder-workspace *, .binder-workspace *::before, .binder-workspace *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
     .binder-slot-option, .binder-overview-page, .binder-tray-toggle svg { transition: none !important; }
+    .binder-remove-action, .binder-remove-confirm { transition: none !important; }
     .binder-drag-ghost { transform: translate(-50%, -50%) scale(1.06); }
   }
 }

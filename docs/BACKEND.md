@@ -660,6 +660,14 @@ Owner endpoints:
   A placed source swaps with an occupied destination; a tray source returns the
   displaced copy to the tray. Both require occupied-slot confirmation. Null page
   **and** slot return the chosen placed copy to the tray, retaining its allocation.
+- `POST /api/binders/{id}/copies/remove`: `{binder_card_id, placement_id,
+  remove_owned_copy, expected_revision}` removes exactly one chosen copy — the
+  placed copy when a placement ID is given, otherwise one tray copy — and with
+  `remove_owned_copy` also deletes one owned collection copy in the same
+  transaction. The owned row disappears only with the last binder copy, and a
+  product-linked final copy is refused unchanged. This is the explicit removal
+  route: it needs no prior return to Not placed, and it clears the layout undo
+  token because membership cannot be replayed.
 - `POST /api/binders/{id}/layout/undo`: `{expected_revision}` restores the last
   server-held layout/placement snapshot only if no relevant state changed.
 - `GET /api/cards/{card_id}/locations?collection_item_id=...`: every applicable
