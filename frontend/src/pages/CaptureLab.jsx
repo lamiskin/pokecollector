@@ -399,6 +399,7 @@ export default function CaptureLab() {
   const mountedRef = useRef(true)
   const pendingRef = useRef([])
   const inFlightRef = useRef(new Set())
+  const batchScanRef = useRef(false)
   const detectorWorkerRef = useRef(null)
   const detectorSeqRef = useRef(0)
   const detectorImageUrlRef = useRef(null)
@@ -499,6 +500,9 @@ export default function CaptureLab() {
   const [captureNote, setCaptureNote] = useState('')
   const [soundOn, setSoundOn] = useState(isCaptureSoundEnabled)
   const [pending, setPending] = useState([])
+  const [batchScanning, setBatchScanning] = useState(false)
+  const [batchScanMessage, setBatchScanMessage] = useState('')
+  const [batchScanError, setBatchScanError] = useState('')
   const [libraryError, setLibraryError] = useState('')
   const [storedScans, setStoredScans] = useState({})
   const [rotatingCaptures, setRotatingCaptures] = useState({})
@@ -2302,6 +2306,66 @@ export default function CaptureLab() {
     }
   }
 
+  // One batch job for every pending capture, each image its own card. The list
+  // stays in place so the user can see what was sent and remove it themselves.
+  const scanAllPending = async () => {
+    if (batchScanRef.current || pending.length === 0) return
+    batchScanRef.current = true
+    setBatchScanning(true)
+    setBatchScanMessage('')
+    setBatchScanError('')
+    const items = pending.slice()
+    items.forEach(item => updatePending(item.id, {
+      scanStatus: 'uploading',
+      scanProgress: 0,
+      scanError: '',
+      scanJobId: '',
+    }))
+    try {
+      const job = await enqueueScanJob(
+        items.map(item => item.file),
+        items.map((_, index) => index),
+        null,
+        {
+          onProgress: progress => {
+            if (progress.phase === 'prepare') {
+              setBatchScanMessage(`Preparing ${progress.done} of ${progress.total}…`)
+              return
+            }
+            if (progress.phase !== 'upload' || !progress.total) return
+            const percent = scanUploadPercent(progress)
+            items.forEach(item => updatePending(item.id, { scanProgress: percent }))
+            const done = Math.min(
+              items.length,
+              Math.max(1, Math.ceil((percent / 100) * items.length)),
+            )
+            setBatchScanMessage(`Uploading ${done} of ${items.length}…`)
+          },
+        },
+      )
+      if (!mountedRef.current) return
+      items.forEach(item => updatePending(item.id, {
+        scanStatus: 'done',
+        scanProgress: 100,
+        scanJobId: job.id,
+      }))
+      setBatchScanMessage(
+        `Sent ${items.length} capture${items.length === 1 ? '' : 's'} as job ${job.id}.`,
+      )
+    } catch (error) {
+      if (!mountedRef.current) return
+      const message = scanErrorMessage(error)
+      items.forEach(item => updatePending(item.id, {
+        scanStatus: 'error',
+        scanError: message,
+      }))
+      setBatchScanError(`Batch scan failed: ${message}`)
+    } finally {
+      batchScanRef.current = false
+      if (mountedRef.current) setBatchScanning(false)
+    }
+  }
+
   const updateStoredScan = (name, patch) => {
     setStoredScans(prev => ({
       ...prev,
@@ -2960,7 +3024,22 @@ export default function CaptureLab() {
             <Save size={15} aria-hidden />
             Save all to Dev
           </button>
+          <button
+            type="button"
+            className="btn-ghost-sm"
+            disabled={pending.length === 0 || batchScanning}
+            onClick={scanAllPending}
+          >
+            <ScanLine size={15} aria-hidden />
+            {batchScanning ? 'Scanning…' : `Scan all (${pending.length})`}
+          </button>
         </div>
+        {batchScanMessage ? (
+          <p className="mt-2 text-xs text-text-secondary">{batchScanMessage}</p>
+        ) : null}
+        {batchScanError ? (
+          <p className="mt-2 text-xs text-brand-red">{batchScanError}</p>
+        ) : null}
 
         {pending.length === 0 ? (
           <p className="mt-3 text-xs text-text-secondary">
