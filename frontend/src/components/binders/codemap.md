@@ -93,6 +93,12 @@ gateway" between the user and the binder CSV import endpoint.
   collection dialogs additionally scope by collection item. Links carry expected
   card/membership and placement identity, not coordinates alone, and show the
   location as a compact pill beside the binder name.
+  Private rows add a sibling remove control that takes exactly one copy out of
+  that binder (destructive confirm naming the binder, and the pocket for a placed
+  copy); it uses the explicit copy-removal route without a layout revision, keeps
+  the collection copy, and refetches the panel from the server. Rows keep the
+  binder link as the tap target; the button is never nested inside it, and the
+  public view renders no removal at all.
   Ordinary binders without layouts retain Cards view; linked unplaced entries
   receive an explicit explanation and an action opening the associated card.
 - `utils/binderLayout.js` owns spread calculations, translated interpolation,

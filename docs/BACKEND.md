@@ -667,7 +667,9 @@ Owner endpoints:
   transaction. The owned row disappears only with the last binder copy, and a
   product-linked final copy is refused unchanged. This is the explicit removal
   route: it needs no prior return to Not placed, and it clears the layout undo
-  token because membership cannot be replayed.
+  token because membership cannot be replayed. `expected_revision` may be omitted
+  only for a named copy (the card dialog's location row); a moved placement still
+  409s and the locked quantity is read as-is, so it cannot overwrite another move.
 - `POST /api/binders/{id}/layout/undo`: `{expected_revision}` restores the last
   server-held layout/placement snapshot only if no relevant state changed.
 - `GET /api/cards/{card_id}/locations?collection_item_id=...`: every applicable
