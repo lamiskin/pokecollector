@@ -13,10 +13,11 @@ from collections import Counter
 from fastapi import HTTPException
 from sqlalchemy.orm import joinedload
 
-from models import Binder, BinderCard, BinderPlacement, CollectionCardPhoto
+from models import Binder, BinderCard, BinderPlacement, CollectionCardPhoto, CollectionItem, User
 from services.binder_allocations import (
     collection_binder_allocation_counts, lock_user_card_allocations, stored_binder_quantity,
 )
+from services.product_sources import product_sources_by_collection_item
 
 
 def owned_binder(db, user_id, binder_id, *, write=False):
@@ -120,6 +121,9 @@ def layout_state(db, binder, *, public=False):
             row.update(images_small=card.images_small if card else None,
                        images_large=card.images_large if card else None,
                        collection_item_id=item.id if resolved else None,
+                       # Private only: what the owner still owns, so the workspace can
+                       # offer "remove this copy from the collection too".
+                       owned_quantity=int(item.quantity or 0) if resolved else None,
                        variant=item.variant if resolved else None,
                        condition=item.condition if resolved else None,
                        has_scan_photo=entry.card_id in scan_photos)
@@ -247,6 +251,78 @@ def move_copy(db, user_id, binder_id, request):
         db.add(BinderPlacement(id=displaced[0], binder_id=binder.id, binder_card_id=displaced[1],
                                page=source_position[0], slot=source_position[1]))
     return _finish(db, binder, before)
+
+
+def remove_copy(db, user_id, binder_id, request):
+    """Remove one explicitly chosen copy from the binder, optionally with its owned copy.
+
+    A removal deletes membership, which layout undo cannot restore (replaying the
+    snapshot would reference a deleted binder_card_id), so the pending undo token
+    is cleared instead of being replaced.
+    """
+    binder, entries, placements, _before = _start_write(db, user_id, binder_id, request.expected_revision)
+    if binder.layout_pages is None:
+        raise HTTPException(409, "Enable a physical layout before removing copies")
+    entry = next((e for e in entries if e.id == request.binder_card_id), None)
+    if not entry:
+        raise HTTPException(404, "Binder entry not found")
+    source = None
+    if request.placement_id:
+        source = next((p for p in placements if p.id == request.placement_id), None)
+        if not source or source.binder_card_id != entry.id:
+            raise HTTPException(409, "The selected copy moved or was removed. Refresh its location.")
+    elif sum(p.binder_card_id == entry.id for p in placements) >= stored_binder_quantity(entry.required_quantity):
+        raise HTTPException(409, "No unplaced copy of this entry is available")
+    item = entry.collection_item
+    resolved = bool(item and item.user_id == user_id and item.card_id == entry.card_id)
+    quantity = stored_binder_quantity(entry.required_quantity)
+    next_owned = None
+    if request.remove_owned_copy:
+        if not resolved:
+            raise HTTPException(409, "Resolve this legacy entry: remove it from the binder, then add an exact owned collection item before placing it.")
+        next_owned = int(item.quantity or 0) - 1
+        if next_owned < 0:
+            raise HTTPException(409, "This collection row has no copies left to remove. Nothing was changed.")
+        if next_owned == 0:
+            # The owned row can only go when this binder no longer reserves copies
+            # of it; removing it under a surviving entry would orphan membership.
+            if quantity > 1:
+                raise HTTPException(409, "This binder reserves more copies than the collection row holds. Reduce the binder quantity first. Nothing was changed.")
+            user = db.get(User, user_id)
+            if product_sources_by_collection_item(db, user, [item.id]).get(item.id):
+                raise HTTPException(409, "This collection copy is linked to a product. Sell or unlink it in the collection first. Nothing was changed.")
+    if source is not None:
+        db.delete(source)
+        db.flush()
+    if quantity <= 1:
+        db.delete(entry)
+        db.flush()
+    else:
+        entry.required_quantity = quantity - 1
+    if request.remove_owned_copy:
+        if next_owned:
+            item.quantity = next_owned
+        else:
+            card_id = item.card_id
+            db.delete(item)
+            db.flush()
+            # The photo is shared by every collection row for this owner and card;
+            # drop it only when this was the final reference (see api.collection).
+            remaining = db.query(CollectionItem.id).filter(
+                CollectionItem.user_id == user_id, CollectionItem.card_id == card_id,
+            ).first()
+            if not remaining:
+                db.query(CollectionCardPhoto).filter(
+                    CollectionCardPhoto.user_id == user_id, CollectionCardPhoto.card_id == card_id,
+                ).delete(synchronize_session=False)
+    binder.layout_undo = None
+    binder.layout_revision = (binder.layout_revision or 0) + 1
+    binder.updated_at = datetime.datetime.utcnow()
+    db.flush()
+    db.refresh(binder)
+    payload = layout_state(db, binder)
+    db.commit()
+    return payload
 
 
 def undo_layout(db, user_id, binder_id, expected_revision):

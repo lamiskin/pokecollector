@@ -61,6 +61,26 @@ gateway" between the user and the binder CSV import endpoint.
   shell padding and the side tray, it is hidden while a copy is held, and the
   workspace reserves scrollable space beneath it so no pocket is trapped behind
   it.
+- Removal is an explicit action, never a drop target: dropping on Not placed
+  already means "keep this copy in the binder, just unplaced". The selection bar
+  adds a destructive-toned **Remove…** control (private view only) and carries no
+  cross-breakpoint order utilities: `Move to…` → `Return to Not placed` →
+  `Remove…` is both the DOM and the rendered sequence, wrapping on a phone as
+  Move | Return and then a full-width Remove, so Tab never jumps against the eye.
+  `BinderRemoveDialog`
+  follows the chooser's rhythm: the card row repeats the copy's position plus its
+  counts in this binder and in the collection, then whole-row actions carry their
+  own consequences. *Remove from this binder* takes one copy out of the binder
+  (the last copy leaves the binder). *Remove from collection* renders only for an
+  entry linked to owned inventory (`collection_item_id`), is danger-styled, and
+  needs a second focused step before it deletes one owned copy; that step opens
+  with focus on **Back** and stacks Back above the delete on phones, so a second
+  Enter can never confirm the delete. A product-linked
+  last copy is refused by the server, and its `detail` is surfaced inside the
+  dialog with a hint to re-select after a stale revision. The binder only changes
+  from the returned snapshot (invalidate the `binder-cards` prefix, `binders`,
+  `card-locations`, plus `collection` when an owned copy went); nothing is
+  removed locally, and the status line receives focus afterwards.
 - `BinderLayoutSettings` requires a server preview before saving. The preview's
   revision and exact affected placement IDs accompany confirmation; geometry
   changes and disabling pages return occupied copies to Not placed, never repack.

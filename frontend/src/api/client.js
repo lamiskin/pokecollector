@@ -19,6 +19,9 @@ export const getBinderLayout = id => api.get(`/binders/${id}/layout`, { headers:
 export const previewBinderLayout = (id, data) => api.post(`/binders/${id}/layout/preview`, data).then(r => r.data)
 export const saveBinderLayout = (id, data) => api.put(`/binders/${id}/layout`, data).then(r => r.data)
 export const moveBinderPlacement = (id, data) => api.post(`/binders/${id}/placements`, data).then(r => r.data)
+// Removes one binder copy; with remove_owned_copy it also deletes one owned
+// collection copy in the same revisioned operation.
+export const removeBinderCopy = (id, data) => api.post(`/binders/${id}/copies/remove`, data).then(r => r.data)
 export const undoBinderLayout = (id, expected_revision) => api.post(`/binders/${id}/layout/undo`, { expected_revision }).then(r => r.data)
 export const getCardLocations = (cardId, collectionItemId) => api.get(`/cards/${encodeURIComponent(cardId)}/locations`, {
   params: collectionItemId ? { collection_item_id: collectionItemId } : {},

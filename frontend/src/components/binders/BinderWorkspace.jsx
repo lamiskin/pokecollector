@@ -1,36 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
-import { ArrowLeft, ArrowRight, Check, ChevronDown, GripVertical, LayoutGrid, MousePointerClick, Move, Undo2, X } from 'lucide-react'
-import { CardDisplay } from '../card-system'
-import { CollectionCardDisplay } from '../CollectionCardImage'
+import { ArrowLeft, ArrowRight, Check, ChevronDown, GripVertical, LayoutGrid, MousePointerClick, Move, Trash2, Undo2, X } from 'lucide-react'
 import Modal from '../ui/Modal'
 import ConfirmDialog from '../ui/ConfirmDialog'
+import Artwork from './BinderArtwork'
+import BinderRemoveDialog from './BinderRemoveDialog'
 import { binderLocationHref, binderMessage, resolveBinderTarget, visibleBinderPages } from '../../utils/binderLayout'
-import { resolveCardImageUrl } from '../../utils/imageUrl'
 import './binder-layout.css'
-
-function Artwork({ entry, readOnly }) {
-  const card = { ...entry, id: entry.card_id }
-  // One pocket is one copy: the variant pill names that printing without
-  // inventing a quantity, the frame carries the same holo effect as everywhere
-  // else, and the owner's photo follows the normal preference rules.
-  const stateIndicatorProps = {
-    card: { owned_variants: entry.variant ? [{ variant: entry.variant, quantity: 1 }] : [] },
-    showQuantity: false,
-    showWishlist: false,
-  }
-  const props = {
-    variant: 'artwork',
-    card,
-    image: resolveCardImageUrl(card),
-    alt: entry.name,
-    interactive: false,
-    variantEffectSource: entry.variant,
-    showStateIndicators: Boolean(entry.variant),
-    stateIndicatorProps,
-  }
-  return readOnly ? <CardDisplay {...props} /> : <CollectionCardDisplay {...props} item={{ id: entry.collection_item_id, card, has_scan_photo: entry.has_scan_photo }} />
-}
 
 // Keyboard movement inside the destination grid mirrors the pockets themselves,
 // so a chooser opened from the keyboard never needs the mouse.
@@ -39,6 +15,28 @@ function gridKeyMove(event, slot, columns, count, container) {
   if (!(event.key in offsets)) return
   event.preventDefault()
   container?.querySelector(`[data-slot-target="${Math.max(1, Math.min(count, slot + offsets[event.key]))}"]`)?.focus()
+}
+
+// The bar is the only surface that acts on a selection, so removal lives here
+// rather than in a drop target: dropping onto Not placed already means "keep
+// this copy in the binder, just unplaced". Removal is therefore always an
+// explicit, named action, and the dialog behind it names the copy again.
+export function BinderSelectionBar({ t, selected, readOnly = false, busy, sideTray, frame, onMove, onReturn, onRemove, onCancel }) {
+  if (!selected || readOnly) return null
+  return <div className="binder-selection flex flex-wrap items-center gap-2 rounded-xl border border-border bg-bg-elevated p-3 shadow-xl sm:gap-3" role="region" aria-label={t('binderLayout.selection')} style={{ '--binder-bar-left': `${frame.left + 12}px`, '--binder-bar-right': `${frame.right + 12 + (sideTray ? 296 : 0)}px` }}>
+    <div className="binder-selection-art hidden sm:block" aria-hidden="true"><Artwork entry={selected.entry} /></div>
+    <p className="min-w-0 flex-1 text-sm font-semibold">{binderMessage(t, 'selected', { name: selected.entry.name })}</p>
+    <button className="btn-ghost min-h-11 min-w-11 px-0 sm:px-4" disabled={busy} onClick={onCancel}><X size={16} aria-hidden /><span className="sr-only sm:not-sr-only">{t('common.cancel')}</span></button>
+    {/* No order utilities anywhere in the bar: the phone layout wraps this
+        group onto its own rows and the desktop layout keeps it inline, so the
+        DOM sequence (Move → Return → Remove) is the rendered sequence at every
+        width and Tab never jumps against the eye. */}
+    <div className="grid w-full grid-cols-2 gap-2 sm:flex sm:w-auto">
+      <button data-move-selection className="btn-primary min-h-11 w-full sm:w-auto" disabled={busy} onClick={onMove}>{t('binderLayout.moveTo')}</button>
+      {selected.placement_id && <button className="btn-secondary min-h-11 w-full sm:w-auto" disabled={busy} onClick={onReturn}>{t('binderLayout.returnToTray')}</button>}
+      {onRemove && <button data-remove-selection className="btn-ghost col-span-2 min-h-11 w-full border-brand-red/30 text-brand-red hover:bg-brand-red/10 sm:col-auto sm:w-auto" disabled={busy} onClick={onRemove}><Trash2 size={16} aria-hidden />{t('binderLayout.remove')}</button>}
+    </div>
+  </div>
 }
 
 export function BinderPage({ number, layout, placements, entries, selected, highlight, dragTarget, saved, dragging, arranging, busy, readOnly, filter, onActivate, onDragStart, onDragEnd, onPointerDragStart, onDragTarget, onDrop, t }) {
@@ -123,7 +121,7 @@ function DestinationGrid({ t, page, layout, placements, entries, selected, value
   </div>
 }
 
-export default function BinderWorkspace({ snapshot, readOnly = false, binderId, handle, onOpen, onMove, onUndo, t, accent }) {
+export default function BinderWorkspace({ snapshot, readOnly = false, binderId, handle, onOpen, onMove, onUndo, onRemove, t, accent }) {
   const [params, setParams] = useSearchParams()
   const [page, setPage] = useState(() => Number(params.get('page')) || 1)
   const [arranging, setArranging] = useState(false)
@@ -136,6 +134,11 @@ export default function BinderWorkspace({ snapshot, readOnly = false, binderId, 
   const [destinationPage, setDestinationPage] = useState(1)
   const [destinationSlot, setDestinationSlot] = useState(null)
   const [confirmation, setConfirmation] = useState(null)
+  const [removing, setRemoving] = useState(false)
+  const [removeStep, setRemoveStep] = useState('choose')
+  const [removePending, setRemovePending] = useState(null)
+  const [removeError, setRemoveError] = useState('')
+  const [removeStale, setRemoveStale] = useState(false)
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
@@ -150,6 +153,7 @@ export default function BinderWorkspace({ snapshot, readOnly = false, binderId, 
   const [trayDrag, setTrayDrag] = useState(false)
   const [direction, setDirection] = useState(1)
   const root = useRef(null)
+  const statusRef = useRef(null)
   const dragSource = useRef(null)
   const dragOrigin = useRef(null)
   const pointerDrag = useRef(null)
@@ -171,6 +175,10 @@ export default function BinderWorkspace({ snapshot, readOnly = false, binderId, 
   const highlighted = target?.kind === 'slot' ? target.placement : null
   const matchingPlacements = filter ? placements.filter(p => entries.find(e => e.binder_card_id === p.binder_card_id)?.name?.toLocaleLowerCase().includes(filter.toLocaleLowerCase())) : []
   const destinationOccupancy = placements.filter(p => p.page === destinationPage).length
+  // The selection stores copy identity, not coordinates, so the dialog resolves
+  // the pocket from the current snapshot to show where this copy sits now.
+  const selectedPlacement = selected?.placement_id ? placements.find(p => p.id === selected.placement_id) : null
+  const selectedLocation = selectedPlacement ? binderMessage(t, 'location', { page: selectedPlacement.page, slot: selectedPlacement.slot }) : t('binderLayout.notPlaced')
 
   useEffect(() => {
     if (!root.current) return undefined
@@ -205,10 +213,10 @@ export default function BinderWorkspace({ snapshot, readOnly = false, binderId, 
 
   useEffect(() => {
     if (!selected) return undefined
-    const cancel = event => { if (event.key === 'Escape' && !chooser && !confirmation && !busy) { setSelected(null); endDrag() } }
+    const cancel = event => { if (event.key === 'Escape' && !chooser && !confirmation && !removing && !busy) { setSelected(null); endDrag() } }
     document.addEventListener('keydown', cancel)
     return () => document.removeEventListener('keydown', cancel)
-  }, [selected, chooser, confirmation, busy])
+  }, [selected, chooser, confirmation, removing, busy])
   useEffect(() => () => clearTimeout(dwellTimer.current), [])
   useEffect(() => () => clearTimeout(savedTimer.current), [])
   useEffect(() => { handlers.current = { place, endDrag } })
@@ -387,6 +395,28 @@ export default function BinderWorkspace({ snapshot, readOnly = false, binderId, 
     else if (placement) select({ placement_id: placement.id, binder_card_id: placement.binder_card_id, entry })
   }
   const openChooser = () => { setDestinationPage(currentPage); setDestinationSlot(null); setError(''); setChooser(true) }
+  const openRemove = () => { setRemoveStep('choose'); setRemovePending(null); setRemoveError(''); setRemoveStale(false); setRemoving(true) }
+  const closeRemove = () => {
+    if (busy) return
+    setRemoving(false); setRemoveStep('choose'); setRemoveError(''); setRemoveStale(false)
+  }
+  // Nothing is removed locally: the server answers with the next snapshot, so a
+  // refused, stale or product-protected request leaves the binder as it was and
+  // its message stays inside the dialog next to the action that raised it.
+  const removeCopy = async removeOwned => {
+    if (!selected || busy || !onRemove) return
+    const source = selected
+    setBusy(true); setRemovePending(removeOwned ? 'collection' : 'binder'); setRemoveError(''); setRemoveStale(false); setMessage('')
+    try {
+      await onRemove({ binder_card_id: source.binder_card_id, placement_id: source.placement_id || null, remove_owned_copy: removeOwned, expected_revision: source.revision })
+      setRemoving(false); setRemoveStep('choose'); setSelected(null); endDrag()
+      setMessage(removeOwned ? t('binderLayout.removedFromCollection') : t('binderLayout.removedFromBinder'))
+      requestAnimationFrame(() => statusRef.current?.focus())
+    } catch (e) {
+      setRemoveError(e.message)
+      setRemoveStale(e.status === 409)
+    } finally { setBusy(false); setRemovePending(null) }
+  }
   const trayTargeted = trayDrag || Boolean(pointerTarget?.tray)
   const spreadSingle = spread && pages.length === 1
   const targetText = target?.kind === 'missing' ? t('binderLayout.targetMissing') : target?.kind === 'choices' ? t('binderLayout.targetChoices') : target?.moved ? t('binderLayout.targetMoved') : ''
@@ -461,16 +491,8 @@ export default function BinderWorkspace({ snapshot, readOnly = false, binderId, 
       </section>
     </div>
     {dragGhost && dragSource.current?.entry && <div className="binder-drag-ghost" aria-hidden="true" style={{ left: `${dragGhost.x}px`, top: `${dragGhost.y}px`, '--binder-ghost-tilt': `${dragGhost.tilt}deg` }}><Artwork entry={dragSource.current.entry} readOnly={readOnly} /></div>}
-    {selected && !dragging && <div className="binder-selection flex flex-wrap items-center gap-2 rounded-xl border border-border bg-bg-elevated p-3 shadow-xl sm:gap-3" role="region" aria-label={t('binderLayout.selection')} style={{ '--binder-bar-left': `${frame.left + 12}px`, '--binder-bar-right': `${frame.right + 12 + (sideTray ? 296 : 0)}px` }}>
-      <div className="binder-selection-art order-1 hidden sm:block" aria-hidden="true"><Artwork entry={selected.entry} readOnly={readOnly} /></div>
-      <p className="order-2 min-w-0 flex-1 text-sm font-semibold">{binderMessage(t, 'selected', { name: selected.entry.name })}</p>
-      <button className="btn-ghost order-3 min-h-11 min-w-11 px-0 sm:order-5 sm:px-4" disabled={busy} onClick={() => { setSelected(null); endDrag() }}><X size={16} aria-hidden /><span className="sr-only sm:not-sr-only">{t('common.cancel')}</span></button>
-      <div className="order-4 flex w-full flex-wrap gap-2 sm:w-auto">
-        <button data-move-selection className="btn-primary min-h-11 flex-none" disabled={busy} onClick={openChooser}>{t('binderLayout.moveTo')}</button>
-        {selected.placement_id && <button className="btn-secondary min-h-11 flex-1 sm:flex-none" disabled={busy} onClick={() => returnToTray(selected)}>{t('binderLayout.returnToTray')}</button>}
-      </div>
-    </div>}
-    <div className="text-sm text-text-secondary" role="status" aria-live="polite">{busy ? t('binderLayout.saving') : message}</div>
+    {selected && !dragging && <BinderSelectionBar t={t} selected={selected} readOnly={readOnly} busy={busy} sideTray={sideTray} frame={frame} onMove={openChooser} onReturn={() => returnToTray(selected)} onRemove={onRemove ? openRemove : undefined} onCancel={() => { setSelected(null); endDrag() }} />}
+    <div ref={statusRef} tabIndex={-1} className="text-sm text-text-secondary" role="status" aria-live="polite">{busy ? t('binderLayout.saving') : message}</div>
     {error && !chooser && <p role="alert" className="rounded-xl border border-brand-red/30 bg-brand-red/5 p-3 text-sm text-brand-red">{error}</p>}
     <Modal isOpen={overview} onClose={() => setOverview(false)} title={t('binderLayout.overview')} size="xl">
       <div className="grid grid-cols-3 sm:grid-cols-6 gap-2 p-4">{pageOptions.map(number => {
@@ -504,6 +526,21 @@ export default function BinderWorkspace({ snapshot, readOnly = false, binderId, 
         </div>
       </form>
     </Modal>}
+    {selected && onRemove && <BinderRemoveDialog
+      isOpen={removing}
+      t={t}
+      entry={selected.entry}
+      location={selectedLocation}
+      step={removeStep}
+      pending={removePending}
+      stale={removeStale}
+      error={removeError}
+      onClose={closeRemove}
+      onRemoveBinder={() => removeCopy(false)}
+      onRemoveCollection={() => { setRemoveError(''); setRemoveStale(false); setRemoveStep('confirm') }}
+      onBack={() => { setRemoveError(''); setRemoveStale(false); setRemoveStep('choose') }}
+      onConfirm={() => removeCopy(true)}
+    />}
     <ConfirmDialog isOpen={Boolean(confirmation)} onClose={() => { setConfirmation(null); focusSelection() }} onConfirm={() => commit(confirmation.destination, confirmation.source, true)} title={selected?.placement_id ? t('binderLayout.swapTitle') : t('binderLayout.replaceTitle')} message={confirmation ? binderMessage(t, confirmation.source.placement_id ? 'swapHelp' : 'replaceHelp', { name: confirmation.source.entry.name, other: confirmation.occupant?.name, page: confirmation.destination.page, slot: confirmation.destination.slot }) : ''} confirmLabel={confirmation?.source.placement_id ? t('binderLayout.swap') : t('binderLayout.replace')} cancelLabel={t('common.cancel')} isPending={busy} />
   </div>
 }
