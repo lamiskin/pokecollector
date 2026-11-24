@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Camera, Check, Download, ImagePlus, Loader2, RefreshCw, RotateCw, Save, ScanLine, Trash2, VideoOff, X } from 'lucide-react'
+import { Camera, Check, Download, ImagePlus, Loader2, RefreshCw, RotateCw, Save, ScanLine, Trash2, VideoOff, Volume2, VolumeX, X } from 'lucide-react'
 import {
   deleteCaptureLabEntry,
   enqueueScanJob,
@@ -14,6 +14,13 @@ import {
 import { useConfirmDialog } from '../contexts/ConfirmDialogContext'
 import { useSettings } from '../contexts/SettingsContext'
 import CaptureOverlay from '../components/CaptureOverlay'
+import {
+  isCaptureSoundEnabled,
+  playCaptureRefusal,
+  playCaptureSuccess,
+  primeCaptureAudio,
+  setCaptureSoundEnabled,
+} from '../utils/captureSound'
 import { quadAreaFraction, warpQuad } from '../utils/perspectiveWarp'
 import {
   cornerAgreement,
@@ -128,6 +135,9 @@ const AUTO_STABLE_MS = 800
 const AUTO_FIRE_CHECK_MS = 100
 const AUTO_REARM_MOVE = 0.12
 const AUTO_REARM_MS = 800
+// A card held continuously in the same spot still deserves a retake: after this
+// long disarmed with a qualifying card in view, re-arm regardless of movement.
+const AUTO_REARM_FORCE_MS = 2500
 // Auto-capture stability may follow the tracker for up to this long between
 // model results. Separate from capture geometry freshness so changing capture
 // rules cannot silently change the hold rule.
@@ -194,6 +204,7 @@ function newAutoState() {
     lastQualifyingTs: null,
     history: [],
     lastSource: 'tracked',
+    presentSince: null,
     disarmed: false,
     captureCorners: null,
     absentSince: null,
@@ -488,6 +499,7 @@ export default function CaptureLab() {
   const [quadSource, setQuadSource] = useState(null)
   const [captureBeatAt, setCaptureBeatAt] = useState(null)
   const [captureNote, setCaptureNote] = useState('')
+  const [soundOn, setSoundOn] = useState(isCaptureSoundEnabled)
   const [pending, setPending] = useState([])
   const [libraryError, setLibraryError] = useState('')
   const [storedScans, setStoredScans] = useState({})
@@ -843,6 +855,14 @@ export default function CaptureLab() {
     setCaptureNote(label === 'good' ? 'Marked: good' : 'Marked: wrong')
   }
 
+  const toggleCaptureSound = () => {
+    const next = !soundOn
+    setSoundOn(next)
+    setCaptureSoundEnabled(next)
+    // Unmuting is a user gesture, so it may also lift a parked AudioContext.
+    if (next) primeCaptureAudio()
+  }
+
   // The confirmation pulse is a render-time state change: expire it so the
   // ring falls back to dashed tracking even if no new frame arrives.
   useEffect(() => {
@@ -909,6 +929,9 @@ export default function CaptureLab() {
   }, [stopLiveDetection])
 
   const startCamera = async () => {
+    // Opening the camera is the user gesture that unlocks WebAudio for the
+    // capture cues; the context must exist before the async capture path runs.
+    primeCaptureAudio()
     if (!navigator.mediaDevices?.getUserMedia) {
       setStatus('error')
       setCameraError('getUserMedia is unavailable in this browser.')
@@ -1180,6 +1203,7 @@ export default function CaptureLab() {
     canvas.toBlob(blob => {
       if (!blob) return
       addFiles([new File([blob], `capture-${Date.now()}.jpg`, { type: 'image/jpeg' })])
+      playCaptureSuccess()
       recordDiagEvent('capture', { mode, rectified: false, corners: null })
     }, 'image/jpeg', 0.92)
   }
@@ -1238,6 +1262,7 @@ export default function CaptureLab() {
     state.absentSince = null
     state.history = []
     state.lastSource = 'tracked'
+    state.presentSince = null
     setAutoDisarmed(false)
     setAutoHoldStartTs(null)
     setHoldHint('')
@@ -1252,6 +1277,7 @@ export default function CaptureLab() {
     state.anchorTs = null
     state.lastCorners = null
     state.lastQualifyingTs = null
+    state.presentSince = null
     setAutoDisarmed(true)
     setAutoHoldStartTs(null)
     setHoldHint('')
@@ -1300,6 +1326,9 @@ export default function CaptureLab() {
             sharpness: null,
             corroborateAgeMs: null,
           })
+          // A completed hold ended with nothing captured: the camera never
+          // produced a fresh frame, which the user cannot see.
+          if (auto) playCaptureRefusal()
           if (auto) rearmAutoCapture()
           return false
         }
@@ -1349,6 +1378,7 @@ export default function CaptureLab() {
             })
           }
           setCaptureNote('Waiting for a fresh look at the card; nothing captured.')
+          if (auto) playCaptureRefusal()
           if (auto) rearmAutoCapture()
           return false
         }
@@ -1367,6 +1397,8 @@ export default function CaptureLab() {
             sharpness: null,
             corroborateAgeMs: null,
           })
+          // The held quad disappeared before the frame could be cropped.
+          if (auto) playCaptureRefusal()
           if (auto) rearmAutoCapture()
           return false
         }
@@ -1419,6 +1451,9 @@ export default function CaptureLab() {
             })
           }
           setCaptureNote('Waiting for the detector to confirm the card; nothing captured.')
+          // This block only runs for auto-capture, which only starts after a
+          // completed hold, so the refusal cue is never a positioning nudge.
+          playCaptureRefusal()
           rearmAutoCapture()
           return false
         }
@@ -1482,6 +1517,7 @@ export default function CaptureLab() {
         addFiles([new File([blob], `card-${Date.now()}.jpg`, { type: 'image/jpeg' })])
         // The success beat starts only once the File exists and is staged.
         setCaptureBeatAt(performance.now())
+        playCaptureSuccess()
         recordDiagEvent('capture', {
           mode,
           rectified: true,
@@ -1514,6 +1550,7 @@ export default function CaptureLab() {
   }
 
   const captureFrame = () => {
+    primeCaptureAudio()
     if (liveDetectionRef.current) {
       void captureWithFreshGeometry({ auto: false })
       return
@@ -1566,7 +1603,7 @@ export default function CaptureLab() {
     state.lastCorners = corners
     state.lastQualifyingTs = now
     state.lastSource = source
-    state.history = [{ corners, t: now, source }]
+    state.history = source === 'tracked' ? [{ corners, t: now, source }] : []
     setAutoHoldStartTs(now)
     startAutoFireTimer()
   }
@@ -1616,13 +1653,15 @@ export default function CaptureLab() {
     state.lastQualifyingTs = now
     state.lastSource = source
     const history = state.history || (state.history = [])
-    // A model adoption moved the coordinate frame; keep the clock but discard
-    // history recorded in the old frame, or the step would read as drift.
+    // The drift history is tracked-only. A model observation keeps the clock but
+    // clears the old frame; it never becomes a baseline itself.
     if (decision.reanchor) history.length = 0
-    history.push({ corners, t: now, source })
-    const cutoff = now - AUTO_DRIFT_WINDOW_MS
-    while (history.length > 0 && history[0].t < cutoff) history.shift()
-    if (history.length > 60) history.splice(0, history.length - 60)
+    if (source === 'tracked') {
+      history.push({ corners, t: now, source })
+      const cutoff = now - AUTO_DRIFT_WINDOW_MS
+      while (history.length > 0 && history[0].t < cutoff) history.shift()
+      if (history.length > 60) history.splice(0, history.length - 60)
+    }
     setHoldHint('')
     // The clock-driven fire check owns closing; observations only judge motion.
   }
@@ -1648,6 +1687,7 @@ export default function CaptureLab() {
 
     if (!qualifies) {
       resetWindow()
+      state.presentSince = null
       if (state.disarmed) {
         if (state.absentSince == null) state.absentSince = now
         if (now - state.absentSince >= AUTO_REARM_MS) {
@@ -1657,6 +1697,7 @@ export default function CaptureLab() {
           setAutoDisarmed(false)
           setCaptureNote('')
           setHoldHint('')
+          recordDiagEvent('auto-rearm', { reason: 'absent' })
           liveScheduleRef.current?.(0)
         }
       }
@@ -1664,12 +1705,18 @@ export default function CaptureLab() {
     }
     state.absentSince = null
     if (state.disarmed) {
-      if (state.captureCorners
-        && maxCornerMovement(state.captureCorners, result.corners) > AUTO_REARM_MOVE) {
+      // A qualifying card that stays in view is a retake, not a stuck UI.
+      if (state.presentSince == null) state.presentSince = now
+      const moved = state.captureCorners
+        && maxCornerMovement(state.captureCorners, result.corners) > AUTO_REARM_MOVE
+      const force = now - state.presentSince >= AUTO_REARM_FORCE_MS
+      if (moved || force) {
         state.disarmed = false
         state.captureCorners = null
+        state.presentSince = null
         setAutoDisarmed(false)
         setCaptureNote('')
+        recordDiagEvent('auto-rearm', { reason: moved ? 'move' : 'force' })
         liveScheduleRef.current?.(0)
       }
       return
@@ -2584,32 +2631,45 @@ export default function CaptureLab() {
           ) : null}
         </div>
 
-        {/* Kept directly under the preview so both marks stay in thumb reach
-            while the phone is held in one hand with the camera running. */}
-        <div
-          role="group"
-          aria-label="Mark the current live detection"
-          className="mt-2 grid grid-cols-2 gap-3 sm:max-w-sm"
-        >
+        {/* Kept directly under the preview so both marks and the sound toggle
+            stay in thumb reach while the phone is held in one hand with the
+            camera running. */}
+        <div className="mt-2 flex items-center gap-3 sm:max-w-sm">
+          <div
+            role="group"
+            aria-label="Mark the current live detection"
+            className="grid flex-1 grid-cols-2 gap-3"
+          >
+            <button
+              type="button"
+              className="btn-ghost-sm min-h-12 gap-1.5 text-sm"
+              disabled={!liveDetection}
+              onClick={() => markDiagnostics('good')}
+            >
+              <Check size={18} aria-hidden />
+              Mark: good
+              <span className="sr-only"> (live detection is correct)</span>
+            </button>
+            <button
+              type="button"
+              className="btn-ghost-sm min-h-12 gap-1.5 text-sm"
+              disabled={!liveDetection}
+              onClick={() => markDiagnostics('wrong')}
+            >
+              <X size={18} aria-hidden />
+              Mark: wrong
+              <span className="sr-only"> (live detection is wrong)</span>
+            </button>
+          </div>
           <button
             type="button"
-            className="btn-ghost-sm min-h-12 gap-1.5 text-sm"
-            disabled={!liveDetection}
-            onClick={() => markDiagnostics('good')}
+            className="btn-ghost-sm h-12 w-12 shrink-0 p-0"
+            aria-label={soundOn ? 'Sound on' : 'Sound off'}
+            aria-pressed={soundOn}
+            title={soundOn ? 'Sound on' : 'Sound off'}
+            onClick={toggleCaptureSound}
           >
-            <Check size={18} aria-hidden />
-            Mark: good
-            <span className="sr-only"> (live detection is correct)</span>
-          </button>
-          <button
-            type="button"
-            className="btn-ghost-sm min-h-12 gap-1.5 text-sm"
-            disabled={!liveDetection}
-            onClick={() => markDiagnostics('wrong')}
-          >
-            <X size={18} aria-hidden />
-            Mark: wrong
-            <span className="sr-only"> (live detection is wrong)</span>
+            {soundOn ? <Volume2 size={18} aria-hidden /> : <VolumeX size={18} aria-hidden />}
           </button>
         </div>
 

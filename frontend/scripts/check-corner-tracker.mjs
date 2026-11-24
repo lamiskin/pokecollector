@@ -16,7 +16,7 @@ import {
   shouldKeepTracking,
   TRACK_LOST_AFTER,
 } from '../src/utils/cornerTracker.js'
-import { autoHoldDecision, AUTO_DRIFT_WINDOW_MS } from '../src/utils/autoHold.js'
+import { autoHoldDecision, AUTO_DRIFT_WINDOW_MS, medianQuad } from '../src/utils/autoHold.js'
 
 const width = 160
 const height = 160
@@ -259,9 +259,11 @@ assert.equal(isPatchMatchAcceptable(676, 300), false)
         history = [{ corners, t, source }]
       } else if (decision.action === 'keep') {
         if (decision.reanchor) history = []
-        history.push({ corners, t, source })
-        const cutoff = t - AUTO_DRIFT_WINDOW_MS
-        while (history.length > 0 && history[0].t < cutoff) history.shift()
+        if (source === 'tracked') {
+          history.push({ corners, t, source })
+          const cutoff = t - AUTO_DRIFT_WINDOW_MS
+          while (history.length > 0 && history[0].t < cutoff) history.shift()
+        }
       }
       last = corners
       lastSource = source
@@ -320,6 +322,15 @@ assert.equal(isPatchMatchAcceptable(676, 300), false)
     }).action,
     'keep',
   )
+
+  // A model observation never enters the median; the baseline stays tracker
+  // geometry only.
+  const trackedHistory = Array.from({ length: 5 }, (_, i) => ({
+    corners: base,
+    t: i * 33,
+    source: 'tracked',
+  }))
+  assert.equal(medianQuad([...trackedHistory, { corners: quadAt(0.2), t: 160, source: 'model' }])[0][0], 0.2)
 
   // No window yet, and a stalled loop, both restart the clock.
   assert.equal(

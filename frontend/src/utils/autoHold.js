@@ -50,12 +50,15 @@ export function medianQuad(observations) {
   const xs = [[], [], [], []]
   const ys = [[], [], [], []]
   for (const observation of observations) {
-    if (!observation || !observation.corners) continue
+    // Drift is a tracker measurement. A model quad is in a different frame and
+    // must never enter the median.
+    if (!observation || !observation.corners || observation.source === 'model') continue
     for (let i = 0; i < 4; i += 1) {
       xs[i].push(observation.corners[i][0])
       ys[i].push(observation.corners[i][1])
     }
   }
+  if (xs[0].length === 0) return null
   const quad = []
   for (let i = 0; i < 4; i += 1) quad.push([median(xs[i]), median(ys[i])])
   return quad
@@ -94,7 +97,7 @@ export function autoHoldDecision({
   // the hold clock, but let the caller re-baseline the history at this quad so
   // the correction is not later mistaken for user movement.
   if (source === 'model') {
-    return { action: 'keep', reanchor: true, step: 0, drift: 0 }
+    return { action: 'keep', reanchor: true, step: 0, drift: null }
   }
 
   const step = lastCorners ? maxCornerMovement(lastCorners, corners) : 0
@@ -107,7 +110,12 @@ export function autoHoldDecision({
   const windowStart = now - AUTO_DRIFT_WINDOW_MS
   const inside = history.filter(observation => (
     observation && observation.corners && observation.t >= windowStart
+    && observation.source !== 'model'
   ))
+  // Tracked-only history: after a model re-anchor there may be none yet, and
+  // comparing tracker geometry with model geometry is exactly the false drift
+  // this avoids.
+  if (inside.length === 0) return { action: 'keep', step, drift: null }
   inside.push({ corners, t: now, source })
   const drift = maxCornerMovement(medianQuad(inside), corners)
   if (drift > AUTO_DRIFT_WINDOW_MOVE) {

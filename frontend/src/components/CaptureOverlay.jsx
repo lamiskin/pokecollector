@@ -1,4 +1,5 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react'
+import { createQuadSmoother } from '../utils/quadSmoothing'
 
 /**
  * Capture overlay for the live view: the corner ring, its hold progress and the
@@ -16,6 +17,12 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useSta
  * writes a new quad every animation frame: routing that through props would
  * re-render the whole page 30 times a second. `quad` is supported for callers
  * that prefer a declarative value.
+ *
+ * Draw-time adjustments live in here and nowhere else: the quad passes through
+ * an adaptive low-pass (utils/quadSmoothing) so tracker noise does not shiver
+ * on screen, and while a hold is running the video outside the card is blurred
+ * behind a mask that is the inverse of the quad. Both are presentation only —
+ * the raw quad is what the page captures, corroborates and records.
  */
 
 // Mirrors frontend/tailwind.config.js so the ring paints with the app palette.
@@ -30,6 +37,37 @@ const DRAIN_MS = 220
 // the card's own artwork or text, which the user is still judging.
 const OUTSET = 3.4
 const MIN_CARD_AREA = 0.12
+
+// While the hold is running the video outside the card is blurred instead of
+// merely darkened, so the card is the only thing in focus. The layer is a
+// backdrop filter over the video, masked and clipped by the inverse of the quad.
+const BLUR_PX = 7
+// Long enough to read as a deliberate change of focus, short enough that it has
+// settled before the progress line has gone far.
+const BLUR_FADE_IN_MS = 170
+const BLUR_FADE_OUT_MS = 130
+// Kept sharp outside the detected edge so the card's own border is not eaten by
+// the blur boundary. The ring sits at OUTSET, inside this margin.
+const BLUR_HOLE_MARGIN = 9
+const BLUR_CLIP_ID = 'capture-overlay-blur-hole'
+// The hole is a mask (alpha, the inverse of the quad). Chromium drops an
+// element clip-path on a backdrop filter when an ancestor clips to a rounded
+// box, which is exactly the video wrapper, so the mask is what actually paints;
+// the clip-path is kept for engines that do honour it. Rebuilding the mask is
+// only worth it once the hole has visibly moved.
+const BLUR_MASK_STEP_PX = 0.6
+
+function supportsBlurHole() {
+  if (typeof CSS === 'undefined' || typeof CSS.supports !== 'function') return false
+  const blur = CSS.supports('backdrop-filter', 'blur(4px)')
+    || CSS.supports('-webkit-backdrop-filter', 'blur(4px)')
+  // Without a hole the layer would blur the card as well, so the frame has to be
+  // there before the blur is used at all.
+  const hole = CSS.supports('mask-image', 'url("data:image/svg+xml,%3Csvg%3E%3C/svg%3E")')
+    || CSS.supports('-webkit-mask-image', 'url("data:image/svg+xml,%3Csvg%3E%3C/svg%3E")')
+    || CSS.supports('clip-path', `url(#${BLUR_CLIP_ID})`)
+  return Boolean(blur && hole)
+}
 
 const COPY = {
   none: 'Point the camera at a card',
@@ -126,6 +164,8 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
   const hasQuadRef = useRef(Boolean(quad))
 
   const svgRef = useRef(null)
+  const blurRef = useRef(null)
+  const blurClipRef = useRef(null)
   const dimRef = useRef(null)
   const ghostRef = useRef(null)
   const underRef = useRef(null)
@@ -146,6 +186,18 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
   const announceTimerRef = useRef(null)
 
   const sizeRef = useRef({ width: 0, height: 0 })
+  // Preallocated so the paint loop does not build four fresh pairs per frame.
+  const pixelRef = useRef([[0, 0], [0, 0], [0, 0], [0, 0]])
+  const smootherRef = useRef(null)
+  const blurMaskRef = useRef({ corners: null, width: 0, height: 0 })
+  // The tracker writes a fresh quad every frame; a stamp is cheaper than
+  // comparing eight coordinates and tells the paint loop when to filter.
+  const quadStampRef = useRef(0)
+  const quadArrivalRef = useRef(0)
+  const paintedStampRef = useRef(-1)
+  const lastArrivalRef = useRef(0)
+  const lastPaintRef = useRef(0)
+  const [blurSupported] = useState(supportsBlurHole)
   const blankRef = useRef(false)
   const reducedRef = useRef(false)
   const [reducedMotion, setReducedMotion] = useState(false)
@@ -158,6 +210,8 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
     beatStart: 0,
     drainFrom: 0,
     drainStart: 0,
+    blur: 0,
+    blurShown: -1,
   })
 
   const ticks = Math.max(1, Math.round(holdDurationMs / TICK_MS))
@@ -176,9 +230,14 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
   }, [])
 
   // ── geometry input ──────────────────────────────────────────────────────
-  const setQuad = useCallback(corners => {
+  // The raw quad is stored untouched: smoothing happens in the paint loop, so
+  // the page keeps handing this same geometry to capture, the hold rule and
+  // diagnostics. The stamp lets the paint loop filter each sample exactly once.
+  const writeQuad = useCallback(corners => {
     const next = Array.isArray(corners) && corners.length === 4 ? corners : null
     quadRef.current = next
+    quadStampRef.current += 1
+    if (next) quadArrivalRef.current = performance.now()
     const present = Boolean(next)
     if (present !== hasQuadRef.current) {
       hasQuadRef.current = present
@@ -186,17 +245,13 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
     }
   }, [])
 
+  const setQuad = writeQuad
+
   useImperativeHandle(ref, () => ({ setQuad }), [setQuad])
 
   useEffect(() => {
-    const next = Array.isArray(quad) && quad.length === 4 ? quad : null
-    quadRef.current = next
-    const present = Boolean(next)
-    if (present !== hasQuadRef.current) {
-      hasQuadRef.current = present
-      setHasQuad(present)
-    }
-  }, [quad])
+    writeQuad(quad)
+  }, [quad, writeQuad])
 
   // ── which state is on screen ────────────────────────────────────────────
   const isTooSmall = tooSmall
@@ -288,6 +343,42 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
     let frame = 0
     let lastUiStep = -1
 
+    // The sharp island is the quad plus a margin, punched out of everything
+    // else. One inverse path serves both the mask and the clip path.
+    const paintBlurHole = (px, width, height) => {
+      const hole = outset(px, BLUR_HOLE_MARGIN).ring
+      blurClipRef.current?.setAttribute('d', `M0 0 H${width} V${height} H0 Z ${toPath(hole)}`)
+
+      const mask = blurMaskRef.current
+      let moved = mask.corners ? 0 : Infinity
+      if (mask.corners) {
+        for (let index = 0; index < 4; index += 1) {
+          const dx = hole[index][0] - mask.corners[index][0]
+          const dy = hole[index][1] - mask.corners[index][1]
+          const stepPx = Math.sqrt(dx * dx + dy * dy)
+          if (stepPx > moved) moved = stepPx
+        }
+      }
+      if (moved < BLUR_MASK_STEP_PX && mask.width === width && mask.height === height) return
+
+      if (!mask.corners) mask.corners = [[0, 0], [0, 0], [0, 0], [0, 0]]
+      for (let index = 0; index < 4; index += 1) {
+        mask.corners[index][0] = hole[index][0]
+        mask.corners[index][1] = hole[index][1]
+      }
+      mask.width = width
+      mask.height = height
+
+      const node = blurRef.current
+      if (!node) return
+      const source = '<svg xmlns="http://www.w3.org/2000/svg" '
+        + `viewBox="0 0 ${width} ${height}" preserveAspectRatio="none">`
+        + `<path d="M0 0 H${width} V${height} H0 Z ${toPath(hole)}" fill="#fff" fill-rule="evenodd"/></svg>`
+      const url = `url("data:image/svg+xml,${encodeURIComponent(source)}")`
+      node.style.webkitMaskImage = url
+      node.style.maskImage = url
+    }
+
     const paint = now => {
       frame = window.requestAnimationFrame(paint)
       const svg = svgRef.current
@@ -297,11 +388,27 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
       const anim = animRef.current
       const reduced = reducedRef.current
       const current = anim.phase
-      const points = quadRef.current
+      const raw = quadRef.current
+      // Frame interval for the blur fade; clamped so a backgrounded tab does not
+      // finish the fade in one jump.
+      const dt = lastPaintRef.current ? Math.min(64, Math.max(0, now - lastPaintRef.current)) : 16
+      lastPaintRef.current = now
 
-      if (!points) {
+      if (!raw) {
         // Nothing to draw: blank the paint once, then leave the DOM alone so an
-        // idle camera does not write to it 60 times a second.
+        // idle camera does not write to it 60 times a second. The smoother is
+        // dropped so the next card is drawn where it actually is.
+        smootherRef.current?.reset()
+        paintedStampRef.current = -1
+        lastArrivalRef.current = 0
+        if (anim.blur !== 0 || anim.blurShown !== 0) {
+          anim.blur = 0
+          anim.blurShown = 0
+          if (blurRef.current) {
+            blurRef.current.style.opacity = '0'
+            blurRef.current.style.display = 'none'
+          }
+        }
         if (blankRef.current) return
         blankRef.current = true
         dimRef.current?.setAttribute('opacity', '0')
@@ -318,6 +425,21 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
       }
 
       blankRef.current = false
+
+      // Displayed geometry only: the raw quad in quadRef is never rewritten, so
+      // capture, the hold rule and diagnostics keep reading it. A new sample is
+      // filtered once, when it arrives; frames in between reuse the value the
+      // smoother already holds.
+      const smoother = smootherRef.current || (smootherRef.current = createQuadSmoother())
+      let points
+      if (paintedStampRef.current !== quadStampRef.current) {
+        const gap = lastArrivalRef.current ? quadArrivalRef.current - lastArrivalRef.current : 0
+        lastArrivalRef.current = quadArrivalRef.current
+        paintedStampRef.current = quadStampRef.current
+        points = smoother.sample(raw, gap)
+      } else {
+        points = smoother.corners
+      }
 
       // progress clock
       if (anim.draining) {
@@ -339,13 +461,40 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
       const step = Math.round(anim.progress * ticks)
       const shown = reduced ? step / ticks : anim.progress
 
-      const px = points.map(([x, y]) => [x * width, y * height])
+      const px = pixelRef.current
+      for (let i = 0; i < 4; i += 1) {
+        px[i][0] = points[i][0] * width
+        px[i][1] = points[i][1] * height
+      }
       const { ring, cx, cy } = outset(px, OUTSET)
       const { segments, total } = segmentsOf(ring)
       const path = toPath(ring)
 
       const cardPath = toPath(px)
-      dimRef.current?.setAttribute('d', `M0 0 H${width} V${height} H0 Z ${cardPath}`)
+      const inverse = `M0 0 H${width} V${height} H0 Z ${cardPath}`
+      dimRef.current?.setAttribute('d', inverse)
+
+      // ── blur outside the card while it is being circled ─────────────────
+      // Only while the hold is actually running: a lost card, a card that is
+      // too far away and an idle camera all keep the plain video.
+      if (blurRef.current) {
+        const target = current === 'holding' ? 1 : 0
+        if (reduced) {
+          anim.blur = target
+        } else if (anim.blur !== target) {
+          const span = target > anim.blur ? BLUR_FADE_IN_MS : BLUR_FADE_OUT_MS
+          anim.blur = target > anim.blur
+            ? Math.min(target, anim.blur + dt / span)
+            : Math.max(target, anim.blur - dt / span)
+        }
+        if (anim.blur > 0) paintBlurHole(px, width, height)
+        const shownBlur = Math.round(anim.blur * 100) / 100
+        if (shownBlur !== anim.blurShown) {
+          anim.blurShown = shownBlur
+          blurRef.current.style.opacity = String(shownBlur)
+          blurRef.current.style.display = shownBlur > 0 ? 'block' : 'none'
+        }
+      }
       for (const node of [underRef.current, baseRef.current, trackRef.current, progRef.current, glowRef.current]) {
         node?.setAttribute('d', path)
       }
@@ -457,7 +606,9 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
         }
         ringRef.current?.setAttribute('transform', '')
         ringRef.current?.setAttribute('opacity', '1')
-        dimRef.current?.setAttribute('opacity', (0.5 * shown).toFixed(3))
+        // Darkening and blur share the job: as the blur comes up the dim backs
+        // off, so the picture softens rather than turning into a blackout.
+        dimRef.current?.setAttribute('opacity', (0.5 * shown * (1 - 0.75 * anim.blur)).toFixed(3))
         bloomRef.current?.setAttribute('opacity', '0')
       }
 
@@ -496,6 +647,29 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
 
   return (
     <div className="pointer-events-none absolute inset-0 select-none">
+      {/* Blurs everything behind the overlay's own chrome but inside the clip,
+          which is the inverse of the card quad: the card stays sharp. Off (and
+          not composited) unless the hold is running. */}
+      {blurSupported ? (
+        <div
+          ref={blurRef}
+          className="pointer-events-none absolute inset-0"
+          style={{
+            backdropFilter: `blur(${BLUR_PX}px)`,
+            WebkitBackdropFilter: `blur(${BLUR_PX}px)`,
+            clipPath: `url(#${BLUR_CLIP_ID})`,
+            WebkitClipPath: `url(#${BLUR_CLIP_ID})`,
+            maskSize: '100% 100%',
+            WebkitMaskSize: '100% 100%',
+            maskRepeat: 'no-repeat',
+            WebkitMaskRepeat: 'no-repeat',
+            opacity: 0,
+            display: 'none',
+          }}
+          aria-hidden="true"
+        />
+      ) : null}
+
       <svg
         ref={svgRef}
         className="absolute inset-0 block h-full w-full"
@@ -508,6 +682,12 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
           <filter id="capture-overlay-glow" x="-40%" y="-40%" width="180%" height="180%">
             <feGaussianBlur stdDeviation="3.6" />
           </filter>
+          {/* Inverse of the card quad for the blur layer. userSpaceOnUse makes
+              the coordinates the same pixels the SVG paints in, which are the
+              video box's own, so the ring and the blur boundary agree. */}
+          <clipPath id={BLUR_CLIP_ID} clipPathUnits="userSpaceOnUse">
+            <path ref={blurClipRef} d="" clipRule="evenodd" />
+          </clipPath>
         </defs>
 
         <path ref={dimRef} d="" fill="#04040a" fillRule="evenodd" opacity="0" />
