@@ -260,7 +260,15 @@ def remove_copy(db, user_id, binder_id, request):
     snapshot would reference a deleted binder_card_id), so the pending undo token
     is cleared instead of being replaced.
     """
-    binder, entries, placements, _before = _start_write(db, user_id, binder_id, request.expected_revision)
+    if request.expected_revision is not None:
+        binder, entries, placements, _before = _start_write(db, user_id, binder_id, request.expected_revision)
+    else:
+        # Safe without a layout revision: the request names an exact entry and,
+        # optionally, an exact placement, so a moved copy still 409s, a deleted one
+        # 404s, and the quantity decrement reads the locked current value. It cannot
+        # overwrite another move. The binder workspace keeps sending the revision.
+        binder = owned_binder(db, user_id, binder_id, write=True)
+        entries, placements = _entries(db, binder), _placements(db, binder)
     if binder.layout_pages is None:
         raise HTTPException(409, "Enable a physical layout before removing copies")
     entry = next((e for e in entries if e.id == request.binder_card_id), None)

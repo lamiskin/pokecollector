@@ -74,11 +74,15 @@ class BinderLayoutTests(unittest.TestCase):
         return undo_binder_layout(self.binder.id, BinderLayoutUndo(expected_revision=revision or self.state()["revision"]),
                                  current_user=self.user, db=self.db)
 
-    def remove(self, entry=None, placement=None, owned=False, revision=None):
-        return remove_binder_copy(self.binder.id, BinderCopyRemoval(
-            binder_card_id=(entry or self.entry).id, placement_id=placement, remove_owned_copy=owned,
-            expected_revision=revision or self.state()["revision"],
-        ), current_user=self.user, db=self.db)
+    def remove(self, entry=None, placement=None, owned=False, revision=None, no_revision=False):
+        body = {
+            "binder_card_id": (entry or self.entry).id, "placement_id": placement,
+            "remove_owned_copy": owned,
+        }
+        if not no_revision:
+            body["expected_revision"] = revision or self.state()["revision"]
+        return remove_binder_copy(self.binder.id, BinderCopyRemoval(**body),
+                                  current_user=self.user, db=self.db)
 
     def assert_conflict(self, operation, status=409):
         with self.assertRaises(HTTPException) as caught:
@@ -211,6 +215,28 @@ class BinderLayoutTests(unittest.TestCase):
         self.move(slot=2)
         before = self.state()
         self.assert_conflict(lambda: self.remove(placement=p["id"], revision=stale))
+        self.assertEqual(self.state(), before)
+        self.assertEqual(self.db.get(BinderCard, self.entry.id).required_quantity, 3)
+
+    def test_explicit_placed_copy_removal_needs_no_layout_revision(self):
+        self.configure()
+        p = self.move()["placements"][0]
+        state = self.remove(placement=p["id"], no_revision=True)
+        self.assertEqual((state["placed_count"], state["unplaced_count"]), (0, 4))
+        self.assertEqual(self.db.get(BinderCard, self.entry.id).required_quantity, 2)
+        self.assertEqual(self.db.query(BinderPlacement).filter(
+            BinderPlacement.binder_card_id == self.entry.id,
+        ).count(), 0)
+
+    def test_unversioned_copy_removal_rejects_a_placement_that_moved(self):
+        self.configure()
+        p = self.move()["placements"][0]
+        # Return to the tray, then place a copy again: the old placement is gone
+        # and the new one has a different identity.
+        self.move(source=p["id"], page=None, slot=None)
+        self.move(slot=3)
+        before = self.state()
+        self.assert_conflict(lambda: self.remove(placement=p["id"], no_revision=True))
         self.assertEqual(self.state(), before)
         self.assertEqual(self.db.get(BinderCard, self.entry.id).required_quantity, 3)
 
