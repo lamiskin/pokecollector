@@ -491,6 +491,8 @@ Current settings are split in `backend/api/settings.py`:
 - `ADMIN_ONLY_KEYS`
   - `full_sync_interval_days`
   - `price_sync_interval_minutes`
+  - `artwork_sweep_interval_hours`
+  - `artwork_sweep_batch_size`
   - `multi_user_mode`
   - `tcgdex_sync_languages`
   - `debug_mode`
@@ -504,6 +506,9 @@ Important behavior:
 - Each user only reads and writes their own `UserSetting` rows
 - Admin-only settings are stored globally in `settings`
 - Recurring automatic syncs include a full sync cadence and a separate small price sync cadence
+- The full sync's startup time is derived from the last successful run in `sync_log`, not from process start, so restarts cannot postpone it. Runs coalesce with a one-hour misfire grace, and rows a previous process left `running` are failed at startup.
+- A full sync that discovers sets it had not seen before messages every user with a complete per-user Telegram configuration (falling back to the global chat). First syncs and digital sets never notify.
+- Card artwork TCGdex publishes after a card was synced is recovered by a separate set-level sweep (`services/artwork_backfill.py`), not by the set sync: a set's card briefs carry no `image`. The sweep checks one set per request via `/cards?set=`, fills only cards with no artwork at all, prioritises sets the user collects or wishes for, and revisits each set on a 3/7/14/30/90-day backoff.
 - `tcgdex_sync_languages` is seeded from `TCGDEX_SYNC_LANGUAGES` only when the row does not exist yet; afterward the DB value is authoritative. Empty or invalid env values safely fall back to `en,de`. The env value `all` expands to every supported TCGdex language during first bootstrap.
 - Supported TCGdex sync language codes are centralized in `services/tcgdex_languages.py`. Optional extra languages are `fr`, `es`, `es-mx`, `it`, `pt`, `pt-br`, `pt-pt`, `nl`, `pl`, `ru`, `ja`, `ko`, `zh-tw`, `id`, `th`, and `zh-cn` in addition to the default `en,de`.
 - English is the preferred cross-language fallback source for missing data, images, and prices by exact TCGdex ID. The backend does not guess English replacements by card name for regional-only cards.
@@ -519,6 +524,9 @@ Important behavior:
 - `/api/sync/` runs the full TCGdex set/card sync using the configured `tcgdex_sync_languages`
 - `/api/sync/prices` runs the small tracked-card price sync
 - `/api/sync/prices/all` force-refreshes prices for all tracked cards
+- `/api/sync/artwork-status` reports the artwork gap, due sets and the last sweep
+- `/api/sync/artwork-recheck` starts a background artwork sweep, optionally limited to `setIds`/`limit`
+- The admin "Clear image cache" action (`POST /api/backup/clear-image-cache`) deletes the `image_cache` rows and reports rows removed and bytes freed
 - Sync status returns current flags plus the last 10 sync log rows
 - Full sync and price sync can be rescheduled through dedicated endpoints
 
