@@ -2,9 +2,10 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { AlertTriangle, Camera, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Loader2, Plus, RefreshCw, Search, Sparkles, Trash2, X } from 'lucide-react'
 import toast from 'react-hot-toast'
-import { fetchScanCandidateImage, fetchScanJobItemImage } from '../api/client'
+import { fetchScanCandidateImage } from '../api/client'
 import CardImage from './CardImage'
 import { useDialogBehavior } from './ui/dialogBehavior'
+import { useScanItemPhoto } from '../hooks/useScanItemPhoto'
 import { formatRetryCountdown } from '../utils/retryCountdown'
 import { cardLookupLinks, searchGoogleByPhoto } from '../utils/cardLookup'
 
@@ -13,40 +14,11 @@ import { cardLookupLinks, searchGoogleByPhoto } from '../utils/cardLookup'
 // ScanAddModal in CardScanner.jsx, so everything below is specific to the
 // persistent batch review page.
 
-// ─── The stored photo for a queued item, as an object URL ──────────────────
-// Fetched as a blob because the endpoint is authenticated (an <img src>
-// cannot send the bearer token), which also means it survives a reload where
-// a local blob: URL would not.
-export function useScanItemPhoto(jobId, item) {
-  const [url, setUrl] = useState(null)
-
-  // `item` can be null — ScanQueue's review session calls this before a
-  // photo is chosen, and hooks cannot sit behind a conditional.
-  useEffect(() => {
-    if (!item?.has_image) {
-      setUrl(null)
-      return undefined
-    }
-    let disposed = false
-    let objectUrl = null
-    fetchScanJobItemImage(jobId, item.id)
-      .then(nextUrl => {
-        if (disposed) {
-          URL.revokeObjectURL(nextUrl)
-          return
-        }
-        objectUrl = nextUrl
-        setUrl(nextUrl)
-      })
-      .catch(() => setUrl(null))
-    return () => {
-      disposed = true
-      if (objectUrl) URL.revokeObjectURL(objectUrl)
-    }
-  }, [jobId, item?.id, item?.has_image])
-
-  return url
-}
+// The stored photo lives in its own hook module so the review panels, the
+// full-screen comparison and the manual-card dialog can share it. Re-exported
+// here because ScanQueue and the panels below have always imported it from
+// this module.
+export { useScanItemPhoto } from '../hooks/useScanItemPhoto'
 
 // ─── Linked pan/zoom comparison ─────────────────────────────────────────────
 // Full-screen look at a candidate next to the user's own photo where we have
@@ -826,7 +798,7 @@ function PhotoThumb({ url, onZoom, onSearchPhoto, t }) {
   )
 }
 
-export function ScanItemPanel({ jobId, item, onAdd, onRetry, onDismiss, onReview, onModalChange, retryNow, t }) {
+export function ScanItemPanel({ jobId, item, onAdd, onRetry, onDismiss, onReview, onCustomCard, customCardHandled = false, onModalChange, retryNow, t }) {
   const photoUrl = useScanItemPhoto(jobId, item)
   // Photo-only zoom stays local. Expanding a *candidate* starts a review,
   // which the page owns because accepting can walk on into the next photo
@@ -952,17 +924,38 @@ export function ScanItemPanel({ jobId, item, onAdd, onRetry, onDismiss, onReview
               }`}>
                 {item.error || t(noMatches ? 'scanner.noMatches' : 'scanner.recognitionFailed')}
               </p>
-              {!item.resolved && (
-                <button type="button" onClick={() => onRetry(item)} disabled={!item.has_image}
-                  className="btn-secondary justify-center">
-                {/* Retrying always drops the item out of a composite grid onto
-                    its own request — "individually" only describes something
-                    actually changing when the item was composited to begin
-                    with. An item that was already individual (the reviewer's
-                    own choice, or the only option under a single-image-only
-                    provider) just gets a plain retry. */}
-                  <RefreshCw size={14} /> {item.batch_mode ? t('scanner.retryIndividually') : t('common.retry')}
-                </button>
+              {customCardHandled ? (
+                <p className="flex items-center gap-1.5 text-sm font-semibold text-green">
+                  <Check size={14} aria-hidden /> {t('scanner.manualCardHandled')}
+                </p>
+              ) : !item.resolved && (
+                <>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {/* The way forward for a card the catalogue does not have
+                        yet: create it from this photo and add the physical
+                        card, rather than retrying a recognition that can only
+                        fail again. */}
+                    {onCustomCard && (
+                      <button type="button" onClick={() => onCustomCard(item)}
+                        className="btn-primary justify-center">
+                        <Plus size={14} aria-hidden /> {t('scanner.addCardManually')}
+                      </button>
+                    )}
+                    <button type="button" onClick={() => onRetry(item)} disabled={!item.has_image}
+                      className="btn-secondary justify-center">
+                    {/* Retrying always drops the item out of a composite grid onto
+                        its own request — "individually" only describes something
+                        actually changing when the item was composited to begin
+                        with. An item that was already individual (the reviewer's
+                        own choice, or the only option under a single-image-only
+                        provider) just gets a plain retry. */}
+                      <RefreshCw size={14} /> {item.batch_mode ? t('scanner.retryIndividually') : t('common.retry')}
+                    </button>
+                  </div>
+                  {onCustomCard && (
+                    <p className="text-xs leading-relaxed text-text-muted">{t('scanner.addCardManuallyHint')}</p>
+                  )}
+                </>
               )}
             </div>
           )}

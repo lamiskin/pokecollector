@@ -1,7 +1,7 @@
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
-import { CandidateGrid } from './ScanReview'
+import { CandidateGrid, ScanItemPanel } from './ScanReview'
 import { cardLookupLinks } from '../utils/cardLookup'
 
 // CandidateGrid renders CardImage for candidates that have a catalogue image,
@@ -64,5 +64,70 @@ describe('CandidateGrid external lookup links', () => {
 
     expect(markup).not.toContain('tbm=isch')
     expect(markup).not.toContain('scanner.lookupShort')
+  })
+})
+
+// ─── Manual card fallback on a no-match photo ──────────────────────────────
+// ScanItemPanel is what the review list renders. The manual-card action is
+// the only in-scanner way to file a card the catalogue does not have, so its
+// presence and absence are worth pinning without a backend.
+const failedItem = {
+  id: 9,
+  position: 0,
+  status: 'failed',
+  resolved: false,
+  has_image: false,
+  batch_mode: false,
+  recognized: { name: 'Unbekannt' },
+  matches: [],
+}
+
+function renderPanel(item, extra = {}) {
+  return renderToStaticMarkup(createElement(ScanItemPanel, {
+    jobId: 1,
+    item,
+    onAdd: () => {},
+    onRetry: () => {},
+    onDismiss: () => {},
+    onReview: () => {},
+    ...extra,
+    t,
+  }))
+}
+
+describe('ScanItemPanel manual card fallback', () => {
+  it('offers the manual card action for a photo with no matches', () => {
+    const markup = renderPanel({ ...failedItem, status: 'done' }, { onCustomCard: () => {} })
+
+    expect(markup).toContain('scanner.addCardManuallyHint')
+    expect(markup).toContain('scanner.addCardManually<')
+    expect(markup).toContain('common.retry')
+  })
+
+  it('offers it for a failed recognition as well', () => {
+    const markup = renderPanel(failedItem, { onCustomCard: () => {} })
+
+    expect(markup).toContain('scanner.addCardManuallyHint')
+    expect(markup).toContain('scanner.recognitionFailed')
+  })
+
+  it('replaces the action with the handled state once a card was created', () => {
+    const markup = renderPanel({ ...failedItem, status: 'done' }, {
+      onCustomCard: () => {},
+      customCardHandled: true,
+    })
+
+    expect(markup).toContain('scanner.manualCardHandled')
+    expect(markup).not.toContain('scanner.addCardManuallyHint')
+  })
+
+  it('does not add a competing path when candidates exist', () => {
+    const markup = renderPanel({
+      ...failedItem,
+      status: 'done',
+      matches: [{ id: 3, name: 'Pikachu', image: 'https://example.test/card.webp', lang: 'en' }],
+    }, { onCustomCard: () => {} })
+
+    expect(markup).not.toContain('scanner.addCardManuallyHint')
   })
 })

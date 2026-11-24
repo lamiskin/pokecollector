@@ -60,6 +60,7 @@ never performs implicit admin bootstrap.
 | GET | `/api/cards/recognize/jobs/{job_id}/items/{item_id}/candidates/{index}/image` | A candidate's full-resolution artwork, served from the shared image cache |
 | POST | `/api/cards/recognize/jobs/{job_id}/items/{item_id}/resolve` | Confirm/dismiss an item and delete its queued photo |
 | POST | `/api/cards/recognize/jobs/{job_id}/items/{item_id}/resolve-and-add` | Atomically add the selected card and resolve the queued item |
+| POST | `/api/cards/recognize/jobs/{job_id}/items/{item_id}/create-custom` | Create a custom card from an unmatched scan, add one owned copy (filed into the job's destination when set) and resolve the item |
 | POST | `/api/cards/recognize/jobs/{job_id}/items/{item_id}/retry` | Retry one reviewable item individually |
 | DELETE | `/api/cards/recognize/jobs/{job_id}` | Delete a job and its queued photos |
 
@@ -96,7 +97,7 @@ grouped exactly as in the checklist, so a single matching artist reports the
 same totals on both pages; a substring that matches several artists is merged
 into one checklist scope but listed as separate directory rows.
 
-Custom cards belong to exactly one user. Owners may publish a card as a shared template, but other users must clone it before using it in collections, wishlists, binders, products, or trades. Clones have independent IDs, metadata, images, and prices. Manual image URLs must use public HTTPS destinations and are fetched through the size-limited image proxy. During upgrade, existing custom cards become shared templates owned by the first-created admin account, while each other referencing user receives one private clone and keeps their existing references.
+Custom cards belong to exactly one user. Owners may publish a card as a shared template, but other users must clone it before using it in collections, wishlists, binders, products, or trades. Clones have independent IDs, metadata, images, and prices. Manual image URLs must use public HTTPS destinations and are fetched through the size-limited image proxy. Migrating a custom card to its API card keeps the manual image as `custom_image_url` when the official card has no artwork yet (real API art always wins); `upsert_card` clears that fallback once TCGdex publishes art. During upgrade, existing custom cards become shared templates owned by the first-created admin account, while each other referencing user receives one private clone and keeps their existing references.
 
 ### Set display metadata
 

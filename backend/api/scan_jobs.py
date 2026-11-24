@@ -55,6 +55,22 @@ class ResolveAndAddScanItemResponse(BaseModel):
     binder_allocation: dict | None = None
 
 
+class CreateCustomScanItemRequest(BaseModel):
+    """Manual card details for a scan that matched nothing."""
+
+    name: str
+    set_id: str
+    number: str | None = None
+    set_name: str | None = None
+    rarity: str | None = None
+    image_url: str | None = None
+
+
+class CreateCustomScanItemResponse(BaseModel):
+    card: dict
+    collection_item: CollectionItemResponse
+
+
 def _binder_type(binder: Binder) -> str:
     # Legacy rows predate the column default and represent physical Binders.
     return binder.binder_type or "collection"
@@ -555,6 +571,101 @@ def resolve_and_add_scan_job_item(
         "item": _item_payload(item),
         "collection_item": _annotate_collection_item(db, current_user, collection_item),
         "binder_allocation": binder_allocation,
+    }
+
+
+@router.post(
+    "/recognize/jobs/{job_id}/items/{item_id}/create-custom",
+    response_model=CreateCustomScanItemResponse,
+)
+def create_custom_card_from_scan_item(
+    job_id: int,
+    item_id: int,
+    data: CreateCustomScanItemRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Create a manual card from a scan that matched nothing and file one copy.
+
+    The reviewer could otherwise only retry or search externally, so this turns
+    the dead end into a one-step add. The scan photo is deliberately kept: the
+    client attaches it to the collection as the owner's private photo.
+    """
+    from api.cards import _card_to_dict
+    from api.collection import _annotate_collection_item, _upsert_collection_item
+    from services.custom_cards import stage_custom_card
+
+    def validate_review(row: ScanJobItem) -> None:
+        if row.resolved:
+            raise HTTPException(status_code=409, detail="This scan has already been handled.")
+        if row.status not in {"done", "failed"}:
+            raise HTTPException(status_code=409, detail="This scan is still being processed.")
+
+    # Check authorization before the row lock is taken, then revalidate under
+    # it so a concurrent tab cannot resolve the item twice.
+    validate_review(_get_own_item(db, job_id, item_id, current_user))
+    item = _get_own_item(db, job_id, item_id, current_user, for_update=True)
+    validate_review(item)
+
+    try:
+        card = stage_custom_card(
+            db,
+            current_user,
+            name=data.name,
+            set_id=data.set_id,
+            set_name=data.set_name,
+            number=data.number,
+            rarity=data.rarity,
+            image_url=data.image_url,
+        )
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    _status, collection_item = _upsert_collection_item(
+        db,
+        current_user,
+        CollectionItemCreate(card_id=card.id),
+        ensure_catalogue_card=False,
+    )
+    # The upsert stages the collection change. Take the user allocation lock
+    # before flushing, so the collection row is never locked ahead of it (the
+    # documented ordering for every physical-list allocation), then flush and
+    # re-read the current owned count.
+    with db.no_autoflush:
+        lock_user_card_allocations(db, current_user.id)
+    db.flush()
+    collection_item = (
+        db.query(CollectionItem)
+        .filter(
+            CollectionItem.id == collection_item.id,
+            CollectionItem.user_id == current_user.id,
+        )
+        .with_for_update()
+        .populate_existing()
+        .one()
+    )
+    # File the copy into the job's destination list the same way a reviewed
+    # resolve-and-add does, so a scan into a binder never needs a second add.
+    # The allocation result is not part of this route's response shape.
+    _allocate_scan_item_to_binder(
+        db,
+        current_user,
+        item.job.binder_id,
+        collection_item,
+        1,
+    )
+    # There is no TCGdex id to record as ground truth, and the stored scan
+    # photo stays available for the client's private-photo upload.
+    item.resolved = True
+    item.updated_at = datetime.datetime.utcnow()
+    db.commit()
+    db.refresh(item)
+    db.refresh(collection_item)
+    db.refresh(card)
+    return {
+        "card": _card_to_dict(card, current_user.id),
+        "collection_item": _annotate_collection_item(db, current_user, collection_item),
     }
 
 
