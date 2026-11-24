@@ -38,7 +38,10 @@ export const TENTATIVE_MAX_MISSES = 2
 // quad is cheap and fresh; a model quad is only a fallback and only when no
 // tracked quad exists at all.
 export const CAPTURE_QUAD_MAX_AGE_MS = 250
-export const CAPTURE_MODEL_MAX_AGE_MS = 500
+// A model quad is only geometry from a still card: with no tracked quad it is the
+// only source there is, and results arrive about a second apart, so a 500 ms limit
+// refused good captures a third of the time. 1.3 s covers one missed result.
+export const CAPTURE_MODEL_MAX_AGE_MS = 1300
 // An automatic capture needs the detector itself to have confirmed the geometry
 // recently; a quad carried only by the tracker is not enough.
 export const CAPTURE_CORROBORATE_MS = 2500

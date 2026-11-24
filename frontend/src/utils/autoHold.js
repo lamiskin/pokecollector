@@ -62,6 +62,13 @@ export function autoHoldDecision({
     return { action: 'keep', step: 0, total: 0 }
   }
 
+  // The first tracked quad after a model re-anchor differs from that anchor by
+  // the systematic detector-versus-tracker disagreement (~5-7 %), which is not
+  // movement. Adopt it as the new baseline instead of charging it to the user.
+  if (lastSource === 'model') {
+    return { action: 'keep', step: 0, total: maxCornerMovement(anchorCorners, corners) }
+  }
+
   const dtMs = Math.min(
     AUTO_STEP_DT_MAX_MS,
     Math.max(0, lastQualifyingTs == null ? 0 : now - lastQualifyingTs),

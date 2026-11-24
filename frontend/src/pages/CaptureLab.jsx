@@ -607,6 +607,29 @@ export default function CaptureLab() {
     applyQuadToPolygon(null)
   }, [liveResult])
 
+  // A phone browser freezes timers and animation frames while the page is hidden:
+  // switching apps or locking the screen for a minute returns a page whose loop is
+  // parked, whose motion baseline is minutes stale and whose hold is mid-window.
+  // On return, drop that state and ask for a look immediately.
+  useEffect(() => {
+    const onVisibility = () => {
+      if (document.visibilityState !== 'visible') return
+      if (!liveDetectionRef.current) return
+      lastDetectionAtRef.current = null
+      lastUsableAtRef.current = performance.now()
+      motionLastGrayRef.current = null
+      motionScoreRef.current = Infinity
+      liveParkedRef.current = false
+      liveInFlightRef.current = false
+      autoStateRef.current = newAutoState()
+      setAutoHoldStartTs(null)
+      setHoldHint('')
+      liveScheduleRef.current?.(0)
+    }
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => document.removeEventListener('visibilitychange', onVisibility)
+  }, [])
+
   // The overlay fades its own success beat; this only bounds how long the
   // 'captured' phase can stay on the page's books.
   useEffect(() => {
@@ -1500,7 +1523,9 @@ export default function CaptureLab() {
             acquisition.canvas.width,
             acquisition.canvas.height,
           )
-          const quad = outsetCorners(corners).map(([x, y]) => [
+          // 2.5 % of the diagonal: enough to survive a tracker that is a frame or
+          // two behind a card being positioned, at the cost of a little background.
+          const quad = outsetCorners(corners, 0.025).map(([x, y]) => [
             x * acquisition.canvas.width,
             y * acquisition.canvas.height,
           ])
