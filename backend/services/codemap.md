@@ -20,8 +20,9 @@ Four broad responsibilities live here:
 3. **Domain calculations** — portfolio valuation, deck analysis/probability,
    Pokédex aggregation, price selection, product/ledger accounting.
 4. **Ops & notifications** — APScheduler background jobs (`scheduler.py`),
-   Telegram alerts (`telegram.py`), pre-upgrade backups, debug logging, and
-   exchange-rate/currency handling.
+   Telegram plus Web Push alerts (`telegram.py`, `push.py`), pre-upgrade
+   backups, debug logging, exchange-rate/currency handling, and exactly-once
+   replay of retried mutations (`idempotency.py`).
 
 ## Design
 
@@ -44,7 +45,22 @@ workflows; explicit account erasure removes that owner's locations with its data
 implement query-then-update-or-insert. Card upserts support three modes —
 `partial` (catalogue list rows), `metadata_only` (never touch price state), and
 full — and preserve prior prices when an incoming payload has no valid price
-(`price_utils.preserve_existing_prices_for_invalid_update`).
+(`price_utils.preserve_existing_prices_for_invalid_update`, whose
+`PRICE_FIELDS` covers the `price_tcg_*` columns too). Full upserts that carry
+any TCGplayer price also save a `price_tcg_usd_to_eur` rate, resolved once per
+session through `exchange_rates.get_exchange_rate("USD", "EUR")` so valuation
+never needs a live lookup.
+
+**Price resolution.** Stored `price_market`/`price_trend`/`*_holo` fields stay
+Cardmarket EUR data (zero treated as missing). `card_values.effective_price_quote`
+is the single resolver: Cardmarket → an allowed TCGplayer market price (permitted
+by `Card.tcgplayer_fallback_allowed`: English always, German only with the
+`cross_language_price_fallback` setting; either needs a saved USD/EUR rate)
+→ the fork's personal last resort (`price_jpy_eur_equivalent`, then
+`manual_value_override`), reported as source `manual`. `effective_market_price`
+is the amount-only wrapper used by `portfolio_valuation`, and
+`GET /api/cards/{id}/valuation` returns the quote with its provenance. Valuation
+performs no network requests or writes.
 
 **Composite localized keys.** TCGdex cards and sets are stored per language with
 composite primary keys `"{tcgdex_id}_{lang}"` (e.g. `sv1-1_de`). `pokemon_api`
@@ -90,6 +106,29 @@ cross-process guard (stale after 60 min). The scan queue uses lease tokens,
 items return to the queue. `scan_queue._ProcessWideAsyncSemaphore` bounds
 concurrent work across the web and scheduler event loops.
 
+**Idempotent mutation replay.** `idempotency.py` implements the client
+`Idempotency-Key` contract: keys are per-user, 16–64 URL-safe characters, scoped
+(`collection.add`, `wishlist.add`, `scan.enqueue`) and bound to a SHA-256 request
+fingerprint; a mismatched reuse is a 422 and a *concurrently running* key is a
+409 with `Retry-After` (a `pg_try_advisory_xact_lock`, never a blocking wait
+inside async handlers). Only 2xx results are stored, staged in the caller's
+transaction via `IdempotencyContext.record`, replayed by `replay_response` with
+`Idempotent-Replayed: true`, and expired after 14 days by
+`purge_expired_idempotency_keys` in bounded batches.
+
+**Web Push delivery.** `push.py` stores one subscription row per browser, only
+for allow-listed push-service hosts (FCM plus Apple/Mozilla/Windows suffixes),
+and sends declarative Web Push JSON capped at 4096 bytes. VAPID keys come from
+`VAPID_PRIVATE_KEY`, else a `0600` PEM under `DATA_DIR/auth` created under an
+`fcntl` lock, else an ephemeral pair (subscriptions then break on restart).
+Subscriptions are deleted on 404/410 or after 10 failures; 403/429 are skipped
+without counting. Price alerts carry only the card name — never the price or
+threshold.
+
+**API capability markers.** `api_info.py` holds `API_LEVEL` and
+`API_FEATURES` (`idempotency-v1`), which `main.py` exposes through
+`GET /api/health` so the PWA knows whether replay-safe writes are supported.
+
 **Secret handling.** `auth.resolve_jwt_secret` persists a generated key to a
 `0600` file under an `fcntl` lock, rejects the empty-string Compose default, and
 falls back to an ephemeral key rather than a predictable one. `auth` also owns
@@ -113,9 +152,10 @@ sync sets for configured languages → refresh pinned set rows → enrich
 detail-less sets → sync each set's card catalogue (native rows then
 cross-language fallbacks) → enrich missing card metadata (bounded) → run the fair
 price-sync queue (collection/wishlist/binder + pinned-set cards) → record daily
-price history → fire wishlist alerts via Telegram → snapshot portfolio values →
-probe custom cards for new TCGdex equivalents. `perform_price_sync` runs the
-price-only subset on the scheduler's short interval.
+price history → fire wishlist alerts via Telegram and Web Push → snapshot
+portfolio values → probe custom cards for new TCGdex equivalents.
+`perform_price_sync` runs the price-only subset on the scheduler's short
+interval.
 
 **Price fairness.** `sync_service._price_sync_plan` scales a per-run cap to
 collection size, reserves capacity for both missing-price and already-priced
@@ -127,7 +167,10 @@ validated/sanitized into `ScanJob`/`ScanJobItem` rows; the 1-minute maintenance
 job drains the queue, acquires leases, resolves the provider (`ScanProvider`),
 respects rate-limit/quota state, calls Gemini or an OpenAI-compatible endpoint,
 and caches candidate artwork (`scan_candidate_images`). Recognition results flow
-back to the `api/recognize.py` and `api/scan_jobs.py` routers.
+back to the `api/recognize.py` and `api/scan_jobs.py` routers. A keyed enqueue
+replays before any provider/credential check; `scan_storage.create_scan_job`
+accepts a `before_commit` hook so the idempotency row and the job (including the
+fork's destination Card List) commit atomically.
 
 ## Integration
 
@@ -138,13 +181,16 @@ back to the `api/recognize.py` and `api/scan_jobs.py` routers.
 - **`models` + `database`**: services read/write via `Session` and ORM models,
   and read app configuration from `Setting` / `UserSetting` rows (sync intervals,
   sync languages, currency, scanner provider/model, Telegram credentials, feature
-  toggles like `digital_sets_enabled`).
+  toggles like `digital_sets_enabled`, `cross_language_price_fallback`,
+  `offline_collection_enabled`, artwork-sweep batch/interval).
 - **External providers**: TCGdex (`api.tcgdex.net`), Frankfurter
   (`api.frankfurter.dev`), Telegram Bot API, Gemini / OpenAI-compatible vision,
-  and Suruga-ya (via the `byparr` FlareSolverr sidecar).
+  Suruga-ya (via the `byparr` FlareSolverr sidecar), and browser push services
+  (FCM/Apple/Mozilla/Windows) through `pywebpush`.
 - **`scheduler.py`** registers the APScheduler jobs that drive `sync_service`,
   `suruga_ya_pricing`, `scan_queue`/`scan_storage`, the rate-limit purge
-  functions, and `pokedex_backfill`.
+  functions, `pokedex_backfill`, the fork's `artwork_sweep_job`, and the hourly
+  `idempotency_key_cleanup_job`.
 - **`scripts/*`** (`backfill_pokedex_metadata`, `cache_pokedex_images`) are thin
   CLI wrappers over `pokedex_backfill` / `pokedex_images`.
 
@@ -154,22 +200,32 @@ back to the `api/recognize.py` and `api/scan_jobs.py` routers.
   `card_fallbacks`, `card_metadata`, `card_visibility`, `card_values`,
   `card_numbers`, `price_utils`, `tcgdex_languages`, `digital_sets`,
   `display_language`, `card_artwork` (shared card-artwork cache key, fetch/store
-  and background warmer).
+  and background warmer), `artwork_backfill` (set-level sweep with per-set
+  backoff that recovers artwork TCGdex published after the card synced).
 - **Pokédex**: `pokedex` (static catalogue), `pokedex_forms`, `pokedex_backfill`,
   `pokedex_images`.
 - **Scanner**: `scan_storage`, `scan_queue`, `scan_trace`, `scan_providers`,
-  `scan_candidate_images`, `gemini_rate_limit`, `provider_rate_limit`,
-  `image_url_security`.
+  `scan_candidate_images`, `scan_decision` (experimental calibrated-confidence
+  model; provisional weights, not wired into the runtime scanner),
+  `scan_quality` (deterministic preflight on a sanitized photo, used by
+  `api/recognize.py`), `artwork_index` (optional ONNX/`onnxruntime`
+  artwork-similarity candidate source; unavailable means an empty result),
+  `gemini_rate_limit`, `provider_rate_limit`, `image_url_security`.
 - **Valuation / products**: `portfolio_valuation`, `product_ledger`,
-  `product_sources`, `product_images`, `printing_details`,
+  `product_sources`, `product_images`, `product_card_unlink`, `printing_details`,
   `printing_detail_tags`, `exchange_rates`, `suruga_ya_pricing`.
 - **Gameplay / deck**: `card_gameplay`, `card_state`, `card_composite`,
   `card_list_names`, `standard_legality`, `supporters`, `deck_analysis`,
   `deck_allocation`, `deck_comparison`, `deck_effects`, `deck_probability`,
   `deck_validation`, `deck_display_variants`.
 - **Collection / social**: `collection_csv`, `collection_photos`,
-  `collection_variants`, `binder_allocations`, `binder_csv`, `wishlist_missing`,
-  `public_profile`, `public_profile_feature`, `text_search`.
-- **Ops**: `auth`, `scheduler`, `telegram`, `pre_upgrade_backup`, `postgres_cli`,
-  `debug_logging`, `analytics`, `access_log` (uvicorn access-log query redaction
-  for OIDC paths).
+  `collection_variants`, `collection_removal_conflicts`, `bulk_removal_errors`,
+  `card_list_removal`, `custom_cards`, `binder_allocations`, `binder_csv`,
+  `wishlist_missing`, `public_profile`, `public_profile_feature`, `text_search`.
+- **Ops**: `auth`, `auth_policy`, `auth_admin`, `idempotency`, `push`,
+  `api_info`, `scheduler`, `telegram` (the fork keeps `send_new_sets_notification`
+  for `sync_service`; shared-message helpers are `send_message` and
+  `send_price_alert`), `pre_upgrade_backup`, `postgres_cli`, `debug_logging`,
+  `analytics`, `access_log` (uvicorn access-log query redaction for OIDC paths).
+- **OIDC**: `oidc_provider`, `oidc_identity`, `oidc_link`, `oidc_transactions`,
+  `oidc_crypto`.

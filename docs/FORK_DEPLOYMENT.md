@@ -103,6 +103,24 @@ the Compose project, volume or media isolation above.
 See [OpenID Connect Authentication](OIDC_AUTHENTICATION.md) for provider
 registration, account linking, recovery and the security model.
 
+### Installable app and offline queue
+
+Upstream 1.58 adds an optional PWA shell and offline scan queue. Both are off
+unless an instance opts in, and neither changes the project, volume or media
+isolation above:
+
+- `PWA_ENABLED=true` lets a browser install the app and start it offline. It
+  needs a secure origin (HTTPS, or literal loopback for development); setting
+  it back to `false` removes an installed service worker.
+- `OFFLINE_QUEUE_ENABLED=true` enables the offline scan queue, cached sign-in
+  and the Sync center at `/offline`. Switching it off stops the queue and
+  leaves already queued items on the device.
+- Either flag defaults to off when unset. Recreate the frontend container after
+  changing one (`./scripts/instance.sh <instance> up -d --force-recreate`).
+
+Upstream documents the behaviour in [PWA](PWA.md) and
+[PWA offline design](PWA_OFFLINE_DESIGN.md).
+
 ## Fork release images
 
 Prod must run the same bytes that were tested in Dev. The Fork Release workflow

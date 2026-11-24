@@ -1,7 +1,8 @@
 import { bulkRemoveCollectionItems } from '../api/client'
+
 import { useBulkRemoval } from '../hooks/useBulkRemoval'
 import BulkRemovalToolbar, { BulkRemovalToggle, BulkRemovalActions } from '../components/BulkRemovalToolbar'
-import { useState, useMemo, useId, useRef, useEffect } from 'react'
+import { useState, useMemo, useId, useRef, useEffect, useLayoutEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Trash2, Check, X, Filter, SortAsc, Download, Upload, Loader2, ChevronUp, ChevronDown, Search, PenLine, Grid2X2, List, Library, BookOpen, Heart, Copy, ArrowLeft, Package, Tags, Layers } from 'lucide-react'
@@ -12,7 +13,8 @@ import ProductSourceList from '../components/ProductSourceList'
 import CardLocations from '../components/binders/CardLocations'
 import { useSettings } from '../contexts/SettingsContext'
 import { useConfirmDialog } from '../contexts/ConfirmDialogContext'
-import CardImage from '../components/CardImage'
+import WindowedCardGrid from '../components/WindowedCardGrid'
+import { useListScrollRestoration } from '../hooks/useListScrollRestoration'
 import { CardDialog, CardLegend, CardPriceDetails, withCollectionItemState } from '../components/card-system'
 import { CollectionCardDisplay, CollectionCardIdentity, CollectionCardRow, OwnPhotoOverlayBadge, useCollectionPhotoUrl } from '../components/CollectionCardImage'
 import MoneyInput from '../components/MoneyInput'
@@ -1152,6 +1154,21 @@ export default function Collection() {
     placeholderData: collectionQuery.placeholderData,
   })
 
+  const { saveScrollPosition } = useListScrollRestoration({ key: 'collection', isReady: !isLoading })
+  useLayoutEffect(() => {
+    if (isLoading) return undefined
+    let lastScrollY = window.scrollY
+    const remember = () => { lastScrollY = window.scrollY }
+    window.addEventListener('scroll', remember, { passive: true })
+    document.addEventListener('click', remember, true)
+    return () => {
+      window.removeEventListener('scroll', remember)
+      document.removeEventListener('click', remember, true)
+      // DOM removal can already have changed native scroll anchoring by here.
+      saveScrollPosition('collection-grid', undefined, lastScrollY)
+    }
+  }, [isLoading, saveScrollPosition])
+
   const { data: wishlistItems = [] } = useQuery({
     queryKey: ['wishlist'],
     queryFn: () => getWishlist().then(r => r.data),
@@ -1591,6 +1608,8 @@ export default function Collection() {
         onClose={() => setShowPrintingDetailManager(false)}
       />
 
+
+
       {/* ─── Filter & Sort Bar ────────────────────────────────────── */}
       <div className="card space-y-3">
         <div className="flex flex-wrap items-center gap-3">
@@ -1858,9 +1877,7 @@ export default function Collection() {
             )
           ) : (
             <div className="binder-grid">
-              <div className={COLLECTION_GRID_CLASS}>
-                {filtered.map(item => renderCollectionCard(item))}
-              </div>
+              <WindowedCardGrid listKey="collection" items={filtered} label={t('collection.title')} renderItem={item => renderCollectionCard(item)} />
             </div>
           )}
           {filtered.length > 0 && (

@@ -42,6 +42,14 @@ of that routing table.
   details and owned catalogue results expose `CardLocations`, whose identity-
   aware URLs open Pages and resolve against a fresh snapshot before highlighting.
 
+- **Offline availability is a page property.** `Layout` swaps any path outside
+  `offline/routes.js` for `OfflineUnavailable` while the reachability monitor
+  says the server is unreachable; the allow-listed pages (home, dashboard,
+  collection, wishlist, sets, binders, search-scanner, offline center) keep
+  rendering from the read cache. `/offline` is the user-facing sync center:
+  connection state, outbox queue, storage, collection download, admin sync
+  settings and PWA capabilities.
+
 - **Lazy, code-split pages.** `App.jsx` wraps every page in `React.lazy(() => import('./pages/…'))`
   and renders each through `lazyRoute()` inside a `<Suspense>` whose fallback is
   the `PokeBallLoader` spinner (`RouteLoader`). This keeps the initial bundle small;
@@ -72,23 +80,26 @@ of that routing table.
 - **Domain helpers, not page-local logic.** Sorting, price math, image URLs,
   deck progress, binder counts, and scan-job state are pulled from `utils/` and
   `hooks/` (`useDebouncedValue`, `useListScrollRestoration`,
-  `useVisibleTcgdexLanguages`, `useDeckQuantitySync`) rather than reimplemented in
-  each page.
+  `useVisibleTcgdexLanguages`, `useDeckQuantitySync`, `useBulkRemoval`,
+  `useScanCatalogue`) rather than reimplemented in each page.
 
 ## Flow
 
 **Authentication gate (in `App.jsx`, wrapping every page here).**
 
-1. `App` mounts `AuthProvider → SettingsProvider → ConfirmDialogProvider → BrowserRouter`.
-2. `/login` and `/u/*` render unconditionally (public). Everything else falls
-   through `/*` into `ProtectedRoutes`.
+1. `App` mounts `AuthProvider → SettingsProvider → OfflineProvider →
+   ConfirmDialogProvider → BrowserRouter`.
+2. `/login`, `/auth/oidc/complete` and `/u/*` render unconditionally (public).
+   Everything else falls through `/*` into `ProtectedRoutes`.
 3. `ProtectedRoutes` calls `useAuth()`:
-   - `loading` → `AuthStartupScreen` (bootstrap/reconnect).
+   - `loading` (including fully `offline`) → `AuthStartupScreen` (bootstrap/reconnect).
    - `!user && multiUser` → `<Navigate to="/login" replace />`.
    - `!user` (single-user mode) → spinner while the implicit session resolves.
    - `user.must_change_password` → `ForcePasswordChangeScreen` (a form that calls
      `forceChangePassword`, then clears the flag via `updateCurrentUser`).
    - otherwise → the `<Routes>` inside `<Layout>`.
+   A `degraded` cached session skips the gate and renders display-only until a
+   retry succeeds.
 
 **Per-page data flow (authenticated).**
 
@@ -123,6 +134,7 @@ of that routing table.
 | Route | Page | Client | Gate |
 |---|---|---|---|
 | `/login` | `Login` | `client.login` | public (redirects away if authed/single-user) |
+| `/auth/oidc/complete` | `OidcComplete` | `client.completeOidcLogin` | public (cookie-bound OIDC handoff) |
 | `/u` (index) | `PublicDirectory` | `getPublicProfiles` | public |
 | `/u/:handle` | `PublicProfile` | `getPublicProfile` | public |
 | `/u/:handle/decks` | `PublicProfile` | `getPublicProfile` | public (deck tab) |
@@ -135,7 +147,7 @@ of that routing table.
 
 | Route | Page | Primary API helpers (`api/client`) |
 |---|---|---|
-| `/` | `HomeScreen` | `getDashboard`, `getInvestmentTracker`, `triggerPriceSync`, `getSyncStatus`, `getScanJobs` |
+| `/` | `HomeScreen` | `getDashboard`, `getInvestmentTracker`, `getSyncStatus`, `getScanJobs` |
 | `/dashboard` | `Dashboard` | `getDashboard`, `getInvestmentTracker` |
 | `/search` | `CardSearch` | `searchCards`, `getSets`, `getCustomCards`, `bulkAddToCollection`, `getScanJobs` |
 | `/collection` | `Collection` | `getCollection`, `getWishlist`, `getSets`, `getBinders`, add/update/remove/import + photo upload/delete + `exportCSV`/`exportPDF` |
@@ -154,7 +166,8 @@ of that routing table.
 | `/trades` | `Trades` | `getTrades`, `getTrade`, `createTrade`, `updateTrade`, `searchCards`, `getCollection`, `getCustomCards`, `cloneCustomCard` |
 | `/leaderboard`, `/leaderboard/compare/:userId` | `Leaderboard`, `Compare` | `getLeaderboard`; `compareUsers` |
 | `/achievements`, `/achievements/:userId` | `Achievements` | `getAchievements` |
-| `/settings` | `Settings` | `getSetting`/`setSetting`/`saveSettings`, `getUsers`/`createUser`/`updateUser`/`deleteUser`, `changePassword`/`changeAvatar`/`changeUsername`, `getProfile`/`updateProfile`, sync controls, backup/restore, `exportCSV`, `getSupporters`/`getContributors`, `downloadDebugLog` (also imports raw `api` for interceptor-sensitive calls) |
+| `/settings` | `Settings` | `getSetting`/`setSetting`, `setAuthMode`, `getTelegramStatus`, `getUsers`/`createUser`/`updateUser`/`deleteUser`, `changePassword`/`changeAvatar`/`changeUsername`, `getProfile`/`updateProfile`, `getArtworkStatus`/`startArtworkRecheck`/`clearImageCache`, backup/restore, `exportCSV`, `getSupporters`/`getContributors`, `downloadDebugLog`, `deleteScanDiagnostics`/`deleteAllCollectionCardPhotos`, OIDC identity get/link/unlink (also imports raw `api` for interceptor-sensitive calls); server-sync controls live on `/offline` |
+| `/offline` | `OfflineCenter` | `probe`, outbox/`useOutbox`, `getCollectionOfflineManifest` via automatic collection, `ServerSyncSettings` (`getSyncStatus`, `triggerSync`, price/full-sync intervals), `purgeAll`, capability report. `/settings` hosts the push card (`/push/*`) |
 | `/migration` | `CardMigration` | `getCustomMatches`, `migrateCustomCard`, `dismissCustomMatch` |
 | `/scans`, `/scans/:jobId` | `ScanQueue` | `getScanJobs`, `getScanJob`, `resolveScanJobItem`, `resolveAndAddScanJobItem`, `retryScanJobItem`, `deleteScanJob`, image blob fetch |
 
@@ -178,3 +191,9 @@ of that routing table.
   `ScanQueue`'s express acceptance, the editable scan-add form, and the collection
   edit modal's finish selects; labels and submitted variants use the same
   catalogue result, not scanner guesses.
+- **`components/WindowedCardGrid`** backs large card grids across pages
+  (Collection, CardSearch/SetDetail/PokedexSpecies/UserCollection, public binder,
+  card-list picker/gallery, scan review).
+- **`components/sync/*`, `components/pwa/*`, `offline/*`** provide the offline
+  banner/stale label/queue chrome and the install/update/download surfaces used
+  by `Layout`, `Settings` and `OfflineCenter`.

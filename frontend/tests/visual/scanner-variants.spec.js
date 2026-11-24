@@ -84,7 +84,11 @@ const add = page => dialog(page).getByRole('button', { name: 'Add to collection'
 const options = page => finish(page).locator('option')
 const enabledOptions = page => finish(page).locator('option:not([disabled])')
 
-test('single scan looks up canonical detail, defaults Holo, submits it and keeps the photo', async ({ page }, testInfo) => {
+// Retired with upstream v1.58.4: the legacy single-photo CardScanner modal (the
+// only UI with "Use selected match") was deleted as dead code; single and batch
+// scans now flow through UnifiedCardScanner/ScanReview, covered by
+// scan-review.spec.js and the ScanAddModal cases below.
+test.skip('single scan looks up canonical detail, defaults Holo, submits it and keeps the photo', async ({ page }, testInfo) => {
   const api = await installApi(page)
   await page.goto(`${HARNESS}?single`)
   await page.locator('input[type=file]').nth(1).setInputFiles({ name: 'synthetic.png', mimeType: 'image/png', buffer: PNG })
@@ -296,7 +300,7 @@ test('unsupported explicit choice is reconciled after language change and payloa
   await expect.poll(() => api.adds[0]).toMatchObject({ card_id: 'synthetic-001_de', lang: 'de', variant: 'Reverse Holo' })
 })
 
-test('late response for a cancelled match cannot affect the next selected card', async ({ page }) => {
+test.skip('late response for a cancelled match cannot affect the next selected card (legacy single-scan modal retired upstream)', async ({ page }) => {
   let releaseFirst
   const first = new Promise(resolve => { releaseFirst = resolve })
   let delivered = 0

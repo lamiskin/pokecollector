@@ -1,10 +1,12 @@
 # frontend/src/utils/
 
-Pure, side-effect-free helper modules shared across pages and components. No React, no
-fetch/network calls, no context — just deterministic transforms over plain data. This
-folder is the "no-UI logic" layer of the frontend: the rules for prices, variants,
-currency, sorting, URL state, scanner timing and trade payloads live here so views stay
-thin and the same rule is applied identically everywhere.
+Mostly pure, source-agnostic helper modules shared across pages and components.
+Almost all are deterministic transforms over plain data; a few own narrow browser
+side effects by design (`cardLookup.searchGoogleByPhoto`, `photoCompression`'s
+canvas work, `artworkRetry`'s in-memory token map, `holoEffects`' asset fetches).
+This folder is the "no-UI logic" layer: the rules for prices, variants, currency,
+sorting, URL state, scanner timing and trade payloads live here so views stay thin
+and the same rule is applied identically everywhere.
 
 ## Responsibility
 
@@ -29,15 +31,24 @@ thin and the same rule is applied identically everywhere.
   dex id, and cards without dex ids return in a separate `other` bucket so trainers,
   energy and manual cards stay reachable.
 - One place to mirror backend business logic on the client (`prices.js` re-implements
-  `effective_market_price()` from `backend/services/card_values.py`).
+  `effective_market_price()` / `effective_price_quote()` from
+  `backend/services/card_values.py`, including the EUR-labelled `manual` last resort).
+- PWA/offline support helpers: `photoCompression` and `memoryBlob` prepare images
+  and WebKit-safe upload parts; `publicRoutes` identifies anonymous share paths;
+  `artworkRetry` carries in-memory only retry tokens for failed artwork;
+  `scannerImages` defines accepted scan image types and `webcamStability` scores
+  live frames for auto-capture.
 
 ## Design
 
-Consistent, deliberate patterns across all 35 modules:
+Consistent, deliberate patterns across all 50 modules:
 
-- **Pure functions.** Everything except `cardLookup.searchGoogleByPhoto` (opens a window +
-  triggers a download) is a deterministic input→output transform. No mutations of inputs —
-  copies via spread/`[...x]`/`new URLSearchParams` before mutating.
+- **Pure by default.** Almost everything is a deterministic input→output
+transform. The documented exceptions are `cardLookup.searchGoogleByPhoto`
+(opens a window + triggers a download), `photoCompression` (canvas re-encode),
+`artworkRetry` (a module-level retry-token map, never persisted) and
+`holoEffects` (network/cache reads of immutable effect assets). No mutations of
+inputs — copies via spread/`[...x]`/`new URLSearchParams` before mutating.
 - **Defensive null handling.** Optional chaining (`card?.set_ref?.id`) plus `Number()`
   coercion plus `Number.isFinite()` guards. Missing/invalid numeric data degrades to
   `null`, `0`, `-`, or a safe fallback rather than throwing or producing `NaN`.
@@ -67,11 +78,15 @@ Data flows through these modules in two directions:
 **API → view (read path).** A page receives payloads and pipes them through a pure
 transform for display:
 
-- `prices.getEffectiveCardPrice(card, variant, priceField)` resolves one number through an
-  ordered candidate list (reverse-holo field map → requested field → market → JPY-EUR
-  fallback → manual override), mirroring the backend's precedence. `getPrimaryCardPrice`
-  wraps it with a final `getCardPriceValue` fallback that digs into nested
-  `cardmarket.prices` / `pricing.cardmarket`.
+- `prices.getEffectiveCardPriceDetails(card, variant, priceField)` resolves one
+  quote through an ordered candidate list (reverse-holo field map → requested
+  field → market), then the allowed TCGplayer fallback (only English, or German
+  with `tcgplayer_fallback_allowed`; variant USD field × `price_tcg_usd_to_eur`),
+  then the fork's personal last resort — `price_jpy_eur_equivalent`, else
+  `manual_value_override` — labelled `source: 'manual'`. `getEffectiveCardPrice`
+  returns just the amount, while `getPrimaryCardPrice` wraps it with a final
+  `getCardPriceValue` fallback that digs into nested `cardmarket.prices` /
+  `pricing.cardmarket`.
 - `cardVariants.getAvailableVariants` / `getOwnedVariants` / `getCardOwnedVariants`
   determine which of the four canonical prints exist and which the user owns, collapsing
   condition-only duplicates. `getSelectableVariants` keeps unknown finishes editable,
@@ -112,34 +127,54 @@ tiles re-fetch.
 **Scanner timing/attention.** `scannerTimeout` derives request timeouts from a bounded
 option set (covering retry/fallback attempts with a headroom constant); `scanJobs` turns a
 job into a poll interval (`active` → 3s, else `false`) and aggregates `attention` counts;
-`retryCountdown` converts `next_attempt_at` into human labels. `scannerGrouping` resolves
-the scanner's provider-derived default grouping against each staged photo's tri-state
-choice (`null` follows the default, `true`/`false` is the user's), so local models default
-to individual scans without that ever being stored as a preference.
+`retryCountdown` converts `next_attempt_at` into human labels; `scanSubmitLabel`
+separates the prepare (downscale) and upload phases in the submit button.
+`scannerGrouping` resolves the scanner's provider-derived default grouping against each
+staged photo's tri-state choice (`null` follows the default, `true`/`false` is the
+user's), so local models default to individual scans without that ever being stored as
+a preference. `scanAllocationNotice` explains a short auto-file shortfall without
+implying the add failed, and `settledResults.partitionSettledResults` splits
+`Promise.allSettled` batches into succeeded ids and failed results.
+
+**Holocard effects.** `holoEffects` validates the catalogue's holo-effect metadata
+(sha256, allowed finishes, design keys) and fetches immutable effect assets;
+`holoMotion` maps effect profiles to motion and `holoDeviceMotion` owns the single
+permission + orientation stream shared by all card surfaces. Nothing raw from the
+sensors is persisted or sent.
 
 ## Integration
 
-Consumed from three places (all via relative import `../utils/...` / `../../utils/...`):
+Consumed from several places (all via relative import `../utils/...` / `../../utils/...`):
 
 - **Pages (`src/pages/`)**: `Collection`, `Wishlist`, `UserCollection`, `Trades`,
   `Pokedex`, `PokedexSpecies`, `SetDetail`, `Sets`, `CardSearch`, `BinderDetail`,
-  `ScanQueue`, `Settings`. These are the primary callers — e.g. `Trades` drives
-  `tradeDraft`, `prices`, `cardVariants`; `Sets` drives `filterUrlState`; `BinderDetail`
-  drives `binderCards`/`binderQuantity`/`binderCounts`.
+  `DeckEditor`, `ScanQueue`, `Settings`, `OfflineCenter`. These are the primary
+  callers — e.g. `Trades` drives `tradeDraft`, `prices`, `cardVariants`; `Sets`
+  drives `filterUrlState`; `BinderDetail` drives
+  `binderCards`/`binderQuantity`/`binderCounts`; `OfflineCenter` drives
+  `artworkRetry`.
 - **Hooks (`src/hooks/`)**: `useDynamicFilterUrlState` delegates directly to
   `filterUrlState.read/write` so list/boolean/scalar URL fields work generically.
 - **Components (`src/components/`)**: `card-system/CardPriceDetails`,
-  `CardItem`, `CardStateIndicators`, `CardScanner`, `UnifiedCardScanner`, `ScanReview`,
+  `CardItem`, `CardStateIndicators`, `CardScanner`, `UnifiedCardScanner`,
+  `ScanReview`, `WebcamCapture` (`webcamStability`), `HoloEffectOverlay` /
+  `HoloDeviceMotionController` (`holoEffects`/`holoMotion`/`holoDeviceMotion`),
   `card-lists/CardListGallery`, `card-lists/CardListPicker`, `decks/*`.
+- **Offline layer (`src/offline/`)**: `ops/scanSubmit` and `outbox/ops/scanUpload`
+  validate scan images/timeouts via `scannerImages`/`constants`; the outbox ops
+  invalidate query state via `queryInvalidation` after a replay succeeds.
 - **Context (`src/contexts/SettingsContext.jsx`)**: imports `priceFieldFromPrimary` to
   resolve the user's chosen price field.
 
 Cross-module dependencies are minimal and always import "down": `cardListPicker` →
 `cardNumbers` + `textSearch`; `productCardPicker` → `textSearch`; `tradeDraft` →
-`moneyInput`; `portfolioChart` → `date-fns`. `prices`, `cardVariants`, `textSearch`,
+`moneyInput`; `portfolioChart` → `date-fns`; `holoMotion` → `holoDeviceMotion`;
+`navigation` → URL builders. `prices`, `cardVariants`, `textSearch`,
 `imageUrl` (including its small-scan underlay derivation for large catalogue
 frames), `cardmarket`, `cardLookup` and the three URL-state modules are leaf
 dependencies used widely and imported by nothing else in this folder.
 
-Each module ships a matching `*.test.js` (Vitest) that locks the pure behaviour; the tests
-are the only other files in this directory.
+Most modules (42 of 50) ship a matching `*.test.js` (Vitest) that locks the behaviour;
+the tests are the only other files in this directory. `appLanguages`, `artworkRetry`,
+`cardmarket`, `cardNumbers`, `holoMotion`, `navigation`, `scannerTimeout` and
+`tcgdexLanguages` have no dedicated test file.

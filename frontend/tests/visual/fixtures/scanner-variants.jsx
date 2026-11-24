@@ -5,7 +5,7 @@ import { BrowserRouter } from 'react-router-dom'
 import { AuthProvider } from '../../../src/contexts/AuthContext'
 import { SettingsProvider } from '../../../src/contexts/SettingsContext'
 import { ConfirmDialogProvider } from '../../../src/contexts/ConfirmDialogContext'
-import CardScanner, { ScanAddModal } from '../../../src/components/CardScanner'
+import { ScanAddModal } from '../../../src/components/CardScanner'
 import { CardModal } from '../../../src/components/CardItem'
 import { getCard } from '../../../src/api/client'
 import '../../../src/components/card-system/tokens.css'
@@ -35,8 +35,6 @@ function Harness() {
     <p data-testid="added-count">{added}</p>
     {params.has('card')
       ? open && <ExistingCardHarness onClose={() => setOpen(false)} />
-      : params.has('single')
-      ? <CardScanner isOpen={open} onClose={() => setOpen(false)} />
       : open && <ScanAddModal match={match} getPhoto={() => Promise.resolve(new Blob(['synthetic scan'], { type: 'image/png' }))}
           onClose={() => setOpen(false)} onAdded={() => setAdded(count => count + 1)} />}
   </>

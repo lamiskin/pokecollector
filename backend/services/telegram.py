@@ -51,12 +51,6 @@ def _get_telegram_credentials(db=None, user_id=None):
     return token, chat_id
 
 
-def is_configured(db=None, user_id=None) -> bool:
-    """Check if Telegram is configured (from DB or env)."""
-    token, chat_id = _get_telegram_credentials(db, user_id=user_id)
-    return bool(token and chat_id)
-
-
 def send_message(text: str, db=None, user_id=None) -> bool:
     """Send a message via Telegram Bot API."""
     token, chat_id = _get_telegram_credentials(db, user_id=user_id)
@@ -123,11 +117,6 @@ def _format_currency_amount(
         return f"Unavailable ({currency or 'selected currency'})"
     converted = float(amount or 0) * rate
     return f"{currency} {converted:,.2f}"
-
-
-def _format_user_eur(amount: float, db=None, user_id=None) -> str:
-    currency = _get_user_currency(db=db, user_id=user_id)
-    return _format_currency_amount(amount, currency, _get_eur_exchange_rate(currency))
 
 
 def send_price_alert(card_name: str, current_price: float, threshold: float, alert_type: str, db=None, user_id=None):

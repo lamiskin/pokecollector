@@ -12,6 +12,9 @@ React frontend and owns all server-side persistence and business logic:
 - Pricing/market data (TCGdex, TCGPlayer, Cardmarket, Suruga-ya) and exchange rates.
 - Authentication (JWT, single- and multi-user modes), settings, public profiles,
   community, analytics, sync, export, backup, images, and Pokédex metadata.
+- PWA support surface: replay-safe mutation endpoints (`Idempotency-Key`),
+  Web Push alert subscriptions, and a health payload that advertises API level
+  and feature markers.
 
 `main.py` is the entrypoint (`main:app`, served by uvicorn on port 8000). It
 assembles the app, wires middleware and routers, and owns the startup/shutdown
@@ -38,8 +41,9 @@ Key architectural decisions:
   `/api/<domain>` prefix (see Flow for the full list).
 - **ORM + hand-rolled migrations.** SQLAlchemy 2.x declarative models live in
   `models.py`. Schema changes are applied by `database.py`'s `_run_migrations`,
-  a flat list of idempotent, versioned raw-SQL statements (v31–v63, `IF NOT
-  EXISTS`/`ADD COLUMN IF NOT EXISTS` guards). Alembic is present in
+  a flat list of idempotent, versioned raw-SQL statements (v31–v64 plus the
+  later additive PWA blocks for `idempotency_keys`/`push_subscriptions`,
+  `IF NOT EXISTS`/`ADD COLUMN IF NOT EXISTS` guards). Alembic is present in
   `requirements.txt` but is not the migration path in this codebase.
 - **`init_db` is the migration orchestrator.** Beyond `create_all`, it runs
   `_run_migrations`, audits/constrains collection variants
@@ -65,13 +69,25 @@ Key architectural decisions:
   plus a bespoke in-memory middleware capping login at 5 attempts/min/IP.
 - **Config is env-var driven with DB-backed settings.** Secrets/URLs come from
   environment variables (`DATABASE_URL`, `JWT_SECRET_KEY`, `ADMIN_PASSWORD`,
-  `GEMINI_API_KEY`, `OPENAI_BASE_URL`, `CORS_ORIGINS`, `APP_VERSION`, `USER_MODE`).
+  `GEMINI_API_KEY`, `OPENAI_BASE_URL`, `CORS_ORIGINS`, `APP_VERSION`, `USER_MODE`,
+  plus the push keys `VAPID_PRIVATE_KEY`/`VAPID_SUBJECT` and their key-file
+  fallback).
   Tunable runtime settings are rows in the `settings` table with defaults in
   `database.py`'s `DEFAULT_SETTINGS`, accessed via `get_setting`/`save_setting`
-  helpers.
+  helpers; per-user preferences (`offline_collection_enabled`, scanner
+  credentials) live in `user_settings`.
 - **Background work.** APScheduler (`services/scheduler.py`) is started/stopped in
   the lifespan; the scanner queue is PostgreSQL-backed with filesystem image
   storage (`services/scan_queue.py`, `services/scan_storage.py`).
+- **Replay-safe writes.** `services/idempotency.py` stores a completed 2xx
+  response under a per-user `Idempotency-Key` (14-day TTL) in the same
+  transaction as the business write; retries replay it with
+  `Idempotent-Replayed: true`. Advisory transaction locks serialise concurrent
+  use of one key, and `X-Expected-User-Id` rejects a queued write replayed under
+  another account.
+- **Capability advertisement.** `GET /api/health` returns `api_level` and
+  `features` from `services/api_info.py`; the PWA sends queued writes only to a
+  backend that advertises `idempotency-v1`.
 
 ## Flow
 
@@ -101,8 +117,8 @@ Pydantic responses.
 `/api/sets`, `/api/wishlist`, `/api/binders`, `/api/decks`, `/api/dashboard`,
 `/api/analytics`, `/api/sync`, `/api/products`, `/api/trades`, `/api/export`,
 `/api/backup`, `/api/settings`, `/api/images`, `/api/social`, `/api/pokedex`,
-`/api/public`, `/api/profile`, `/api/github`, `/api/community`, plus
-`/api/health` (liveness).
+`/api/public`, `/api/profile`, `/api/github`, `/api/community`, `/api/push`
+(Web Push subscriptions), plus `/api/health` (liveness + API level/features).
 
 ## Integration
 
@@ -113,10 +129,12 @@ Pydantic responses.
   `postgresql://pokemon:changeme@localhost:5432/pokemon_tcg`; overridden by
   `DATABASE_URL`.
 - **External services (via `services/`):** TCGdex (card/set data and images),
-  TCGPlayer and Cardmarket (pricing), Suruga-ya (JPY pricing, personal feature),
-  PokéAPI (species metadata), Gemini and OpenAI-compatible endpoints (scanning),
-  and currency exchange-rate providers.
-- **Scheduling:** APScheduler jobs in `services/scheduler.py` (e.g. price sync,
+  TCGPlayer and Cardmarket (pricing, with TCGplayer converted to EUR at sync),
+  Suruga-ya (JPY pricing, personal feature), PokéAPI (species metadata), Gemini
+  and OpenAI-compatible endpoints (scanning), currency exchange-rate providers,
+  and browser push services (FCM, Apple, Mozilla, Windows) for wishlist alerts.
+- **Scheduling:** APScheduler jobs in `services/scheduler.py` (full/price sync,
+  the fork's artwork sweep and Suruga-ya JP sync, the idempotency-key cleanup,
   snapshot capture).
 - **Operational scripts:** `scripts/` (submap `scripts/codemap.md`) holds
   standalone CLI entrypoints run via `python -m scripts.<module>` — e.g.

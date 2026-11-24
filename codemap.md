@@ -13,9 +13,13 @@ map describes the current `fork/main` target structure, not the retained legacy
 - **Backend:** HTTP routers in `backend/api/` call domain services in
   `backend/services/`; services use SQLAlchemy models and PostgreSQL. The
   FastAPI lifespan handles migration/bootstrap/scheduler startup.
-- **Frontend:** `frontend/src/main.jsx` mounts the React app; `App.jsx` composes
-  auth/settings/confirmation providers and routes to lazy page containers.
-  Pages combine API clients, hooks, utilities and reusable components.
+- **Frontend:** `frontend/src/main.jsx` mounts the React app, optionally
+  registering the opt-in service worker; `App.jsx` composes
+  auth/settings/offline/confirmation providers and routes to lazy page
+  containers. Pages combine API clients, hooks, utilities and reusable
+  components. An installable PWA layer (`frontend/src/pwa/`,
+  `frontend/src/offline/`) adds a precached shell, an IndexedDB outbox for scan
+  and add operations, and a read cache.
 - **Runtime:** `docker-compose.yml` defines the stack; `scripts/instance.sh`
   selects the isolated `pokecollector-dev` or `pokecollector-prod` project and
   its ignored environment/data paths. Frontend nginx serves the SPA and proxies
@@ -30,7 +34,10 @@ Browser request → frontend static app/nginx → frontend API client → nginx
 `/api` proxy → FastAPI middleware/auth/router → service layer → PostgreSQL or
 external catalog/pricing/scanner providers → JSON response → React Query/state
 updates and rendered page. Background scheduler and explicit sync endpoints
-share the service layer for catalogue, price, and maintenance work.
+share the service layer for catalogue, price, and maintenance work. When the
+server is unreachable, the PWA shell still loads; queued writes replay from the
+IndexedDB outbox on reconnection and allow-listed queries hydrate from the read
+cache.
 
 ## Integration
 
@@ -40,7 +47,7 @@ share the service layer for catalogue, price, and maintenance work.
 | `backend/api/` | HTTP routers, auth dependencies, request/response contracts | [backend/api/codemap.md](backend/api/codemap.md) |
 | `backend/services/` | Domain logic, synchronization, prices, scanning, jobs | [backend/services/codemap.md](backend/services/codemap.md) |
 | `backend/scripts/` | One-off administrative and maintenance commands | [backend/scripts/codemap.md](backend/scripts/codemap.md) |
-| `frontend/` | Vite build and nginx-served SPA runtime | [frontend/codemap.md](frontend/codemap.md) |
+| `frontend/` | Vite build, nginx-served SPA runtime and opt-in PWA build | [frontend/codemap.md](frontend/codemap.md) |
 | `frontend/src/` | React app bootstrap, routes and UI source atlas | [frontend/src/codemap.md](frontend/src/codemap.md) |
 | `frontend/src/api/` | Authenticated and public HTTP clients | [frontend/src/api/codemap.md](frontend/src/api/codemap.md) |
 | `frontend/src/components/` | Shared visual components and feature subareas | [frontend/src/components/codemap.md](frontend/src/components/codemap.md) |
@@ -50,11 +57,11 @@ share the service layer for catalogue, price, and maintenance work.
 | `frontend/src/components/decks/` | Deck validation, analytics and display components | [codemap](frontend/src/components/decks/codemap.md) |
 | `frontend/src/components/public/` | Shared public-profile layout | [codemap](frontend/src/components/public/codemap.md) |
 | `frontend/src/components/ui/` | Accessible shared UI primitives | [codemap](frontend/src/components/ui/codemap.md) |
-| `frontend/src/contexts/` | Auth, settings and confirmation state | [frontend/src/contexts/codemap.md](frontend/src/contexts/codemap.md) |
+| `frontend/src/contexts/` | Auth, settings, confirmation and offline-backed client state | [frontend/src/contexts/codemap.md](frontend/src/contexts/codemap.md) |
 | `frontend/src/hooks/` | Reusable stateful React behaviors | [frontend/src/hooks/codemap.md](frontend/src/hooks/codemap.md) |
 | `frontend/src/pages/` | Route-level private and public page containers | [frontend/src/pages/codemap.md](frontend/src/pages/codemap.md) |
 | `frontend/src/utils/` | Shared pure/domain helper functions | [frontend/src/utils/codemap.md](frontend/src/utils/codemap.md) |
-| `frontend/scripts/` | Translation and runtime-configuration checks | [frontend/scripts/codemap.md](frontend/scripts/codemap.md) |
+| `frontend/scripts/` | Translation, PWA/service-worker, holo and nginx/runtime-configuration checks | [frontend/scripts/codemap.md](frontend/scripts/codemap.md) |
 | `scripts/` | Instance management and repository maintenance tools | [scripts/codemap.md](scripts/codemap.md) |
 
 Root configuration and entrypoints: `docker-compose.yml`,

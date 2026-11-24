@@ -15,6 +15,7 @@ node_modules/
 frontend/playwright-report/
 frontend/test-results/
 frontend/test-results-webkit/
+frontend/test-results-pwa/
 
 # Local persistent data / caches
 /data/
@@ -36,3 +37,6 @@ data/auth/
 
 # Local codemap change-detection state (codemap.md files are committed)
 /.slim/codemap.json
+
+# pip cache written by disposable test containers
+backend/.cache/
