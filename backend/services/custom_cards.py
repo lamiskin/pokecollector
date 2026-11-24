@@ -13,19 +13,57 @@ from uuid import uuid4
 
 from sqlalchemy.orm import Session
 
-from models import Card, Set, User
+from models import Card, Set, User, UserSetting
 from services.image_url_security import validate_public_https_image_url
+from services.tcgdex_languages import is_supported_tcgdex_language, normalize_tcgdex_language
 
 DEFAULT_CUSTOM_CARD_LANG = "en"
 
 
-def find_set_for_free_text_id(db: Session, set_id: str) -> Set | None:
-    """Resolve a custom card's free-text set against the catalogue."""
-    return (
-        db.query(Set)
-        .filter((Set.tcg_set_id == set_id) | (Set.id == set_id))
+def _user_catalogue_language(db: Session, user_id: int | None) -> str | None:
+    """The user's own catalogue language, if they have chosen a supported one."""
+    if user_id is None:
+        return None
+    row = (
+        db.query(UserSetting)
+        .filter(UserSetting.user_id == user_id, UserSetting.key == "language")
         .first()
     )
+    if not row or not row.value:
+        return None
+    language = normalize_tcgdex_language(row.value)
+    return language if is_supported_tcgdex_language(language) else None
+
+
+def find_set_for_free_text_id(
+    db: Session,
+    set_id: str,
+    *,
+    user_id: int | None = None,
+) -> Set | None:
+    """Resolve a custom card's free-text set against the catalogue.
+
+    A set exists once per language, so an unordered first row could silently
+    pick a printing the user does not read. Resolve deliberately: the user's own
+    language, then English, then a deterministic row.
+    """
+    rows = (
+        db.query(Set)
+        .filter((Set.tcg_set_id == set_id) | (Set.id == set_id))
+        .order_by(Set.lang.asc(), Set.id.asc())
+        .all()
+    )
+    if not rows:
+        return None
+
+    by_language: dict[str, Set] = {}
+    for row in rows:
+        if row.lang and row.lang not in by_language:
+            by_language[row.lang] = row
+    for language in (_user_catalogue_language(db, user_id), DEFAULT_CUSTOM_CARD_LANG):
+        if language and language in by_language:
+            return by_language[language]
+    return next((row for row in rows if row.lang), rows[0])
 
 
 def stage_custom_card(
@@ -57,7 +95,7 @@ def stage_custom_card(
         manual_image = validate_public_https_image_url(manual_image)
 
     set_id = set_id or None
-    existing_set = find_set_for_free_text_id(db, set_id) if set_id else None
+    existing_set = find_set_for_free_text_id(db, set_id, user_id=user.id) if set_id else None
 
     # Derive language from the set if not explicitly provided
     card_lang = lang
