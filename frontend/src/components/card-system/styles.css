@@ -31,6 +31,15 @@
     border-radius: var(--pc-card-art-radius);
     background: var(--color-elevated);
   }
+  /* Keep the underlay inside this frame's paint order: the small scan (and the
+     shimmer behind it) sit above the frame background but below the image, so
+     the frame never flashes empty while the large scan is on its way. */
+  .unified-card-image { isolation: isolate; }
+  .unified-card-underlay { z-index: -1; }
+  .unified-card-image-crossfade { transition: opacity 240ms ease-out; }
+  @media (prefers-reduced-motion: reduce) {
+    .unified-card-image-crossfade { transition: none; }
+  }
   .unified-card-action-layer { position: relative; }
   .unified-card-primary-action {
     position: absolute;

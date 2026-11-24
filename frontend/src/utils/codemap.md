@@ -137,7 +137,8 @@ Consumed from three places (all via relative import `../utils/...` / `../../util
 Cross-module dependencies are minimal and always import "down": `cardListPicker` →
 `cardNumbers` + `textSearch`; `productCardPicker` → `textSearch`; `tradeDraft` →
 `moneyInput`; `portfolioChart` → `date-fns`. `prices`, `cardVariants`, `textSearch`,
-`imageUrl`, `cardmarket`, `cardLookup` and the three URL-state modules are leaf
+`imageUrl` (including its small-scan underlay derivation for large catalogue
+frames), `cardmarket`, `cardLookup` and the three URL-state modules are leaf
 dependencies used widely and imported by nothing else in this folder.
 
 Each module ships a matching `*.test.js` (Vitest) that locks the pure behaviour; the tests

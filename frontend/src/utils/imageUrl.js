@@ -45,6 +45,35 @@ export const resolveCardImageUrl = (card, size = 'small') => {
     || null
 }
 
+// The small catalogue scan to stand behind the large one while it loads.
+//
+// Only the catalogue proxy pair is guaranteed to show the same printing: the
+// small endpoint serves this card's own small scan, while an upstream asset
+// URL, a manual image URL or the owner's photo has no cached small twin. The
+// small endpoint also falls back to the large scan (and then the card back) when
+// a card records no small scan, so require one on the record: an underlay of the
+// card back would be a second flash instead of a shortcut.
+//
+// `displayedImage` is what the frame is actually showing, not a re-resolution:
+// callers such as the collection dialog add cache-busting or pick the owner's
+// photo, and neither should get an underlay.
+export const resolveCardArtworkUnderlay = (card, displayedImage) => {
+  if (!card || !displayedImage || card.is_custom) return null
+
+  const cardId = card.card_id || (typeof card.id === 'string' ? card.id : null)
+  if (!cardId) return null
+  if (displayedImage !== cardImageUrl(cardId, 'large')) return null
+
+  // The small endpoint serves images_small (falling back to the large scan,
+  // then the card back), so only a recorded small scan proves the underlay is
+  // this card's artwork rather than a second flash of the card back.
+  const hasSmallScan = Boolean(card.images?.small || card.images_small)
+  if (!hasSmallScan) return null
+
+  const small = cardImageUrl(cardId, 'small')
+  return small === displayedImage ? null : small
+}
+
 export const resolveSetImageUrl = (set, imageType) => {
   if (set?.id) return setImageUrl(set.id, imageType)
   return imageType === 'logo' ? (set?.images_logo || null) : (set?.images_symbol || null)

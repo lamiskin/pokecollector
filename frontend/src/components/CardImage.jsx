@@ -2,9 +2,16 @@
  * CardImage — uses the Pokemon card back when artwork is missing and shows an
  * explicit retry state when a supplied image URL fails to load.
  *
+ * `underlaySrc` is an optional smaller copy of the same artwork: it paints
+ * immediately while `src` loads, and the real image fades in over it. It is
+ * purely decorative — never the image this component reports on, and never a
+ * click target — so retry, status reporting and the zoom overlay keep naming
+ * `src`.
+ *
  * Usage: <CardImage src={url} alt={card.name} className="w-full h-full object-cover" />
  */
 import { AlertTriangle, RefreshCw } from 'lucide-react'
+import clsx from 'clsx'
 import { useEffect, useRef, useState } from 'react'
 import { useSettings } from '../contexts/SettingsContext'
 
@@ -99,6 +106,7 @@ export default function CardImage({
   loading = 'lazy',
   onLoadingChange,
   onStatusChange,
+  underlaySrc,
   compactError = false,
 }) {
   const { t } = useSettings()
@@ -116,6 +124,12 @@ export default function CardImage({
   const displaySrc = !src
     ? CARD_BACK
     : `${src}${attempt > 0 ? `${String(src).includes('?') ? '&' : '?'}retry=${attempt}` : ''}`
+  const imageClassName = className || 'w-full h-full object-cover'
+  // Gated by the same viewport reveal as the real image: an underlay must not
+  // fetch artwork that native lazy loading would have kept below the fold.
+  const resolvedUnderlay = shouldLoad && underlaySrc && underlaySrc !== displaySrc
+    ? underlaySrc
+    : null
 
   useEffect(() => {
     if (shouldLoad) return undefined
@@ -196,15 +210,30 @@ export default function CardImage({
 
   return (
     <div ref={containerRef} className="unified-card-image relative w-full h-full bg-bg-elevated">
-      {!loaded && <div className="unified-card-skeleton absolute inset-0" aria-hidden />}
+      {!loaded && (
+        <div
+          className={clsx('unified-card-skeleton absolute inset-0', resolvedUnderlay && 'unified-card-underlay')}
+          aria-hidden
+        />
+      )}
+      {resolvedUnderlay && (
+        <img
+          src={resolvedUnderlay}
+          alt=""
+          aria-hidden="true"
+          className={clsx('unified-card-underlay pointer-events-none absolute inset-0', imageClassName)}
+          loading="eager"
+          draggable={false}
+        />
+      )}
       {shouldLoad && !failed && (
         <img
           ref={imageRef}
           key={`${src || CARD_BACK}-${attempt}`}
           src={displaySrc}
           alt={alt}
-          className={className || 'w-full h-full object-cover'}
-          style={{ ...(src ? {} : { opacity: 0.8 }), ...style }}
+          className={clsx(imageClassName, resolvedUnderlay && 'unified-card-image-crossfade')}
+          style={{ ...(src ? {} : { opacity: 0.8 }), ...(resolvedUnderlay ? { opacity: loaded ? 1 : 0 } : {}), ...style }}
           loading={loading}
           onError={handleError}
           onLoad={() => setStatus(previous => ({

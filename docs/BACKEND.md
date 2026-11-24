@@ -299,15 +299,26 @@ artwork and set logos/symbols also use the frontend's bounded Nginx disk cache
 (up to 1 GiB, discarded with the frontend container). Repeated requests can be
 served without transferring the image from the backend again.
 
-These routes are mutable, not content-addressed assets. New public responses use
-`public, max-age=0, s-maxage=60, must-revalidate`: browsers revalidate their copy,
-while shared caches may reuse it for at most 60 seconds. Changes to artwork,
-visibility or fallback settings can therefore take up to that interval to reach
-a shared-cache hit. Existing browser entries created by older releases retain
-their original expiry. ETags are SHA-256 hashes of the actual image bytes, so
-clearing/refilling the database image cache cannot incorrectly validate changed
-bytes just because the source URL stayed the same. Set image cache keys include
-the selected source URL, including English fallback URLs.
+These routes are mutable, not content-addressed assets. Catalogue **card**
+artwork uses `public, max-age=3600, s-maxage=60, must-revalidate`: a browser may
+reuse its copy for up to an hour, while shared caches (the Nginx proxy)
+revalidate every 60 seconds. The cache key embeds a hash of the source URL, so a
+changed artwork URL busts the entry immediately; only refilling the same key in
+place can stay stale in a browser for at most that hour. **Set** logos/symbols
+keep `public, max-age=0, s-maxage=60, must-revalidate`. Existing browser entries
+created by older releases retain their original expiry. ETags are SHA-256 hashes
+of the actual image bytes, so clearing/refilling the database image cache cannot
+incorrectly validate changed bytes just because the source URL stayed the same.
+Set image cache keys include the selected source URL, including English fallback
+URLs.
+
+A first view of uncached artwork blocks on the upstream TCGdex transfer, which
+is seconds rather than milliseconds, so the collection keeps its artwork warm:
+`services/card_artwork.py` owns the shared key/fetch/store path (used by the
+proxy and the warmer), adding a card to the collection queues a background warm
+of its large artwork, and `python -m scripts.warm_collection_artwork` pre-fills
+every distinct card in the collection (re-runnable, bounded concurrency,
+`--dry-run`).
 
 Manual cards and custom fallback artwork use `private, no-store`. Missing card
 redirects and set placeholders use `no-store`, so a temporary failure does not

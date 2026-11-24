@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from database import get_db
 from models import Card, ImageCache, ProductPurchase, Set, Setting
+from services import card_artwork
 from services.card_visibility import get_configured_sync_languages, get_pinned_set_language_pairs
 from services.image_url_security import validate_public_https_image_url
 from services.product_images import (
@@ -89,29 +90,12 @@ def _is_globally_visible_set_image(db: Session, card_set: Set) -> bool:
 
 
 def _get_or_fetch(db: Session, key: str, url: str) -> tuple[bytes, str]:
-    cached = db.query(ImageCache).filter(ImageCache.image_key == key).first()
-    if cached:
-        return cached.data, cached.content_type
-
+    # Kept as the images module's entry point; the shared helper owns the fetch
+    # and commit-race behavior so background warming stores images identically.
     try:
-        resp = _client.get(url)
-        resp.raise_for_status()
-    except Exception as exc:
+        return card_artwork.get_or_fetch_card_image(db, key, url, client=_client)
+    except card_artwork.CardArtworkError as exc:
         raise HTTPException(status_code=502, detail="Failed to fetch image from upstream") from exc
-
-    content_type = resp.headers.get("content-type", "image/webp")
-    entry = ImageCache(image_key=key, data=resp.content, content_type=content_type)
-    db.add(entry)
-    try:
-        db.commit()
-    except Exception:
-        db.rollback()
-        cached = db.query(ImageCache).filter(ImageCache.image_key == key).first()
-        if cached:
-            return cached.data, cached.content_type
-        raise
-
-    return resp.content, content_type
 
 
 def _get_or_fetch_custom_image(
@@ -274,10 +258,14 @@ def get_card_image(
 
     url_hash = hashlib.sha1(url.encode("utf-8")).hexdigest()
     is_custom_artwork = bool(card.is_custom or (card.custom_image_url and url == card.custom_image_url))
+    # Catalogue artwork may be served from the browser cache for an hour: the
+    # key embeds a hash of the source URL, so a changed URL busts the entry. An
+    # in-place blob refill can stay stale in a browser for up to an hour, while
+    # shared caches still revalidate every 60 s.
     cache_control = (
         "private, no-store"
         if is_custom_artwork
-        else "public, max-age=0, s-maxage=60, must-revalidate"
+        else "public, max-age=3600, s-maxage=60, must-revalidate"
     )
 
     try:
