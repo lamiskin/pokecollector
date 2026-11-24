@@ -1,7 +1,7 @@
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
-import { BinderPage } from './BinderWorkspace'
+import { BinderPage, BinderSelectionBar } from './BinderWorkspace'
 
 vi.mock('../CollectionCardImage', () => ({
   CollectionCardDisplay: ({ item, stateIndicatorProps }) => createElement('div', {
@@ -66,5 +66,45 @@ describe('physical pages', () => {
     expect(markup).toContain('data-public-artwork')
     expect(markup).toContain('data-printing=""')
     expect(markup).not.toContain('data-scan-photo')
+  })
+})
+const barT = key => ({
+  'binderLayout.selection': 'Selected card actions',
+  'binderLayout.selected': 'Selected: {name} · 1 copy',
+  'binderLayout.moveTo': 'Move to…',
+  'binderLayout.returnToTray': 'Return to Not placed',
+  'binderLayout.remove': 'Remove…',
+  'common.cancel': 'Cancel',
+}[key] || key)
+const barProps = { t: barT, busy: false, sideTray: false, frame: { left: 0, right: 0 }, onMove() {}, onReturn() {}, onRemove() {}, onCancel() {} }
+const placementSelection = { placement_id: 'copy-b', binder_card_id: 7, entry: props.entries[0] }
+const traySelection = { binder_card_id: 7, entry: props.entries[0] }
+describe('selection bar', () => {
+  it('offers removal only where a copy can be selected', () => {
+    expect(renderToStaticMarkup(createElement(BinderSelectionBar, { ...barProps, selected: placementSelection, readOnly: true }))).toBe('')
+    expect(renderToStaticMarkup(createElement(BinderSelectionBar, { ...barProps, selected: placementSelection, onRemove: undefined }))).not.toContain('data-remove-selection')
+    const markup = renderToStaticMarkup(createElement(BinderSelectionBar, { ...barProps, selected: placementSelection }))
+    expect(markup).toContain('data-remove-selection')
+    expect(markup).toContain('Remove…')
+    expect(markup).toContain('Move to…')
+    expect(markup).toContain('Return to Not placed')
+    expect(markup).toContain('role="region"')
+    expect(markup).toContain('aria-label="Selected card actions"')
+    expect(markup).toContain('--binder-bar-left:12px')
+    // DOM order is the rendered order at every width: Move → Return → Remove.
+    // No breakpoint may reorder the actions, or Tab would jump against the eye.
+    expect(markup.indexOf('Move to…')).toBeLessThan(markup.indexOf('Return to Not placed'))
+    expect(markup.indexOf('Return to Not placed')).toBeLessThan(markup.indexOf('Remove…'))
+    const actionButtons = [...markup.matchAll(/<button[^>]*>[\s\S]*?<\/button>/g)]
+      .map(match => match[0])
+      .filter(tag => /Move to…|Return to Not placed|Remove…/.test(tag))
+    expect(actionButtons).toHaveLength(3)
+    for (const tag of actionButtons) expect(tag.slice(0, tag.indexOf('>'))).not.toMatch(/\border-/)
+    expect(markup).toContain('col-span-2')
+  })
+  it('keeps removal for a Not placed copy and drops the return action', () => {
+    const markup = renderToStaticMarkup(createElement(BinderSelectionBar, { ...barProps, selected: traySelection }))
+    expect(markup).toContain('data-remove-selection')
+    expect(markup).not.toContain('Return to Not placed')
   })
 })

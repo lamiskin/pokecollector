@@ -65,7 +65,7 @@ Use these points when implementing or reviewing any screen that presents cards:
   the shared legend nearby.
 - Missing cards in comparison contexts such as Set and Pokédex views keep the grey ownership overlay. Disabled cards show a reason instead of silently ignoring interaction.
 - Card names stay on one ellipsized line in aligned grids and compact rows. The set abbreviation/card number and price remain aligned when neighboring names have different lengths.
-- Missing artwork uses the Pokémon card back. Loading uses the shared skeleton; failed supplied artwork offers retry; compact lists prioritize visible images and defer distant rows.
+- Missing artwork uses the Pokémon card back. Loading uses the shared skeleton, except when the frame shows the large catalogue proxy and the card records a small scan: that small scan paints immediately and the large scan fades in over it. Failed supplied artwork offers retry; compact lists prioritize visible images and defer distant rows.
 - Compact rows show the complete artwork inside the standard compact frame. Collection, Analytics, Wishlist, trades, comparisons, rankings, binders, and optimizer rows should feel like the same family.
 - Price presentation uses the user's configured primary price and the shared
   variant-aware fallback rules. Feature pages may add contextual totals, but

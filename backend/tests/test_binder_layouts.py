@@ -1,4 +1,5 @@
 """Physical-copy integrity and API regressions, without external services."""
+import datetime
 import unittest
 from unittest.mock import patch
 
@@ -9,7 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from api.binder_layouts import get_binder_layout, move_binder_copy, update_binder_layout, undo_binder_layout
+from api.binder_layouts import get_binder_layout, move_binder_copy, remove_binder_copy, update_binder_layout, undo_binder_layout
 from api.binders import (
     convert_collection_binder_to_wishlist, delete_binder, remove_binder_entry,
     remove_card_from_binder, switch_binder_entry_card, update_binder_entry,
@@ -17,8 +18,8 @@ from api.binders import (
 from api.collection import remove_from_collection, update_collection_item
 from api.public import get_public_binder_layout, get_public_card_locations
 from database import Base
-from models import Binder, BinderCard, BinderPlacement, Card, CollectionCardPhoto, CollectionItem, User, Setting
-from schemas import BinderCardUpdate, BinderCardSwitch, BinderLayoutPreview, BinderLayoutUpdate, BinderLayoutUndo, BinderPlacementMove, CollectionItemUpdate
+from models import Binder, BinderCard, BinderPlacement, Card, CollectionCardPhoto, CollectionItem, ProductCard, ProductPurchase, User, Setting
+from schemas import BinderCardUpdate, BinderCardSwitch, BinderCopyRemoval, BinderLayoutPreview, BinderLayoutUpdate, BinderLayoutUndo, BinderPlacementMove, CollectionItemUpdate
 from services.binder_layout_schema import migrate_binder_layout_schema
 from services.binder_layouts import card_locations, layout_state, preview_layout, require_unplaced
 from services.card_list_removal import remove_card_list_entries
@@ -73,6 +74,16 @@ class BinderLayoutTests(unittest.TestCase):
         return undo_binder_layout(self.binder.id, BinderLayoutUndo(expected_revision=revision or self.state()["revision"]),
                                  current_user=self.user, db=self.db)
 
+    def remove(self, entry=None, placement=None, owned=False, revision=None, no_revision=False):
+        body = {
+            "binder_card_id": (entry or self.entry).id, "placement_id": placement,
+            "remove_owned_copy": owned,
+        }
+        if not no_revision:
+            body["expected_revision"] = revision or self.state()["revision"]
+        return remove_binder_copy(self.binder.id, BinderCopyRemoval(**body),
+                                  current_user=self.user, db=self.db)
+
     def assert_conflict(self, operation, status=409):
         with self.assertRaises(HTTPException) as caught:
             operation()
@@ -119,6 +130,128 @@ class BinderLayoutTests(unittest.TestCase):
         self.assertEqual((state["placed_count"], state["unplaced_count"]), (0, 5))
         self.assertIsNotNone(self.db.get(BinderCard, self.entry.id))
         self.assertEqual(self.undo()["placements"], [p])
+
+    def test_removing_a_placed_copy_frees_its_pocket_and_decrements_membership(self):
+        self.configure()
+        p = self.move()["placements"][0]
+        move_revision = self.state()["revision"]
+        state = self.remove(placement=p["id"])
+        self.assertEqual(state["placed_count"], 0)
+        self.assertNotIn(p["id"], [row["id"] for row in state["placements"]])
+        row = next(e for e in state["entries"] if e["binder_card_id"] == self.entry.id)
+        self.assertEqual((row["quantity"], row["unplaced_quantity"], row["owned_quantity"]), (2, 2, 3))
+        self.assertEqual(self.db.get(BinderCard, self.entry.id).required_quantity, 2)
+        self.assertEqual(self.db.get(CollectionItem, self.item.id).quantity, 3)
+        self.assertFalse(state["can_undo"])
+        self.assert_conflict(lambda: self.undo(revision=move_revision))
+
+    def test_removing_the_only_copy_deletes_the_entry_and_pocket(self):
+        self.second.required_quantity = 1
+        self.db.commit()
+        self.configure()
+        p = self.move(entry=self.second)["placements"][0]
+        state = self.remove(entry=self.second, placement=p["id"])
+        self.assertIsNone(self.db.get(BinderCard, self.second.id))
+        self.assertEqual(self.db.query(BinderPlacement).filter_by(binder_card_id=self.second.id).count(), 0)
+        self.assertNotIn(self.second.id, [e["binder_card_id"] for e in state["entries"]])
+        self.assertEqual(self.db.get(CollectionItem, self.second_item.id).quantity, 2)
+
+    def test_remove_owned_copy_decrements_then_deletes_item_and_its_photo(self):
+        self.db.add_all([
+            CollectionCardPhoto(user_id=self.user.id, card_id=self.a.id, data=b"jpeg"),
+            CollectionCardPhoto(user_id=self.user.id, card_id=self.b.id, data=b"jpeg"),
+        ])
+        self.db.commit()
+        self.configure()
+        p = self.move()["placements"][0]
+        state = self.remove(placement=p["id"], owned=True)
+        self.assertEqual(self.db.get(CollectionItem, self.item.id).quantity, 2)
+        row = next(e for e in state["entries"] if e["binder_card_id"] == self.entry.id)
+        self.assertEqual((row["quantity"], row["owned_quantity"]), (2, 2))
+        self.remove(owned=True)
+        self.remove(owned=True)
+        self.assertIsNone(self.db.get(CollectionItem, self.item.id))
+        self.assertIsNone(self.db.get(BinderCard, self.entry.id))
+        self.assertIsNone(self.db.query(CollectionCardPhoto).filter_by(user_id=self.user.id, card_id=self.a.id).first())
+        self.assertEqual(self.db.get(CollectionItem, self.second_item.id).quantity, 2)
+        self.assertIsNotNone(self.db.query(CollectionCardPhoto).filter_by(user_id=self.user.id, card_id=self.b.id).first())
+
+    def test_last_owned_copy_linked_to_a_product_is_refused_unchanged(self):
+        self.item.quantity = 1
+        self.entry.required_quantity = 1
+        purchase = ProductPurchase(product_name="Booster box", user_id=self.user.id, purchase_price=100.0,
+                                   purchase_date=datetime.date(2026, 1, 1))
+        self.db.add(purchase)
+        self.db.flush()
+        self.db.add(ProductCard(product_id=purchase.id, user_id=self.user.id, card_id=self.a.id,
+                                collection_item_id=self.item.id, initial_quantity=1, active_quantity=1))
+        self.db.commit()
+        self.configure()
+        p = self.move()["placements"][0]
+        before = self.state()
+        self.assert_conflict(lambda: self.remove(placement=p["id"], owned=True))
+        self.assertEqual(self.state(), before)
+        self.assertEqual(self.db.get(CollectionItem, self.item.id).quantity, 1)
+        self.assertEqual(self.db.get(BinderCard, self.entry.id).required_quantity, 1)
+        self.assertEqual(self.db.query(BinderPlacement).count(), 1)
+
+    def test_owned_removal_never_orphans_a_surviving_binder_entry(self):
+        # Legacy overallocation: the owned row holds fewer copies than the binder
+        # reserves. Deleting the row would leave membership pointing at nothing.
+        self.item.quantity = 1
+        self.entry.required_quantity = 2
+        self.db.commit()
+        self.configure()
+        before = self.state()
+        self.assert_conflict(lambda: self.remove(owned=True))
+        self.assertEqual(self.state(), before)
+        self.assertEqual(self.db.get(CollectionItem, self.item.id).quantity, 1)
+        self.assertEqual(self.db.get(BinderCard, self.entry.id).required_quantity, 2)
+
+    def test_stale_revision_leaves_copy_removal_unchanged(self):
+        self.configure()
+        p = self.move()["placements"][0]
+        stale = self.state()["revision"]
+        self.move(slot=2)
+        before = self.state()
+        self.assert_conflict(lambda: self.remove(placement=p["id"], revision=stale))
+        self.assertEqual(self.state(), before)
+        self.assertEqual(self.db.get(BinderCard, self.entry.id).required_quantity, 3)
+
+    def test_explicit_placed_copy_removal_needs_no_layout_revision(self):
+        self.configure()
+        p = self.move()["placements"][0]
+        state = self.remove(placement=p["id"], no_revision=True)
+        self.assertEqual((state["placed_count"], state["unplaced_count"]), (0, 4))
+        self.assertEqual(self.db.get(BinderCard, self.entry.id).required_quantity, 2)
+        self.assertEqual(self.db.query(BinderPlacement).filter(
+            BinderPlacement.binder_card_id == self.entry.id,
+        ).count(), 0)
+
+    def test_unversioned_copy_removal_rejects_a_placement_that_moved(self):
+        self.configure()
+        p = self.move()["placements"][0]
+        # Return to the tray, then place a copy again: the old placement is gone
+        # and the new one has a different identity.
+        self.move(source=p["id"], page=None, slot=None)
+        self.move(slot=3)
+        before = self.state()
+        self.assert_conflict(lambda: self.remove(placement=p["id"], no_revision=True))
+        self.assertEqual(self.state(), before)
+        self.assertEqual(self.db.get(BinderCard, self.entry.id).required_quantity, 3)
+
+    def test_copy_removal_is_owner_scoped_and_clears_legacy_entries(self):
+        self.configure()
+        self.assert_conflict(lambda: remove_binder_copy(self.binder.id, BinderCopyRemoval(
+            binder_card_id=self.entry.id, expected_revision=self.state()["revision"],
+        ), current_user=self.other, db=self.db), 404)
+        self.entry.collection_item_id = None
+        self.db.commit()
+        state = self.remove()
+        row = next(e for e in state["entries"] if e["binder_card_id"] == self.entry.id)
+        self.assertEqual((row["quantity"], row["owned_quantity"], row["unresolved"]), (2, None, True))
+        self.assert_conflict(lambda: self.remove(owned=True))
+        self.assertEqual(self.db.get(BinderCard, self.entry.id).required_quantity, 2)
 
     def test_outside_bounds_and_exhausted_tray_leave_original_state(self):
         self.configure(1)
@@ -287,6 +420,7 @@ class BinderLayoutTests(unittest.TestCase):
         row = state["entries"][0]
         self.assertNotIn("condition", row)
         self.assertNotIn("collection_item_id", row)
+        self.assertNotIn("owned_quantity", row)
         self.assertNotIn("example.com", row["images_small"])
         self.assertEqual(len(get_public_card_locations("binder-owner", self.a.id, db=self.db)["locations"]), 2)
         self.binder.is_public = False
@@ -419,6 +553,15 @@ class BinderLayoutTests(unittest.TestCase):
         self.assertEqual(client.post(f"/api/binders/{self.binder.id}/placements", json={
             "binder_card_id": self.entry.id, "page": 1, "slot": 1, "expected_revision": move.json()["revision"],
         }).status_code, 404)
+        app.dependency_overrides[get_current_user] = lambda: self.user
+        current = client.get(url).json()
+        removed = client.post(f"/api/binders/{self.binder.id}/copies/remove", json={
+            "binder_card_id": self.entry.id, "placement_id": None, "remove_owned_copy": False,
+            "expected_revision": current["revision"],
+        })
+        self.assertEqual(removed.status_code, 200)
+        self.assertEqual(removed.json()["entries"][0]["quantity"], 2)
+        self.assertFalse(removed.json()["can_undo"])
 
     def test_explicit_account_erasure_cleans_only_that_owners_locations(self):
         from api.auth import delete_user

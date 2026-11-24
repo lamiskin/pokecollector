@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import { Settings2 } from 'lucide-react'
-import { getApiErrorMessage, getBinderLayout, moveBinderPlacement, previewBinderLayout, saveBinderLayout, undoBinderLayout } from '../../api/client'
+import { getApiErrorMessage, getBinderLayout, moveBinderPlacement, previewBinderLayout, removeBinderCopy, saveBinderLayout, undoBinderLayout } from '../../api/client'
 import { useSettings } from '../../contexts/SettingsContext'
 import BinderWorkspace from './BinderWorkspace'
 import BinderLayoutSettings from './BinderLayoutSettings'
@@ -25,13 +25,28 @@ export default function BinderLayoutPanel({ binder, membershipSnapshot, onViewCh
       try {
         if (operation === 'layout') return await saveBinderLayout(binder.id, body)
         if (operation === 'undo') return await undoBinderLayout(binder.id, data.revision)
+        if (operation === 'remove') return await removeBinderCopy(binder.id, { ...body, expected_revision: body.expected_revision || data.revision })
         return await moveBinderPlacement(binder.id, { ...body, expected_revision: body.expected_revision || data.revision })
       } catch (e) {
+        // A conflict refreshes the layout so the next attempt starts from the
+        // server's state; the status travels on so the dialog can explain it.
         if (e.response?.status === 409) await refetch()
-        throw new Error(getApiErrorMessage(e, t('binderLayout.failed')))
+        const failure = new Error(getApiErrorMessage(e, t('binderLayout.failed')))
+        failure.status = e.response?.status
+        throw failure
       }
     },
-    onSuccess: snapshot => { client.setQueryData(key, snapshot); client.invalidateQueries({ queryKey: ['card-locations'] }) },
+    onSuccess: (snapshot, variables) => {
+      client.setQueryData(key, snapshot)
+      client.invalidateQueries({ queryKey: ['card-locations'] })
+      if (variables.operation === 'remove') {
+        // BinderDetail keys this list with the string route param, so only the
+        // prefix is guaranteed to match. A numeric id here would no-op.
+        client.invalidateQueries({ queryKey: ['binder-cards'] })
+        client.invalidateQueries({ queryKey: ['binders'] })
+        if (variables.body?.remove_owned_copy) client.invalidateQueries({ queryKey: ['collection'] })
+      }
+    },
   })
   const changeView = value => { const next = new URLSearchParams(params); next.set('view', value); setParams(next, { preventScrollReset: true }) }
   return <section className="space-y-4" aria-label={t('binderLayout.workspace')}>
@@ -45,7 +60,7 @@ export default function BinderLayoutPanel({ binder, membershipSnapshot, onViewCh
     {isLoading && <p role="status" className="text-sm text-text-secondary">{t('common.loading')}</p>}
     {error && <p role="alert" className="text-sm text-brand-red">{t('binderLayout.loadFailed')} <button className="btn-ghost" onClick={() => refetch()}>{t('binderLayout.retry')}</button></p>}
     {data && !data.layout && target && <div role="status" className="rounded-xl border border-yellow/30 bg-yellow/5 p-3 text-sm space-y-2"><p>{t(target.kind === 'missing' ? 'binderLayout.targetMissing' : 'binderLayout.layoutDisabled')}</p>{target.entry && <button className="btn-secondary" onClick={() => onOpen(target.entry)}>{t('binderLayout.openAssociatedCard')}</button>}</div>}
-    {view === 'pages' && data?.layout && <BinderWorkspace key={binder.id} snapshot={data} binderId={binder.id} onOpen={onOpen} onMove={body => mutation.mutateAsync({ operation: 'move', body })} onUndo={() => mutation.mutateAsync({ operation: 'undo' })} t={t} accent={binder.color} />}
+    {view === 'pages' && data?.layout && <BinderWorkspace key={binder.id} snapshot={data} binderId={binder.id} onOpen={onOpen} onMove={body => mutation.mutateAsync({ operation: 'move', body })} onUndo={() => mutation.mutateAsync({ operation: 'undo' })} onRemove={body => mutation.mutateAsync({ operation: 'remove', body })} t={t} accent={binder.color} />}
     {settingsOpen && data && <BinderLayoutSettings snapshot={data} t={t} onClose={() => setSettingsOpen(false)} onPreview={async body => { try { return await previewBinderLayout(binder.id, body) } catch (e) { throw new Error(getApiErrorMessage(e, t('binderLayout.failed'))) } }} onSave={async body => { await mutation.mutateAsync({ operation: 'layout', body }); setSettingsOpen(false) }} />}
   </section>
 }
