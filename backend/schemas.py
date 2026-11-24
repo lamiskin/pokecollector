@@ -328,6 +328,15 @@ class BinderPlacementMove(BaseModel):
     confirm_occupied: bool = False
 
 
+class BinderCopyRemoval(BaseModel):
+    binder_card_id: int = Field(gt=0)
+    # Null selects an unplaced (tray) copy; a value must name that entry's pocket.
+    placement_id: Optional[str] = Field(default=None, min_length=36, max_length=36)
+    remove_owned_copy: bool = False
+    # The binder workspace sends the revision; an explicit per-copy control may omit it.
+    expected_revision: Optional[str] = Field(default=None, min_length=64, max_length=64)
+
+
 class BinderLayoutUndo(BaseModel):
     expected_revision: str = Field(min_length=64, max_length=64)
 

@@ -40,6 +40,7 @@ Binders support:
 - adding exact owned collection rows;
 - Planned Binder catalogue entries and requested quantities;
 - switching an entry to an equivalent printing;
+- removing one selected copy from the physical workspace, optionally deleting the matching owned collection copy in the same step (a last copy linked to a product is refused);
 - previewing and applying equivalent-print optimization;
 - sending one entry or all missing entries to the global Wishlist;
 - converting a Planned Binder into a physical Binder when the required copies

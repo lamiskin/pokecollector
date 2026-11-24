@@ -1,6 +1,6 @@
 from schemas import BulkRemoveRequest, BulkRemoveResponse, ReleaseAssignmentsRequest
 from services.collection_removal_conflicts import removal_conflicts, release_confirmed_assignments, owned_items
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File, Query, Response
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, joinedload, selectinload
@@ -17,6 +17,7 @@ from schemas import (
     PrintingDetailTagCreate, PrintingDetailTagUpdate, PrintingDetailTagResponse,
 )
 from services import pokemon_api
+from services.card_artwork import warm_card_artwork
 from services.card_fallbacks import apply_cross_language_fallbacks, build_missing_language_card
 from services.card_upsert import update_existing_card
 from services.card_numbers import card_number_matches
@@ -346,6 +347,39 @@ def _add_collection_item(db: Session, current_user: User, item: CollectionItemCr
     return status
 
 
+def _schedule_card_artwork_warm(
+    background: BackgroundTasks | None,
+    db: Session,
+    card_ids,
+) -> None:
+    """Queue best-effort artwork warming for catalogue cards.
+
+    Scheduling must never change the response: a lookup or task-queue failure
+    is logged and dropped. Custom cards are skipped here; the warmer also
+    refuses them. When no BackgroundTasks instance is supplied (direct calls
+    from tests or other code), nothing is scheduled.
+    """
+    if background is None or not card_ids:
+        return
+    try:
+        candidate_ids = {
+            card_id for card_id in card_ids
+            if card_id and not str(card_id).startswith("custom-")
+        }
+        if not candidate_ids:
+            return
+        catalogue_ids = {
+            row[0] for row in db.query(Card.id).filter(
+                Card.id.in_(candidate_ids),
+                or_(Card.is_custom.is_(None), Card.is_custom.is_(False)),
+            ).all()
+        }
+        for card_id in sorted(catalogue_ids):
+            background.add_task(warm_card_artwork, card_id)
+    except Exception:
+        logger.warning("Could not schedule card artwork warming", exc_info=True)
+
+
 def _get_api_sets_by_code(include_digital: bool = False) -> dict[str, List[dict]]:
     global _SET_CODE_API_CACHE
     cache_key = "include_digital" if include_digital else "physical_only"
@@ -569,11 +603,13 @@ def add_to_collection(
     item: CollectionItemCreate,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    background: BackgroundTasks = None,
 ):
     """Add a card to the collection, grouping only identical physical-copy details."""
     _status, db_item = _upsert_collection_item(db, current_user, item)
     db.commit()
     db.refresh(db_item)
+    _schedule_card_artwork_warm(background, db, [db_item.card_id])
     return _annotate_collection_item(db, current_user, db_item)
 
 
@@ -582,6 +618,7 @@ def bulk_add_to_collection(
     request: BulkCollectionAddRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    background: BackgroundTasks = None,
 ):
     """Add multiple cards to the collection in a single request.
 
@@ -594,11 +631,14 @@ def bulk_add_to_collection(
     updated = 0
     failed = 0
     errors: List[str] = []
+    warmed_card_ids: set[str] = set()
 
     for item in request.items:
         try:
             status, _row = _upsert_collection_item(db, current_user, item)
+            card_id = _row.card_id
             db.commit()
+            warmed_card_ids.add(card_id)
             if status == "added":
                 added += 1
             else:
@@ -612,6 +652,7 @@ def bulk_add_to_collection(
             failed += 1
             errors.append(f"{item.card_id}: {str(exc)}")
 
+    _schedule_card_artwork_warm(background, db, warmed_card_ids)
     return BulkCollectionAddResponse(added=added, updated=updated, failed=failed, errors=errors)
 
 
@@ -620,6 +661,7 @@ async def import_collection_csv(
     file: UploadFile = File(...),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    background: BackgroundTasks = None,
 ):
     """Import collection rows from a strict CSV format.
 
@@ -653,6 +695,7 @@ async def import_collection_csv(
     failed = 0
     errors: List[str] = []
     row_count = 0
+    warmed_card_ids: set[str] = set()
     validated_items: dict[tuple, CollectionItemCreate] = {}
 
     for row_number, row in enumerate(reader, start=2):
@@ -700,6 +743,7 @@ async def import_collection_csv(
     for item in validated_items.values():
         try:
             status = _add_collection_item(db, current_user, item, commit=False)
+            warmed_card_ids.add(item.card_id)
             if status == "added":
                 added += 1
             else:
@@ -717,6 +761,7 @@ async def import_collection_csv(
             return BulkCollectionAddResponse(added=0, updated=0, failed=failed, errors=errors)
 
     db.commit()
+    _schedule_card_artwork_warm(background, db, warmed_card_ids)
     return BulkCollectionAddResponse(added=added, updated=updated, failed=failed, errors=errors)
 
 

@@ -3,8 +3,8 @@ import { expect, test } from '@playwright/test'
 const initial = () => ({
   binder_id: 11, layout: { page_count: 2, rows: 3, columns: 3, first_page_single: false }, revision: 'r1', can_undo: false,
   entries: [
-    { binder_card_id: 71, card_id: 'sample-1_en', name: 'Sample Pikachu', quantity: 3, unplaced_quantity: 1, collection_item_id: 21, variant: 'Holo', lang: 'en', unresolved: false, has_scan_photo: false },
-    { binder_card_id: 72, card_id: 'sample-2_en', name: 'Sample Eevee', quantity: 1, unplaced_quantity: 0, collection_item_id: 22, variant: 'Normal', lang: 'en', unresolved: false, has_scan_photo: false },
+    { binder_card_id: 71, card_id: 'sample-1_en', name: 'Sample Pikachu', quantity: 3, unplaced_quantity: 1, owned_quantity: 3, collection_item_id: 21, variant: 'Holo', lang: 'en', unresolved: false, has_scan_photo: false },
+    { binder_card_id: 72, card_id: 'sample-2_en', name: 'Sample Eevee', quantity: 1, unplaced_quantity: 0, owned_quantity: 1, collection_item_id: 22, variant: 'Normal', lang: 'en', unresolved: false, has_scan_photo: false },
   ],
   placements: [
     { id: '11111111-1111-4111-8111-111111111111', binder_card_id: 71, card_id: 'sample-1_en', page: 1, slot: 2 },
@@ -78,6 +78,18 @@ async function install(page, { unresolved = false, failMove = false, withoutLayo
       else state.placements.push({ id: '44444444-4444-4444-8444-444444444444', binder_card_id: body.binder_card_id, card_id: state.entries.find(e => e.binder_card_id === body.binder_card_id).card_id, page: body.page, slot: body.slot })
       refresh(); return json(state)
     }
+    if (path === '/api/binders/11/copies/remove') {
+      const body = request.postDataJSON(); writes.push(body)
+      const entry = state.entries.find(e => e.binder_card_id === body.binder_card_id)
+      if (entry.quantity <= 1) state.entries = state.entries.filter(e => e !== entry)
+      else entry.quantity -= 1
+      if (body.placement_id) state.placements = state.placements.filter(p => p.id !== body.placement_id)
+      if (body.remove_owned_copy) entry.owned_quantity -= 1
+      // A removal clears the server's layout undo token; membership cannot be replayed.
+      history = null
+      refresh(); state.can_undo = false
+      return json(state)
+    }
     if (path === '/api/binders/11/layout') return json(state)
     if (path === '/api/public/profiles/example/binders/11/layout') {
       // Mirrors the public serializer: no collection ids, conditions, variants or
@@ -86,7 +98,7 @@ async function install(page, { unresolved = false, failMove = false, withoutLayo
     }
     if (path.endsWith('/photo')) return route.fulfill({ contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg" width="126" height="176"><rect width="126" height="176" fill="#3a2a1a"/><rect x="20" y="30" width="86" height="116" rx="6" fill="#b07a3c"/></svg>' })
     if (path.endsWith('/locations')) return json({ locations: state.placements.filter(p => p.card_id === 'sample-1_en').map(p => ({ ...p, placement_id: p.id, binder_id: 11, binder_name: binder.name, quantity: 1 })).concat([{ binder_id: 11, binder_name: binder.name, binder_card_id: 71, card_id: 'sample-1_en', placement_id: null, page: null, slot: null, quantity: 1 }]) })
-    const cards = state.entries.map(e => ({ ...e, id: e.card_id, number: '001', set_name: 'Sample set', quantity: e.quantity, required_quantity: e.quantity, owned_quantity: e.quantity, collection_quantity: e.quantity, max_assignable_quantity: e.quantity }))
+    const cards = state.entries.map(e => ({ ...e, id: e.card_id, number: '001', set_name: 'Sample set', quantity: e.quantity, required_quantity: e.quantity, owned_quantity: e.owned_quantity ?? e.quantity, collection_quantity: e.quantity, max_assignable_quantity: e.quantity }))
     const fixtures = {
       '/api/auth/mode': { multi_user: true },
       '/api/auth/me': { id: 1, username: 'Test Trainer', role: 'admin', is_active: true, must_change_password: false },
@@ -662,4 +674,48 @@ test('an arranged copy is grabbed by the whole card, and a plain click still sel
   // Browse mode offers no drag affordance at all.
   await page.getByRole('button', { name: 'Done arranging', exact: true }).click()
   await expect(page.locator('[data-page="1"][data-slot="5"]')).not.toHaveAttribute('draggable', 'true')
+})
+
+test('the selection bar removes exactly one copy from the binder', async ({ page }) => {
+  const fixture = await install(page)
+  await page.goto('/binders/11')
+  await page.getByRole('button', { name: 'Arrange', exact: true }).click()
+  await page.locator('[data-page="1"][data-slot="2"]').click()
+  await page.getByRole('button', { name: 'Remove…', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'Remove Sample Pikachu' })
+  // The dialog names the copy and both counts before anything is removed.
+  await expect(dialog).toContainText('3 in this binder')
+  await expect(dialog).toContainText('3 in your collection')
+  await dialog.getByRole('button', { name: /Remove from this binder/ }).click()
+  await expect(page.getByText('Copy removed from this binder. It is still in your collection.')).toBeVisible()
+  expect(fixture.writes).toHaveLength(1)
+  expect(fixture.writes[0]).toMatchObject({
+    binder_card_id: 71, placement_id: initial().placements[0].id, remove_owned_copy: false,
+  })
+  expect(fixture.state().entries[0]).toMatchObject({ quantity: 2, owned_quantity: 3 })
+  // One copy and its pocket go; the tray count is unchanged.
+  await expect(page.getByText('2 placed · 1 not placed · 18 slots')).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Selected card actions' })).toHaveCount(0)
+})
+
+test('removing the owned copy needs the confirm step and keeps Back safe', async ({ page }) => {
+  const fixture = await install(page)
+  await page.goto('/binders/11')
+  await page.getByRole('button', { name: 'Arrange', exact: true }).click()
+  await page.locator('[data-page="1"][data-slot="2"]').click()
+  await page.getByRole('button', { name: 'Remove…', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'Remove Sample Pikachu' })
+  await dialog.getByRole('button', { name: /Remove from collection/ }).click()
+  // Choosing the destructive action never deletes: a second, focused step does.
+  expect(fixture.writes).toHaveLength(0)
+  await expect(dialog).toContainText('Delete this copy from your collection?')
+  await expect(dialog.getByRole('button', { name: 'Back', exact: true })).toBeFocused()
+  await dialog.getByRole('button', { name: 'Back', exact: true }).click()
+  expect(fixture.writes).toHaveLength(0)
+  await dialog.getByRole('button', { name: /Remove from collection/ }).click()
+  await dialog.getByRole('button', { name: 'Delete from collection', exact: true }).click()
+  await expect(page.getByText('Copy deleted from your collection and released from this binder.')).toBeVisible()
+  expect(fixture.writes).toHaveLength(1)
+  expect(fixture.writes[0]).toMatchObject({ binder_card_id: 71, remove_owned_copy: true })
+  expect(fixture.state().entries[0]).toMatchObject({ quantity: 2, owned_quantity: 2 })
 })

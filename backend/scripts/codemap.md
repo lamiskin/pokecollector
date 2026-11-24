@@ -6,7 +6,7 @@ This folder holds the **standalone CLI / admin utilities** for PokéCollector �
 operational entrypoints a host operator runs from a shell rather than through the
 HTTP API. None of these modules are part of the FastAPI application; they are thin,
 self-contained commands that open their own resources and exit with a process
-status. Four scripts live here:
+status. Five scripts live here:
 
 1. **`analyse_scan_traces.py`** — read-only, offline summary of consented scanner
    diagnostics. It never touches the database or the network; it aggregates JSON
@@ -17,6 +17,10 @@ status. Four scripts live here:
    cache (sprites + official artwork) from PokéAPI's hosted sprite repository.
 4. **`set_admin_password.py`** — reset (and optionally promote) an account's
    password from the host, for recovering a lost/locked admin account.
+5. **`warm_collection_artwork.py`** — pre-fill the shared `image_cache` table
+   with each collection card's catalogue artwork, so the first open of a card is
+   a local cache read instead of a multi-second TCGdex transfer. Re-runnable and
+   safe: it skips cached keys, custom cards and cards without a source URL.
 
 They are operational glue, not domain logic: every script except
 `analyse_scan_traces` delegates the real work to `services/` and the persistence
@@ -45,9 +49,11 @@ layer.
   sibling `database`/`models`/`services` imports). `analyse_scan_traces.py` is
   invoked by direct path (`python scripts/analyse_scan_traces.py`) and has no
   intra-app imports.
-- **Result reporting is machine-readable.** The backfill and cache scripts print a
-  JSON result dict (`attempted`/`updated`/`missing`/`failed`/`deferred`, or
-  `cached`/`downloaded`/`missing`/`failed`) before returning their exit status.
+- **Result reporting is machine-readable.** The backfill, cache and artwork-warm
+  scripts print a JSON result dict
+  (`attempted`/`updated`/`missing`/`failed`/`deferred`, `cached`/`downloaded`/
+  `missing`/`failed`, or `cards`/`warmed`/`skipped`/`failed`/`bytes`) before
+  returning their exit status.
 
 ## Flow
 
@@ -80,6 +86,14 @@ print JSON result → exit `1` if `result["failed"]` else `0`. The service
 deduplicates IDs, skips already-cached files (unless `--refresh`), fetches both
 `sprites` and `artwork` per ID, and throttles with `--delay`.
 
+**`warm_collection_artwork.py`** — parse `--limit` (0 = all), `--concurrency`
+(default 4), `--size large|small|both` (default large), `--dry-run` → open
+`SessionLocal` → list distinct `CollectionItem.card_id` and their catalogue cards
+→ chunked lookup of the matching `image_cache` keys → group the missing keys per
+card → with `--dry-run`, report `would_warm` and exit → otherwise fetch and store
+each card's missing slots in a `ThreadPoolExecutor`, one session per task → print
+the JSON summary and exit `1` if any fetch failed.
+
 **`set_admin_password.py`** — parse `--username` (default `admin`), `--password`
 (optional; otherwise interactive), `--make-admin` → open `SessionLocal` → look up
 `User` by username (if absent, list existing usernames and exit `1`) → read the
@@ -95,7 +109,10 @@ print confirmation, exit `0`.
   --limit 5000`, `... python -m scripts.cache_pokedex_images`, `... python -m
   scripts.set_admin_password`, and `... python scripts/analyse_scan_traces.py
   /app/data/scan-traces` (documented in `README.md`, `docs/POKEDEX.md`,
-  `docs/FORK_DEPLOYMENT.md`, and `AGENTS.md`).
+  `docs/FORK_DEPLOYMENT.md`, and `AGENTS.md`). For a collection whose artwork is
+  still cold, `... python -m scripts.warm_collection_artwork --concurrency 4`
+  fills it in place; a one-off `podman run` against an instance network must pass
+  the instance's LAN resolvers (`--dns`) or every upstream fetch fails.
 - **Persistence layer:** `database.SessionLocal` (SQLAlchemy session factory) and
   `models.Card` / `models.User` — the same engine/models the web app uses, so the
   scripts operate on the live database.

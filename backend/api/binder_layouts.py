@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from api.auth import get_current_user
 from database import get_db
 from models import User
-from schemas import BinderLayoutPreview, BinderLayoutUpdate, BinderLayoutUndo, BinderPlacementMove
+from schemas import BinderCopyRemoval, BinderLayoutPreview, BinderLayoutUpdate, BinderLayoutUndo, BinderPlacementMove
 from services import binder_layouts as layouts
 
 router = APIRouter()
@@ -42,6 +42,12 @@ def update_binder_layout(binder_id: int, request: BinderLayoutUpdate,
 def move_binder_copy(binder_id: int, request: BinderPlacementMove,
                       current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     return _write(db, lambda: layouts.move_copy(db, current_user.id, binder_id, request))
+
+
+@router.post("/{binder_id}/copies/remove")
+def remove_binder_copy(binder_id: int, request: BinderCopyRemoval,
+                        current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return _write(db, lambda: layouts.remove_copy(db, current_user.id, binder_id, request))
 
 
 @router.post("/{binder_id}/layout/undo")

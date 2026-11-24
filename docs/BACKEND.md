@@ -299,15 +299,26 @@ artwork and set logos/symbols also use the frontend's bounded Nginx disk cache
 (up to 1 GiB, discarded with the frontend container). Repeated requests can be
 served without transferring the image from the backend again.
 
-These routes are mutable, not content-addressed assets. New public responses use
-`public, max-age=0, s-maxage=60, must-revalidate`: browsers revalidate their copy,
-while shared caches may reuse it for at most 60 seconds. Changes to artwork,
-visibility or fallback settings can therefore take up to that interval to reach
-a shared-cache hit. Existing browser entries created by older releases retain
-their original expiry. ETags are SHA-256 hashes of the actual image bytes, so
-clearing/refilling the database image cache cannot incorrectly validate changed
-bytes just because the source URL stayed the same. Set image cache keys include
-the selected source URL, including English fallback URLs.
+These routes are mutable, not content-addressed assets. Catalogue **card**
+artwork uses `public, max-age=3600, s-maxage=60, must-revalidate`: a browser may
+reuse its copy for up to an hour, while shared caches (the Nginx proxy)
+revalidate every 60 seconds. The cache key embeds a hash of the source URL, so a
+changed artwork URL busts the entry immediately; only refilling the same key in
+place can stay stale in a browser for at most that hour. **Set** logos/symbols
+keep `public, max-age=0, s-maxage=60, must-revalidate`. Existing browser entries
+created by older releases retain their original expiry. ETags are SHA-256 hashes
+of the actual image bytes, so clearing/refilling the database image cache cannot
+incorrectly validate changed bytes just because the source URL stayed the same.
+Set image cache keys include the selected source URL, including English fallback
+URLs.
+
+A first view of uncached artwork blocks on the upstream TCGdex transfer, which
+is seconds rather than milliseconds, so the collection keeps its artwork warm:
+`services/card_artwork.py` owns the shared key/fetch/store path (used by the
+proxy and the warmer), adding a card to the collection queues a background warm
+of its large artwork, and `python -m scripts.warm_collection_artwork` pre-fills
+every distinct card in the collection (re-runnable, bounded concurrency,
+`--dry-run`).
 
 Manual cards and custom fallback artwork use `private, no-store`. Missing card
 redirects and set placeholders use `no-store`, so a temporary failure does not
@@ -668,6 +679,16 @@ Owner endpoints:
   A placed source swaps with an occupied destination; a tray source returns the
   displaced copy to the tray. Both require occupied-slot confirmation. Null page
   **and** slot return the chosen placed copy to the tray, retaining its allocation.
+- `POST /api/binders/{id}/copies/remove`: `{binder_card_id, placement_id,
+  remove_owned_copy, expected_revision}` removes exactly one chosen copy — the
+  placed copy when a placement ID is given, otherwise one tray copy — and with
+  `remove_owned_copy` also deletes one owned collection copy in the same
+  transaction. The owned row disappears only with the last binder copy, and a
+  product-linked final copy is refused unchanged. This is the explicit removal
+  route: it needs no prior return to Not placed, and it clears the layout undo
+  token because membership cannot be replayed. `expected_revision` may be omitted
+  only for a named copy (the card dialog's location row); a moved placement still
+  409s and the locked quantity is read as-is, so it cannot overwrite another move.
 - `POST /api/binders/{id}/layout/undo`: `{expected_revision}` restores the last
   server-held layout/placement snapshot only if no relevant state changed.
 - `GET /api/cards/{card_id}/locations?collection_item_id=...`: every applicable

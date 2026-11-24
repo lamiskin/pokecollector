@@ -62,7 +62,7 @@ class ImageCacheHeadersTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.body, b"card-image-bytes")
-        self.assertEqual(response.headers["cache-control"], "public, max-age=0, s-maxage=60, must-revalidate")
+        self.assertEqual(response.headers["cache-control"], "public, max-age=3600, s-maxage=60, must-revalidate")
         self.assertEqual(response.headers["etag"], expected_etag)
 
     @patch("api.images._get_or_fetch", return_value=(b"card-image-bytes", "image/webp"))
@@ -86,7 +86,7 @@ class ImageCacheHeadersTests(unittest.TestCase):
         self.assertEqual(response.status_code, 304)
         self.assertEqual(response.body, b"")
         self.assertEqual(response.headers["etag"], expected_etag)
-        self.assertEqual(response.headers["cache-control"], "public, max-age=0, s-maxage=60, must-revalidate")
+        self.assertEqual(response.headers["cache-control"], "public, max-age=3600, s-maxage=60, must-revalidate")
         # The validator must describe the actual representation, not just its URL.
         mock_fetch.assert_called_once()
 
