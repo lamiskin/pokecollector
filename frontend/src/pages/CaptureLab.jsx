@@ -501,7 +501,16 @@ export default function CaptureLab() {
   const [diagCount, setDiagCount] = useState({ samples: 0, frames: 0, events: 0 })
   const [diagSend, setDiagSend] = useState({ status: 'idle', message: '', error: '' })
   const [detectAgeMs, setDetectAgeMs] = useState(null)
-  const [autoCapture, setAutoCapture] = useState(false)
+  // Auto-capture is the mode this page exists for; forgetting it on every reload
+  // costs the user a step they will not always remember. Persisted like the other
+  // preferences, and only applied once live detection actually starts.
+  const [autoCapture, setAutoCapture] = useState(() => {
+    try {
+      return window.localStorage.getItem('capture-lab-auto-capture') === '1'
+    } catch {
+      return false
+    }
+  })
   const [autoDisarmed, setAutoDisarmed] = useState(false)
   const [holdHint, setHoldHint] = useState('')
   const [autoHoldStartTs, setAutoHoldStartTs] = useState(null)
@@ -596,15 +605,17 @@ export default function CaptureLab() {
   }, [])
 
   // Draw each fresh model quad; the tracker takes over imperatively afterwards.
-  // An unusable result clears the ring rather than leaving the previous card's
-  // quad on screen.
+  // An unusable result no longer clears the outline outright: the tracker is the
+  // better authority on whether a card is there, and blanking on every unusable
+  // detection made the box blink about once a second. Clear only when the tracker
+  // has nothing either, and let the tracker's own loss grace do the rest.
   useEffect(() => {
     if (!liveResult) return
     if (liveResult.usable) {
       if (!trackedQuadRef.current) applyQuadToPolygon(liveResult.corners)
       return
     }
-    applyQuadToPolygon(null)
+    if (!trackedQuadRef.current) applyQuadToPolygon(null)
   }, [liveResult])
 
   // A phone browser freezes timers and animation frames while the page is hidden:
@@ -1960,7 +1971,14 @@ export default function CaptureLab() {
   }
 
   const runLiveDetection = async () => {
-    if (!liveDetectionRef.current || liveInFlightRef.current || status !== 'live') return
+    if (!liveDetectionRef.current || liveInFlightRef.current) return
+    // Every early exit below must reschedule, or the timer chain ends and the page
+    // looks alive (samples keep recording) while never looking at the camera again.
+    // A recording showed 143 s of exactly that.
+    if (status !== 'live') {
+      liveScheduleRef.current?.(1000)
+      return
+    }
 
     // Auto-capture is always hunting for the next card, so never park in that
     // mode: holding a new card still is exactly what a parked loop waits for.
@@ -1978,7 +1996,11 @@ export default function CaptureLab() {
 
     const worker = detectorWorkerRef.current
     const canvas = drawLiveFrame()
-    if (!worker || !canvas) return
+    if (!worker || !canvas) {
+      // Transient: the video element not being ready must not end the chain.
+      liveScheduleRef.current?.(500)
+      return
+    }
     // Keep the exact 640 px frame the model is about to see; its corners and
     // this grayscale copy line up, which makes the first tracker reference far
     // more reliable than a fresh video grab after the ~300 ms inference.
@@ -2294,6 +2316,11 @@ export default function CaptureLab() {
   const setAutoCaptureEnabled = enabled => {
     autoCaptureRef.current = enabled
     setAutoCapture(enabled)
+    try {
+      window.localStorage.setItem('capture-lab-auto-capture', enabled ? '1' : '0')
+    } catch {
+      // A blocked localStorage only costs the preference, never the capture.
+    }
     setAutoHoldStartTs(null)
     stopAutoFireTimer()
     autoStateRef.current = newAutoState()

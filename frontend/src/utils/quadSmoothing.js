@@ -24,10 +24,10 @@
 export const QUAD_MIN_CUTOFF_HZ = 0.45
 // Speed at which the cutoff rises: cutoff = minCutoff + beta * |speed|.
 // 10 puts a genuinely moving card (0.5 frame/s) most of the way to raw.
-export const QUAD_BETA = 10
+export const QUAD_BETA = 22
 // The speed estimate is itself low-passed so tracker noise does not masquerade
 // as movement and open the filter on a still card.
-export const QUAD_DERIVATIVE_CUTOFF_HZ = 1.2
+export const QUAD_DERIVATIVE_CUTOFF_HZ = 3.0
 // A corner that moves further than this share of the card's own diagonal in a
 // single sample is not the same card moving: it re-anchored, was swapped, or
 // the model re-locked somewhere else. Snap instead of dragging the old position.
@@ -35,6 +35,10 @@ export const QUAD_JUMP_FRACTION = 0.3
 // Likewise for a sudden change of card size: a different card, or the same one
 // at a different distance after a re-lock.
 export const QUAD_AREA_JUMP_RATIO = 1.6
+// Below this much movement (normalised frame units) the drawn outline does not
+// update at all: this is the tracker's noise floor, and repainting it is what the
+// eye reads as "skittish". 0.012 is about 12 px on a 1080 px frame.
+export const QUAD_STILL_FRACTION = 0.012
 
 // Sampling gaps outside this range are either a clock hiccup or an idle pause;
 // clamping keeps alpha meaningful without a special case for either.
@@ -93,6 +97,7 @@ export function createQuadSmoother({
   derivativeCutoff = QUAD_DERIVATIVE_CUTOFF_HZ,
   jumpFraction = QUAD_JUMP_FRACTION,
   areaJumpRatio = QUAD_AREA_JUMP_RATIO,
+  stillFraction = QUAD_STILL_FRACTION,
 } = {}) {
   // [x0, y0, x1, y1, x2, y2, x3, y3]
   const last = new Float64Array(8) // newest raw sample
@@ -164,6 +169,18 @@ export function createQuadSmoother({
       const cutoff = minCutoff + beta * Math.abs(speed[i])
       value[i] += alphaFor(cutoff, dt) * (next - value[i])
     }
+
+    // Stillness freeze: a filtered value still creeps toward every noisy sample,
+    // which reads as a shiver that never settles. Measure the distance from what
+    // is actually *drawn* - not from the filtered value, which keeps converging
+    // and would freeze the outline at the first place it looked close. If the
+    // drawn quad is already within the deadband of the raw sample, repaint nothing.
+    let drift = 0
+    for (let i = 0; i < 4; i += 1) {
+      const moved = distance(quad[i][0], quad[i][1], corners[i][0], corners[i][1])
+      if (moved > drift) drift = moved
+    }
+    if (drift <= stillFraction) return corners
     return publish()
   }
 

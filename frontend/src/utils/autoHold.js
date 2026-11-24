@@ -15,6 +15,9 @@ export const AUTO_STEP_SPEED = 0.75
 // Cap the interval used for that comparison so a stalled loop cannot turn one
 // small correction into an instant restart.
 export const AUTO_STEP_DT_MAX_MS = 250
+// Never ask for less than this in one step: below it we are measuring tracker
+// noise, not movement, and a 144 Hz display would ask for exactly that.
+export const AUTO_STEP_FLOOR = 0.012
 // Loose cumulative guard: a real pan, not a wobble. Drift itself is free.
 export const AUTO_TOTAL_MOVE = 0.25
 // Qualifying observations further apart than this restart the window, so a
@@ -74,8 +77,11 @@ export function autoHoldDecision({
     Math.max(0, lastQualifyingTs == null ? 0 : now - lastQualifyingTs),
   )
   const step = lastCorners ? maxCornerMovement(lastCorners, corners) : 0
-  if (lastSource === 'tracked' && dtMs > 0
-    && step > AUTO_STEP_SPEED * (dtMs / 1000)) {
+  // A pure speed limit breaks on a fast display: at 144 Hz it asks for 0.5 % per
+  // frame, below the tracker's own noise, and every jitter becomes a restart. The
+  // floor keeps the limit above the noise while speed still governs slow frames.
+  const stepLimit = Math.max(AUTO_STEP_FLOOR, AUTO_STEP_SPEED * (dtMs / 1000))
+  if (lastSource === 'tracked' && dtMs > 0 && step > stepLimit) {
     return { action: 'restart', reason: 'step', step, total: 0 }
   }
   const total = maxCornerMovement(anchorCorners, corners)
