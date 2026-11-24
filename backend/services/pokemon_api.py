@@ -331,6 +331,21 @@ def get_set_cards(set_id: str, lang: str = "en") -> Dict:
         return response.json()
 
 
+def get_set_card_briefs(tcg_id: str, lang: str = "en") -> List[Dict]:
+    """Get the brief card list for one set in a single request.
+
+    Unlike ``get_set_cards``, whose ``cards`` entries carry no artwork, each
+    brief here includes an ``image`` base URL (no extension) when TCGdex has
+    artwork for that card. Used by the set-level artwork sweep.
+    """
+    base_url = get_base_url(lang)
+    with httpx.Client(timeout=60.0) as client:
+        response = client.get(f"{base_url}/cards", params={"set": tcg_id})
+        response.raise_for_status()
+        payload = response.json()
+    return payload if isinstance(payload, list) else []
+
+
 def strip_lang_suffix(card_db_id: str) -> tuple:
     """Return (tcg_card_id, lang) from a composite DB card ID like 'sv1-1_de'."""
     return _strip_lang_suffix(card_db_id)
