@@ -17,7 +17,6 @@ import {
   TRACK_LOST_AFTER,
 } from '../src/utils/cornerTracker.js'
 import { autoHoldDecision, AUTO_STEP_DT_MAX_MS, AUTO_STEP_SPEED, AUTO_TOTAL_MOVE } from '../src/utils/autoHold.js'
-import { outsetCorners } from '../src/utils/perspectiveWarp.js'
 
 const width = 160
 const height = 160
@@ -312,21 +311,6 @@ assert.equal(isPatchMatchAcceptable(676, 300), false)
   assert.equal(AUTO_STEP_SPEED, 0.75)
   assert.equal(AUTO_STEP_DT_MAX_MS, 250)
   assert.equal(AUTO_TOTAL_MOVE, 0.25)
-}
-
-// The capture outset pads every corner outward without leaving the frame.
-{
-  const quad = [[0.3, 0.3], [0.7, 0.3], [0.7, 0.7], [0.3, 0.7]]
-  const out = outsetCorners(quad)
-  const distance = ([x, y]) => Math.hypot(x - 0.5, y - 0.5)
-  out.forEach((corner, index) => {
-    assert.ok(distance(corner) > distance(quad[index]), 'corner must move outward')
-    assert.ok(corner[0] >= 0 && corner[0] <= 1 && corner[1] >= 0 && corner[1] <= 1)
-  })
-  const edge = outsetCorners([[0, 0], [0.5, 0], [0.5, 0.5], [0, 0.5]])
-  edge.forEach(([x, y]) => {
-    assert.ok(x >= 0 && x <= 1 && y >= 0 && y <= 1, 'outset must stay inside the frame')
-  })
 }
 
 // Capture geometry may not outlive the frame it is applied to. A stale tracked

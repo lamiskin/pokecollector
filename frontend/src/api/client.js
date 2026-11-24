@@ -567,10 +567,6 @@ export const uploadCaptureLabImage = (file, fields = {}, { onProgress } = {}) =>
 export const deleteCaptureLabEntry = name =>
   api.delete(`${CAPTURE_LAB_PREFIX}/captures/${encodeURIComponent(name)}`).then(r => r.data)
 
-// Explicit edit: the server re-encodes the stored file as JPEG.
-export const rotateCaptureLabEntry = name =>
-  api.post(`${CAPTURE_LAB_PREFIX}/captures/${encodeURIComponent(name)}/rotate`).then(r => r.data)
-
 // One-click upload of the page's live-detection recording; never sent implicitly.
 export const uploadCaptureLabDiagnostics = payload =>
   api.post(`${CAPTURE_LAB_PREFIX}/diagnostics`, payload, { timeout: 5 * 60 * 1000 }).then(r => r.data)

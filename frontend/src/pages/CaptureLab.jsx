@@ -1,13 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Camera, Check, Download, Eye, EyeOff, ImagePlus, Loader2, RefreshCw, RotateCw, Save, ScanLine, Trash2, VideoOff, Volume2, VolumeX, X } from 'lucide-react'
+import { Camera, Check, Download, Eye, EyeOff, ImagePlus, Loader2, RefreshCw, Save, ScanLine, Trash2, VideoOff, Volume2, VolumeX, X } from 'lucide-react'
 import {
   deleteCaptureLabEntry,
   enqueueScanJob,
   fetchCaptureLabFileBlob,
   listCaptureLabEntries,
-  rotateCaptureLabEntry,
   uploadCaptureLabDiagnostics,
   uploadCaptureLabImage,
 } from '../api/client'
@@ -21,7 +20,7 @@ import {
   primeCaptureAudio,
   setCaptureSoundEnabled,
 } from '../utils/captureSound'
-import { outsetCorners, quadAreaFraction, warpQuad } from '../utils/perspectiveWarp'
+import { quadAreaFraction } from '../utils/perspectiveWarp'
 import {
   cornerAgreement,
   createTracker,
@@ -95,11 +94,15 @@ const LIVE_SEQ_BASE = 1_000_000
 // Capture waits at most this long for a video frame newer than the last one it
 // used; a frozen feed must not be captured twice or reported as success.
 const CAPTURE_FRAME_WAIT_MS = 200
+// The crop is taken from the native frame around the card, not the whole frame.
+// Cap the source box for memory; normal card boxes are far smaller.
+const CAPTURE_SOURCE_MAX_EDGE = 2400
 // One bounded retry after a stale geometry result: request a fresh detection
 // and try the capture again when it lands.
 const CAPTURE_RETRY_MS = 900
-// Solid-ring confirmation pulse after an accepted model result; long enough to
-// register, short enough that the dashed tracking state still dominates.
+// Confidence pulse after an accepted model result. The overlay turns the pulse
+// into one eased lock strength for the ring, so this only has to be long enough
+// for consecutive detections to overlap, not a visible state of its own.
 const CONFIRM_PULSE_MS = 300
 
 // Inference costs ~0.3 s on the target phone, so the loop skips it while the
@@ -114,15 +117,6 @@ const IDLE_MOTION_THRESHOLD = 10
 const IDLE_HEARTBEAT_MS = 2000
 
 // 63:88 card aspect at a 1600 px long edge.
-const CARD_TARGET_WIDTH = 1146
-const CARD_TARGET_HEIGHT = 1600
-// Pull each corner 1.5% toward the quad centre so a loose quad does not sample
-// a sliver of sleeve/background.
-// The quad is padded outward before warping, and warpQuad's own inward inset
-// would cancel that padding exactly. Capture therefore passes a zero inset: the
-// cost of a sliver of background is nothing next to cropping the card's edge,
-// which the scanner cannot recover from.
-const CARD_CROP_INSET = 0
 
 // Automatic capture must never send the scanner a card that occupies less of
 // the frame than a deliberate phone photo would.
@@ -227,42 +221,8 @@ function readDimensions(previewUrl, onSize) {
 
 function PendingCard({ item, onChange, onRemove, onSave, onScan }) {
   const { t } = useSettings()
-  const [rotating, setRotating] = useState(false)
-  const [rotationError, setRotationError] = useState('')
   const saved = item.status === 'saved'
   const uploading = item.status === 'uploading'
-
-  // Detector corners only guarantee "portrait, shortest edge up", not which way the text reads.
-  const rotate180 = async () => {
-    if (rotating || uploading || saved) return
-    setRotating(true)
-    setRotationError('')
-    try {
-      const bitmap = await createImageBitmap(item.file)
-      const canvas = document.createElement('canvas')
-      canvas.width = bitmap.width
-      canvas.height = bitmap.height
-      const context = canvas.getContext('2d')
-      context.translate(bitmap.width / 2, bitmap.height / 2)
-      context.rotate(Math.PI)
-      context.drawImage(bitmap, -bitmap.width / 2, -bitmap.height / 2)
-      bitmap.close()
-      const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.92))
-      if (!blob) throw new Error('The rotated image could not be encoded.')
-      const file = new File(
-        [blob],
-        `${item.file.name.replace(/\.[^.]+$/, '') || 'capture'}.jpg`,
-        { type: 'image/jpeg' },
-      )
-      const previewUrl = URL.createObjectURL(file)
-      URL.revokeObjectURL(item.previewUrl)
-      onChange({ file, previewUrl })
-    } catch (error) {
-      setRotationError(error?.message || String(error))
-    } finally {
-      setRotating(false)
-    }
-  }
 
   return (
     <div className="rounded-lg border border-border bg-bg-card p-4">
@@ -285,7 +245,6 @@ function PendingCard({ item, onChange, onRemove, onSave, onScan }) {
             <p className="mt-2 break-all text-xs text-green">Saved as {item.savedName}</p>
           ) : null}
           {item.error ? <p className="mt-2 text-xs text-brand-red">{item.error}</p> : null}
-          {rotationError ? <p className="mt-2 text-xs text-brand-red">{rotationError}</p> : null}
           {item.scanStatus === 'uploading' ? (
             <p className="mt-2 flex items-center gap-2 text-xs text-text-secondary">
               <Loader2 size={13} className="animate-spin" aria-hidden />
@@ -381,15 +340,6 @@ function PendingCard({ item, onChange, onRemove, onSave, onScan }) {
           <ScanLine size={14} aria-hidden />
           {item.scanStatus === 'uploading' ? 'Scanning…' : 'Scan now'}
         </button>
-        <button
-          type="button"
-          className="btn-ghost-sm justify-center"
-          disabled={uploading || saved || rotating}
-          onClick={rotate180}
-        >
-          <RotateCw size={14} aria-hidden />
-          {rotating ? 'Rotating…' : 'Rotate 180°'}
-        </button>
         <button type="button" className="btn-ghost-sm justify-center" onClick={onRemove}>
           <Trash2 size={14} aria-hidden />
           {t('common.remove')}
@@ -432,6 +382,7 @@ export default function CaptureLab() {
   const motionBusyRef = useRef(false)
   const liveParkedRef = useRef(false)
   const lastDetectionAtRef = useRef(null)
+  const lastModelFrameAtRef = useRef(null)
   const lastUsableAtRef = useRef(null)
   const trackerRef = useRef(null)
   if (!trackerRef.current) trackerRef.current = createTracker()
@@ -451,7 +402,7 @@ export default function CaptureLab() {
   const lastConfirmCornersRef = useRef(null)
   const lastConfirmSharpnessRef = useRef(null)
   const trackerStatsRef = useRef({ hits: 0, attempts: 0, reason: 'frame' })
-  const diagRef = useRef({ startedAt: null, samples: [], events: [], meta: null, frames: 0 })
+  const diagRef = useRef({ startedAt: null, samples: [], events: [], meta: null, frames: 0, taken: 0 })
   const diagTimerRef = useRef(null)
   const diagSnapshotCanvasRef = useRef(null)
   const diagPhaseRef = useRef('none')
@@ -532,7 +483,6 @@ export default function CaptureLab() {
   const [batchScanError, setBatchScanError] = useState('')
   const [libraryError, setLibraryError] = useState('')
   const [storedScans, setStoredScans] = useState({})
-  const [rotatingCaptures, setRotatingCaptures] = useState({})
 
   pendingRef.current = pending
   liveDetectionRef.current = liveDetection
@@ -810,7 +760,10 @@ export default function CaptureLab() {
           : Math.round(trackerFpsRef.current),
       }
 
-      if ((diag.samples.length + 1) % DIAG_SNAPSHOT_EVERY === 0) {
+      // Monotonic cadence: an array-length modulo freezes once the 90-sample
+      // ring is full, which silently stopped snapshots halfway through.
+      diag.taken = (diag.taken || 0) + 1
+      if (diag.taken % DIAG_SNAPSHOT_EVERY === 0) {
         const frame = captureDiagFrame()
         if (frame) {
           sample.frame = frame
@@ -855,7 +808,7 @@ export default function CaptureLab() {
   }
 
   function clearDiagnostics() {
-    diagRef.current = { startedAt: null, samples: [], events: [], meta: null, frames: 0 }
+    diagRef.current = { startedAt: null, samples: [], events: [], meta: null, frames: 0, taken: 0 }
     lastPhaseRef.current = null
     setDiagCount({ samples: 0, frames: 0, events: 0 })
     setDiagSend({ status: 'idle', message: '', error: '' })
@@ -952,6 +905,7 @@ export default function CaptureLab() {
     motionBusyRef.current = false
     liveParkedRef.current = false
     lastDetectionAtRef.current = null
+    lastModelFrameAtRef.current = null
     lastUsableAtRef.current = null
     liveInFlightRef.current = false
     liveLastTsRef.current = null
@@ -1273,13 +1227,15 @@ export default function CaptureLab() {
     }, 'image/jpeg', 0.92)
   }
 
-  // Single acquisition path for rectified captures. requestVideoFrameCallback
-  // is unavailable on Firefox for Android, so currentTime is compared around
-  // drawImage; the same decoded frame time is never captured twice.
-  const acquireVideoFrame = () => new Promise(resolve => {
+  // Single acquisition path for rectified captures. The card's native-pixel
+  // bounding box is drawn 1:1, then warped, so the crop is not an upscale of a
+  // downscaled full frame. requestVideoFrameCallback is unavailable on Firefox
+  // for Android, so currentTime is compared around drawImage; the same decoded
+  // frame time is never captured twice.
+  const acquireVideoFrame = corners => new Promise(resolve => {
     const started = performance.now()
     const canvas = document.createElement('canvas')
-    const context = canvas.getContext('2d', { willReadFrequently: true })
+    const context = canvas.getContext('2d')
     const attempt = () => {
       const video = videoRef.current
       if (!video || !video.videoWidth || !video.videoHeight) {
@@ -1291,16 +1247,32 @@ export default function CaptureLab() {
         })
         return
       }
-      // Cap the sampling source at the crop's own resolution: a 12 MP frame
-      // costs a ~48 MB ImageData allocation on a phone for no extra detail in a
-      // 1146×1600 crop, and large canvas allocations can reload the tab.
-      const scale = Math.min(1, CARD_TARGET_HEIGHT / Math.max(video.videoWidth, video.videoHeight))
-      const width = Math.max(1, Math.round(video.videoWidth * scale))
-      const height = Math.max(1, Math.round(video.videoHeight * scale))
+      const videoWidth = video.videoWidth
+      const videoHeight = video.videoHeight
+      const nativeQuad = corners.map(([x, y]) => [x * videoWidth, y * videoHeight])
+      const xs = nativeQuad.map(point => point[0])
+      const ys = nativeQuad.map(point => point[1])
+      const boxWidth = Math.max(1, Math.max(...xs) - Math.min(...xs))
+      const boxHeight = Math.max(1, Math.max(...ys) - Math.min(...ys))
+      // Generous 12 % region around the card: how a person frames a hand-held
+      // photo, and enough slack that recognisers see the whole card even when
+      // the tracker is slightly tight. No rotation or rectification is applied.
+      const padX = Math.round(boxWidth * 0.12)
+      const padY = Math.round(boxHeight * 0.12)
+      const minX = Math.max(0, Math.floor(Math.min(...xs) - padX))
+      const maxX = Math.min(videoWidth, Math.ceil(Math.max(...xs) + padX))
+      const minY = Math.max(0, Math.floor(Math.min(...ys) - padY))
+      const maxY = Math.min(videoHeight, Math.ceil(Math.max(...ys) + padY))
+      const sourceWidth = Math.max(1, maxX - minX)
+      const sourceHeight = Math.max(1, maxY - minY)
+      // The box is a fraction of the frame and is capped only as a memory guard.
+      const scale = Math.min(1, CAPTURE_SOURCE_MAX_EDGE / Math.max(sourceWidth, sourceHeight))
+      const width = Math.max(1, Math.round(sourceWidth * scale))
+      const height = Math.max(1, Math.round(sourceHeight * scale))
       if (canvas.width !== width) canvas.width = width
       if (canvas.height !== height) canvas.height = height
       const before = video.currentTime
-      context.drawImage(video, 0, 0, width, height)
+      context.drawImage(video, minX, minY, sourceWidth, sourceHeight, 0, 0, width, height)
       const after = video.currentTime
       const waitedMs = Math.round(performance.now() - started)
       if (after === before && before === lastCapturedFrameTimeRef.current) {
@@ -1311,7 +1283,23 @@ export default function CaptureLab() {
         window.requestAnimationFrame(attempt)
         return
       }
-      resolve({ ok: true, reason: 'ok', canvas, context, frameTime: after, waitedMs })
+      let cardLongEdge = 0
+      for (let i = 0; i < 4; i += 1) {
+        const [x1, y1] = nativeQuad[i]
+        const [x2, y2] = nativeQuad[(i + 1) % 4]
+        cardLongEdge = Math.max(cardLongEdge, Math.hypot(x2 - x1, y2 - y1))
+      }
+      resolve({
+        ok: true,
+        reason: 'ok',
+        canvas,
+        frameTime: after,
+        waitedMs,
+        // The delivered crop's long edge, and the card's own long edge in
+        // native source pixels.
+        sourceLongEdge: Math.max(width, height),
+        cardLongEdge: Math.round(cardLongEdge),
+      })
     }
     attempt()
   })
@@ -1373,37 +1361,16 @@ export default function CaptureLab() {
       // detection is requested and the capture is retried once.
       for (let pass = 0; pass < 2; pass += 1) {
         const retry = pass > 0
-        const acquisition = await acquireVideoFrame()
-        if (!acquisition.ok) {
-          setCaptureNote(
-            acquisition.reason === 'stalled'
-              ? 'The camera did not deliver a new frame; nothing captured.'
-              : 'The video frame is not ready; nothing captured.',
-          )
-          recordDiagEvent('capture-attempt', {
-            ok: false,
-            retry,
-            reason: acquisition.reason,
-            waitedMs: acquisition.waitedMs,
-            quadAgeMs: null,
-            frameTime: acquisition.frameTime,
-            sharpness: null,
-            corroborateAgeMs: null,
-          })
-          // A completed hold ended with nothing captured: the camera never
-          // produced a fresh frame, which the user cannot see.
-          if (auto) playCaptureRefusal()
-          if (auto) rearmAutoCapture()
-          return false
-        }
-
         const now = performance.now()
         const hasTracked = trackedQuadRef.current != null
         const trackedAgeMs = hasTracked && trackerLastTsRef.current != null
           ? now - trackerLastTsRef.current
           : null
-        const modelAgeMs = lastDetectionAtRef.current != null
-          ? now - lastDetectionAtRef.current
+        // Age from the frame the model saw, not from when its result arrived:
+        // inference can add a second, and a "fresh" result would otherwise
+        // describe a stale frame.
+        const modelAgeMs = lastModelFrameAtRef.current != null
+          ? now - lastModelFrameAtRef.current
           : null
         const decision = shouldAcceptCapture({
           hasTracked,
@@ -1419,11 +1386,13 @@ export default function CaptureLab() {
             ok: false,
             retry,
             reason: decision.reason,
-            waitedMs: acquisition.waitedMs,
+            waitedMs: null,
             quadAgeMs,
-            frameTime: acquisition.frameTime,
+            frameTime: null,
             sharpness: null,
             corroborateAgeMs: null,
+            sourceLongEdge: null,
+            cardLongEdge: null,
           })
           if (!retry && liveDetectionRef.current) {
             setCaptureNote('Getting a fresh look at the card…')
@@ -1436,9 +1405,11 @@ export default function CaptureLab() {
               reason: 'retry-timeout',
               waitedMs: Math.round(performance.now() - retryStarted),
               quadAgeMs,
-              frameTime: acquisition.frameTime,
+              frameTime: null,
               sharpness: null,
               corroborateAgeMs: null,
+              sourceLongEdge: null,
+              cardLongEdge: null,
             })
           }
           setCaptureNote('Waiting for a fresh look at the card; nothing captured.')
@@ -1455,11 +1426,13 @@ export default function CaptureLab() {
             ok: false,
             retry,
             reason: 'no-quad',
-            waitedMs: acquisition.waitedMs,
+            waitedMs: null,
             quadAgeMs,
-            frameTime: acquisition.frameTime,
+            frameTime: null,
             sharpness: null,
             corroborateAgeMs: null,
+            sourceLongEdge: null,
+            cardLongEdge: null,
           })
           // The held quad disappeared before the frame could be cropped.
           if (auto) playCaptureRefusal()
@@ -1492,11 +1465,13 @@ export default function CaptureLab() {
             ok: false,
             retry,
             reason: 'uncorroborated',
-            waitedMs: acquisition.waitedMs,
+            waitedMs: null,
             quadAgeMs,
-            frameTime: acquisition.frameTime,
+            frameTime: null,
             sharpness: captureSharpness,
             corroborateAgeMs,
+            sourceLongEdge: null,
+            cardLongEdge: null,
           })
           if (!retry && liveDetectionRef.current) {
             setCaptureNote('Checking the card with the detector…')
@@ -1509,9 +1484,11 @@ export default function CaptureLab() {
               reason: 'retry-timeout',
               waitedMs: Math.round(performance.now() - retryStarted),
               quadAgeMs,
-              frameTime: acquisition.frameTime,
+              frameTime: null,
               sharpness: captureSharpness,
               corroborateAgeMs,
+              sourceLongEdge: null,
+              cardLongEdge: null,
             })
           }
           setCaptureNote('Waiting for the detector to confirm the card; nothing captured.')
@@ -1522,47 +1499,41 @@ export default function CaptureLab() {
           return false
         }
 
-        // The frame is now committed to this capture attempt; a retry must wait
-        // for a different decoded frame.
-        lastCapturedFrameTimeRef.current = acquisition.frameTime
-
-        let warped
-        try {
-          const frame = acquisition.context.getImageData(
-            0,
-            0,
-            acquisition.canvas.width,
-            acquisition.canvas.height,
+        // Native-resolution crop of a generous box around the card: no warp, no
+        // rotation, no fixed output size. The recogniser reads the camera's own
+        // pixels better than a resampled rectification.
+        const acquisition = await acquireVideoFrame(corners)
+        if (!acquisition.ok) {
+          setCaptureNote(
+            acquisition.reason === 'stalled'
+              ? 'The camera did not deliver a new frame; nothing captured.'
+              : 'The video frame is not ready; nothing captured.',
           )
-          // 2.5 % of the diagonal: enough to survive a tracker that is a frame or
-          // two behind a card being positioned, at the cost of a little background.
-          const quad = outsetCorners(corners, 0.025).map(([x, y]) => [
-            x * acquisition.canvas.width,
-            y * acquisition.canvas.height,
-          ])
-          warped = warpQuad(frame, quad, CARD_TARGET_WIDTH, CARD_TARGET_HEIGHT, CARD_CROP_INSET)
-        } catch (error) {
-          setCaptureNote(`Perspective correction failed (${error.message}); nothing captured.`)
           recordDiagEvent('capture-attempt', {
             ok: false,
             retry,
-            reason: 'warp',
+            reason: acquisition.reason,
             waitedMs: acquisition.waitedMs,
             quadAgeMs,
             frameTime: acquisition.frameTime,
             sharpness: captureSharpness,
             corroborateAgeMs,
+            sourceLongEdge: null,
+            cardLongEdge: null,
           })
+          // A completed hold ended with nothing captured: the camera never
+          // produced a fresh frame, which the user cannot see.
+          if (auto) playCaptureRefusal()
           if (auto) rearmAutoCapture()
           return false
         }
 
-        const output = document.createElement('canvas')
-        output.width = CARD_TARGET_WIDTH
-        output.height = CARD_TARGET_HEIGHT
-        output.getContext('2d').putImageData(warped, 0, 0)
+        // The frame is now committed to this capture attempt; a retry must wait
+        // for a different decoded frame.
+        lastCapturedFrameTimeRef.current = acquisition.frameTime
+
         const blob = await new Promise(resolve => {
-          output.toBlob(resolve, 'image/jpeg', 0.92)
+          acquisition.canvas.toBlob(resolve, 'image/jpeg', 0.92)
         })
         if (!blob) {
           setCaptureNote('The capture could not be encoded; nothing captured.')
@@ -1575,6 +1546,8 @@ export default function CaptureLab() {
             frameTime: acquisition.frameTime,
             sharpness: captureSharpness,
             corroborateAgeMs,
+            sourceLongEdge: acquisition.sourceLongEdge,
+            cardLongEdge: acquisition.cardLongEdge,
           })
           if (auto) rearmAutoCapture()
           return false
@@ -1588,10 +1561,11 @@ export default function CaptureLab() {
         playCaptureSuccess()
         recordDiagEvent('capture', {
           mode,
-          rectified: true,
+          rectified: false,
           corners,
           areaFraction: Number(quadAreaFraction(corners).toFixed(4)),
-          sourceLongEdge: Math.max(acquisition.canvas.width, acquisition.canvas.height),
+          sourceLongEdge: acquisition.sourceLongEdge,
+          cardLongEdge: acquisition.cardLongEdge,
           jpegBytes: blob.size,
           quadSource: decision.source,
         })
@@ -1604,6 +1578,8 @@ export default function CaptureLab() {
           frameTime: acquisition.frameTime,
           sharpness: captureSharpness,
           corroborateAgeMs,
+          sourceLongEdge: acquisition.sourceLongEdge,
+          cardLongEdge: acquisition.cardLongEdge,
         })
         // Start hunting for the next card while the user is still panning.
         liveScheduleRef.current?.(CAPTURE_HUNT_DELAY_MS)
@@ -1819,6 +1795,11 @@ export default function CaptureLab() {
       ? null
       : Math.round(now - lastDetectionAtRef.current)
     lastDetectionAtRef.current = now
+    // The model quad describes the frame at request time, not result time.
+    const resultFrame = detectionFrameRef.current
+    lastModelFrameAtRef.current = resultFrame && resultFrame.seq === message.seq
+      ? resultFrame.postedAt
+      : now
     // A fresh model result no longer clears the tracker-lost state by itself:
     // the phase is derived from consecutive misses, not from model results.
     setLiveState(
@@ -2021,6 +2002,7 @@ export default function CaptureLab() {
           width: sample.width,
           height: sample.height,
           seq,
+          postedAt: performance.now(),
         }
       } else {
         detectionFrameRef.current = null
@@ -2094,8 +2076,8 @@ export default function CaptureLab() {
 
   // The tracker writes a new quad every animation frame, so the geometry goes
   // straight into the overlay instead of through React state. Only the quad's
-  // *source* is state: it flips once per model result, and it is what tells the
-  // overlay to draw a solid (detected) or dashed (predicted) ring.
+  // *source* is state: it flips once per model result, and it is the fallback
+  // hint the overlay uses to tell a predicted quad from a detected one.
   const applyQuadToPolygon = (corners, { tracked = false } = {}) => {
     overlayRef.current?.setQuad(corners)
     const next = corners ? (tracked ? 'tracked' : 'model') : null
@@ -2306,6 +2288,7 @@ export default function CaptureLab() {
     motionScoreRef.current = Infinity
     liveParkedRef.current = false
     lastDetectionAtRef.current = null
+    lastModelFrameAtRef.current = null
     lastUsableAtRef.current = performance.now()
     window.clearInterval(motionTimerRef.current)
     motionTimerRef.current = window.setInterval(sampleMotion, MOTION_SAMPLE_INTERVAL_MS)
@@ -2409,15 +2392,24 @@ export default function CaptureLab() {
     }
   }
 
-  // One batch job for every pending capture, each image its own card. The list
-  // stays in place so the user can see what was sent and remove it themselves.
+  // One batch job for captures that have not been sent yet, each image its own
+  // card. The list stays in place so the user can see what was sent and remove
+  // it themselves; already-sent items are excluded so a second press cannot
+  // submit the same images again.
   const scanAllPending = async () => {
-    if (batchScanRef.current || pending.length === 0) return
+    if (batchScanRef.current) return
+    const items = pending.filter(item => (
+      item.scanStatus !== 'done' && item.scanStatus !== 'uploading'
+    ))
+    if (items.length === 0) {
+      setBatchScanMessage('All pending captures have already been scanned.')
+      setBatchScanError('')
+      return
+    }
     batchScanRef.current = true
     setBatchScanning(true)
     setBatchScanMessage('')
     setBatchScanError('')
-    const items = pending.slice()
     items.forEach(item => updatePending(item.id, {
       scanStatus: 'uploading',
       scanProgress: 0,
@@ -2564,25 +2556,6 @@ export default function CaptureLab() {
     }
   }
 
-  const rotateStoredCapture = async entry => {
-    const confirmed = await confirm({
-      title: 'Rotate capture',
-      message: `Rotate ${entry.name} 180°? The stored file is re-encoded as JPEG, which loses a little fidelity.`,
-      confirmLabel: 'Rotate',
-    })
-    if (!confirmed) return
-    setLibraryError('')
-    setRotatingCaptures(prev => ({ ...prev, [entry.name]: true }))
-    try {
-      await rotateCaptureLabEntry(entry.name)
-      queryClient.invalidateQueries({ queryKey: CAPTURE_LAB_QUERY_KEY })
-    } catch (error) {
-      setLibraryError(`Rotate failed: ${scanErrorMessage(error)}`)
-    } finally {
-      setRotatingCaptures(prev => ({ ...prev, [entry.name]: false }))
-    }
-  }
-
   const cameraStatusMessage = {
     requesting: 'Requesting camera…',
     denied: 'Camera permission was denied. Allow camera access in the browser and retry.',
@@ -2591,11 +2564,15 @@ export default function CaptureLab() {
   }[status]
 
   const captures = data?.captures || []
+  const scannablePending = pending.filter(item => (
+    item.scanStatus !== 'done' && item.scanStatus !== 'uploading'
+  ))
   const listDisabled = listError?.response?.status === 404
 
   // What the overlay is showing. The lifecycle phases come from the auto-capture
-  // window; the ring's solid/dashed style comes from the quad's source, because
-  // the tracker rewrites the quad 30 times a second without a render.
+  // window, including the brief 'locked' phase each accepted detection earns;
+  // the overlay turns those into one eased lock strength rather than a
+  // solid/dashed switch, so the 300 ms pulse does not flicker the ring.
   const overlayCardArea = liveResult?.usable ? liveResult.area : undefined
   const trackedArea = trackedQuadRef.current ? quadAreaFraction(trackedQuadRef.current) : null
   const overlayTooSmall = Boolean(
@@ -3145,7 +3122,7 @@ export default function CaptureLab() {
             onClick={scanAllPending}
           >
             <ScanLine size={15} aria-hidden />
-            {batchScanning ? 'Scanning…' : `Scan all (${pending.length})`}
+            {batchScanning ? 'Scanning…' : `Scan all (${scannablePending.length})`}
           </button>
         </div>
         {batchScanMessage ? (
@@ -3243,15 +3220,6 @@ export default function CaptureLab() {
                 >
                   <ScanLine size={14} aria-hidden />
                   {scan?.status === 'uploading' ? 'Sending…' : 'Send to scanner'}
-                </button>
-                <button
-                  type="button"
-                  className="btn-ghost-sm"
-                  disabled={Boolean(rotatingCaptures[entry.name])}
-                  onClick={() => rotateStoredCapture(entry)}
-                >
-                  <RotateCw size={14} aria-hidden />
-                  {rotatingCaptures[entry.name] ? 'Rotating…' : 'Rotate 180°'}
                 </button>
                 <button type="button" className="btn-ghost-sm" onClick={() => downloadEntry(entry)}>
                   <Download size={14} aria-hidden />
