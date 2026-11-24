@@ -8,10 +8,13 @@
 // a huge pan) resets the hold. A model result deliberately moves the quad to
 // the detector's frame, so it keeps the clock and never counts as movement.
 
-// Fast tracked movement between two observations (frame fractions). 2.5 % of a
-// 1080p frame's long edge per frame is ~75 %/s at 30 fps: blur territory, and
-// far above the ~0.7 %/frame hand tremor this session actually shows.
-export const AUTO_STEP_MOVE = 0.025
+// Fast tracked movement between two observations, as a speed (frame widths per
+// second). A per-observation threshold means nothing when observations arrive
+// 122 ms apart instead of 33 ms, so normalise by the tracked interval.
+export const AUTO_STEP_SPEED = 0.75
+// Cap the interval used for that comparison so a stalled loop cannot turn one
+// small correction into an instant restart.
+export const AUTO_STEP_DT_MAX_MS = 250
 // Loose cumulative guard: a real pan, not a wobble. Drift itself is free.
 export const AUTO_TOTAL_MOVE = 0.25
 // Qualifying observations further apart than this restart the window, so a
@@ -59,8 +62,13 @@ export function autoHoldDecision({
     return { action: 'keep', step: 0, total: 0 }
   }
 
+  const dtMs = Math.min(
+    AUTO_STEP_DT_MAX_MS,
+    Math.max(0, lastQualifyingTs == null ? 0 : now - lastQualifyingTs),
+  )
   const step = lastCorners ? maxCornerMovement(lastCorners, corners) : 0
-  if (lastSource === 'tracked' && step > AUTO_STEP_MOVE) {
+  if (lastSource === 'tracked' && dtMs > 0
+    && step > AUTO_STEP_SPEED * (dtMs / 1000)) {
     return { action: 'restart', reason: 'step', step, total: 0 }
   }
   const total = maxCornerMovement(anchorCorners, corners)

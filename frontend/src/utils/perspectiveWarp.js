@@ -75,6 +75,30 @@ export function quadAreaFraction(corners) {
   return Math.abs(area) * 0.5
 }
 
+// Push each normalised corner away from the quad centroid so a quad that sits a
+// little inside the card still samples the card's edge. The cost is a sliver of
+// background, which is preferable to clipping the card; coordinates are clamped
+// to the frame so the homography never samples outside it.
+export function outsetCorners(corners, fraction = 0.015) {
+  if (!corners || corners.length !== 4) return corners
+  const cx = corners.reduce((sum, [x]) => sum + x, 0) / 4
+  const cy = corners.reduce((sum, [, y]) => sum + y, 0) / 4
+  const diagonal = Math.max(
+    Math.hypot(corners[0][0] - corners[2][0], corners[0][1] - corners[2][1]),
+    Math.hypot(corners[1][0] - corners[3][0], corners[1][1] - corners[3][1]),
+  )
+  const distance = fraction * diagonal
+  return corners.map(([x, y]) => {
+    const dx = x - cx
+    const dy = y - cy
+    const length = Math.hypot(dx, dy) || 1
+    return [
+      Math.min(1, Math.max(0, x + (dx / length) * distance)),
+      Math.min(1, Math.max(0, y + (dy / length) * distance)),
+    ]
+  })
+}
+
 function insetQuad(corners, inset) {
   const cx = corners.reduce((sum, [x]) => sum + x, 0) / corners.length
   const cy = corners.reduce((sum, [, y]) => sum + y, 0) / corners.length

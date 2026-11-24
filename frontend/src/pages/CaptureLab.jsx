@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Camera, Check, Download, ImagePlus, Loader2, RefreshCw, RotateCw, Save, ScanLine, Trash2, VideoOff, Volume2, VolumeX, X } from 'lucide-react'
+import { Camera, Check, Download, Eye, EyeOff, ImagePlus, Loader2, RefreshCw, RotateCw, Save, ScanLine, Trash2, VideoOff, Volume2, VolumeX, X } from 'lucide-react'
 import {
   deleteCaptureLabEntry,
   enqueueScanJob,
@@ -21,7 +21,7 @@ import {
   primeCaptureAudio,
   setCaptureSoundEnabled,
 } from '../utils/captureSound'
-import { quadAreaFraction, warpQuad } from '../utils/perspectiveWarp'
+import { outsetCorners, quadAreaFraction, warpQuad } from '../utils/perspectiveWarp'
 import {
   cornerAgreement,
   createTracker,
@@ -50,7 +50,8 @@ import {
 import {
   autoHoldDecision,
   AUTO_STABLE_GAP_MS,
-  AUTO_STEP_MOVE,
+  AUTO_STEP_DT_MAX_MS,
+  AUTO_STEP_SPEED,
   AUTO_TOTAL_MOVE,
   maxCornerMovement,
 } from '../utils/autoHold'
@@ -84,6 +85,10 @@ const LIVE_MIN_INTERVAL_MS = 120
 // When hunting for a new card there is no tracker to carry the outline, so run
 // the next detection as soon as inference finishes plus a small gap.
 const HUNT_GAP_MS = 120
+// While no card is found and the scene is still, stop hammering the detector.
+// This is a load/heat reduction, not a fix for the phone's thermal limits.
+const HUNT_BACKOFF_MS = 8000
+const HUNT_BACKOFF_GAP_MS = 1200
 // After a capture, look for the next card while the user is still panning.
 const CAPTURE_HUNT_DELAY_MS = 150
 const LIVE_SEQ_BASE = 1_000_000
@@ -113,7 +118,11 @@ const CARD_TARGET_WIDTH = 1146
 const CARD_TARGET_HEIGHT = 1600
 // Pull each corner 1.5% toward the quad centre so a loose quad does not sample
 // a sliver of sleeve/background.
-const CARD_CROP_INSET = 0.015
+// The quad is padded outward before warping, and warpQuad's own inward inset
+// would cancel that padding exactly. Capture therefore passes a zero inset: the
+// cost of a sliver of background is nothing next to cropping the card's edge,
+// which the scanner cannot recover from.
+const CARD_CROP_INSET = 0
 
 // Automatic capture must never send the scanner a card that occupies less of
 // the frame than a deliberate phone photo would.
@@ -423,6 +432,7 @@ export default function CaptureLab() {
   const motionBusyRef = useRef(false)
   const liveParkedRef = useRef(false)
   const lastDetectionAtRef = useRef(null)
+  const lastUsableAtRef = useRef(null)
   const trackerRef = useRef(null)
   if (!trackerRef.current) trackerRef.current = createTracker()
   const trackerCanvasRef = useRef(null)
@@ -499,6 +509,14 @@ export default function CaptureLab() {
   const [captureBeatAt, setCaptureBeatAt] = useState(null)
   const [captureNote, setCaptureNote] = useState('')
   const [soundOn, setSoundOn] = useState(isCaptureSoundEnabled)
+  const [softFocus, setSoftFocus] = useState(() => {
+    try {
+      const stored = window.localStorage.getItem('capture-lab-soft-focus')
+      return stored == null ? true : stored === '1'
+    } catch {
+      return true
+    }
+  })
   const [pending, setPending] = useState([])
   const [batchScanning, setBatchScanning] = useState(false)
   const [batchScanMessage, setBatchScanMessage] = useState('')
@@ -625,7 +643,8 @@ export default function CaptureLab() {
       // produced its hold-reset events.
       auto_hold: {
         stable_ms: AUTO_STABLE_MS,
-        step_move: AUTO_STEP_MOVE,
+        step_speed: AUTO_STEP_SPEED,
+        step_dt_max_ms: AUTO_STEP_DT_MAX_MS,
         total_move: AUTO_TOTAL_MOVE,
         gap_ms: AUTO_STABLE_GAP_MS,
       },
@@ -864,6 +883,16 @@ export default function CaptureLab() {
     if (next) primeCaptureAudio()
   }
 
+  const toggleSoftFocus = () => {
+    const next = !softFocus
+    setSoftFocus(next)
+    try {
+      window.localStorage.setItem('capture-lab-soft-focus', next ? '1' : '0')
+    } catch {
+      // Private mode or a full quota: the toggle still works this session.
+    }
+  }
+
   // The confirmation pulse is a render-time state change: expire it so the
   // ring falls back to dashed tracking even if no new frame arrives.
   useEffect(() => {
@@ -889,6 +918,7 @@ export default function CaptureLab() {
     motionBusyRef.current = false
     liveParkedRef.current = false
     lastDetectionAtRef.current = null
+    lastUsableAtRef.current = null
     liveInFlightRef.current = false
     liveLastTsRef.current = null
     liveIntervalRef.current = null
@@ -1470,7 +1500,7 @@ export default function CaptureLab() {
             acquisition.canvas.width,
             acquisition.canvas.height,
           )
-          const quad = corners.map(([x, y]) => [
+          const quad = outsetCorners(corners).map(([x, y]) => [
             x * acquisition.canvas.width,
             y * acquisition.canvas.height,
           ])
@@ -1515,6 +1545,8 @@ export default function CaptureLab() {
         }
 
         addFiles([new File([blob], `card-${Date.now()}.jpg`, { type: 'image/jpeg' })])
+        // A capture resets hunting to full speed for the next card.
+        lastUsableAtRef.current = performance.now()
         // The success beat starts only once the File exists and is staged.
         setCaptureBeatAt(performance.now())
         playCaptureSuccess()
@@ -1869,10 +1901,22 @@ export default function CaptureLab() {
     // Hunting (no usable card) is latency-bound: start the next look as soon as
     // inference ends. A usable card keeps the relaxed cadence because the
     // tracker carries the outline and the phone should not burn in the meantime.
+    // After 8 s of a still scene with no card, ease off to a slower hunt; the
+    // loop must still look, just not flat out.
     const detectMs = Number.isFinite(message.ms) ? message.ms : 0
+    if (result.usable) lastUsableAtRef.current = now
+    const huntingFor = lastUsableAtRef.current == null
+      ? 0
+      : now - lastUsableAtRef.current
+    const slowHunt = !result.usable
+      && huntingFor >= HUNT_BACKOFF_MS
+      && motionScoreRef.current <= IDLE_MOTION_THRESHOLD
     const nextDelay = result.usable
       ? Math.max(LIVE_MIN_INTERVAL_MS, 2 * detectMs)
-      : Math.max(LIVE_MIN_INTERVAL_MS, detectMs + HUNT_GAP_MS)
+      : Math.max(
+        LIVE_MIN_INTERVAL_MS,
+        detectMs + (slowHunt ? HUNT_BACKOFF_GAP_MS : HUNT_GAP_MS),
+      )
     liveScheduleRef.current?.(nextDelay)
   }
 
@@ -1979,8 +2023,14 @@ export default function CaptureLab() {
       const score = computeMotionScore(motionLastGrayRef.current, gray)
       motionLastGrayRef.current = gray
       motionScoreRef.current = score
-      if (!liveParkedRef.current) return
       const moving = score > IDLE_MOTION_THRESHOLD
+      // Movement means the user may be presenting a card: restart full-speed
+      // hunting rather than staying in the slow mode. This must apply whether
+      // or not the loop is parked.
+      if (moving && !liveResultRef.current?.usable) {
+        lastUsableAtRef.current = performance.now()
+      }
+      if (!liveParkedRef.current) return
       const heartbeatDue = lastDetectionAtRef.current == null
         || performance.now() - lastDetectionAtRef.current >= IDLE_HEARTBEAT_MS
       if (!moving && !heartbeatDue) {
@@ -2209,6 +2259,7 @@ export default function CaptureLab() {
     motionScoreRef.current = Infinity
     liveParkedRef.current = false
     lastDetectionAtRef.current = null
+    lastUsableAtRef.current = performance.now()
     window.clearInterval(motionTimerRef.current)
     motionTimerRef.current = window.setInterval(sampleMotion, MOTION_SAMPLE_INTERVAL_MS)
     startDiagRecorder()
@@ -2671,6 +2722,7 @@ export default function CaptureLab() {
               tooSmall={overlayTooSmall}
               cardArea={overlayCardArea}
               pendingCount={pending.length}
+              softFocus={softFocus}
             />
           ) : null}
         </div>
@@ -2714,6 +2766,16 @@ export default function CaptureLab() {
             onClick={toggleCaptureSound}
           >
             {soundOn ? <Volume2 size={18} aria-hidden /> : <VolumeX size={18} aria-hidden />}
+          </button>
+          <button
+            type="button"
+            className="btn-ghost-sm h-12 w-12 shrink-0 p-0"
+            aria-label={softFocus ? 'Soft focus on' : 'Soft focus off'}
+            aria-pressed={softFocus}
+            title={softFocus ? 'Soft focus on' : 'Soft focus off'}
+            onClick={toggleSoftFocus}
+          >
+            {softFocus ? <Eye size={18} aria-hidden /> : <EyeOff size={18} aria-hidden />}
           </button>
         </div>
 

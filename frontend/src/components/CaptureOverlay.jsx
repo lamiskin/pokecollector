@@ -158,6 +158,7 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
   tooSmall = false,
   cardArea,
   pendingCount = 0,
+  softFocus = true,
 }, ref) {
   const quadRef = useRef(quad)
   const [hasQuad, setHasQuad] = useState(Boolean(quad))
@@ -487,7 +488,7 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
             ? Math.min(target, anim.blur + dt / span)
             : Math.max(target, anim.blur - dt / span)
         }
-        if (anim.blur > 0) paintBlurHole(px, width, height)
+        if (softFocus && anim.blur > 0) paintBlurHole(px, width, height)
         const shownBlur = Math.round(anim.blur * 100) / 100
         if (shownBlur !== anim.blurShown) {
           anim.blurShown = shownBlur
@@ -608,7 +609,7 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
         ringRef.current?.setAttribute('opacity', '1')
         // Darkening and blur share the job: as the blur comes up the dim backs
         // off, so the picture softens rather than turning into a blackout.
-        dimRef.current?.setAttribute('opacity', (0.5 * shown * (1 - 0.75 * anim.blur)).toFixed(3))
+        dimRef.current?.setAttribute('opacity', (0.5 * shown * (1 - 0.75 * (softFocus ? anim.blur : 0))).toFixed(3))
         bloomRef.current?.setAttribute('opacity', '0')
       }
 
@@ -626,7 +627,7 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
 
     frame = window.requestAnimationFrame(paint)
     return () => window.cancelAnimationFrame(frame)
-  }, [holdDurationMs, ticks])
+  }, [holdDurationMs, ticks, softFocus])
 
   // ── measure ─────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -650,7 +651,7 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
       {/* Blurs everything behind the overlay's own chrome but inside the clip,
           which is the inverse of the card quad: the card stays sharp. Off (and
           not composited) unless the hold is running. */}
-      {blurSupported ? (
+      {blurSupported && softFocus ? (
         <div
           ref={blurRef}
           className="pointer-events-none absolute inset-0"

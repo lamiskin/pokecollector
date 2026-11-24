@@ -40,20 +40,12 @@ function clamp01(value) {
   return Math.min(1, Math.max(0, Number(value) || 0))
 }
 
-// Rotate corner order so the shortest original-space edge becomes the top.
-function orientShortestEdgeTop(corners, width, height) {
-  const edgeLengths = corners.map(([x1, y1], index) => {
-    const [x2, y2] = corners[(index + 1) % corners.length]
-    return Math.hypot((x1 - x2) * width, (y1 - y2) * height)
-  })
-  let shortestEdge = 0
-  for (let i = 1; i < edgeLengths.length; i += 1) {
-    if (edgeLengths[i] < edgeLengths[shortestEdge]) shortestEdge = i
-  }
-  return corners.map((_, index) => corners[(index + shortestEdge) % corners.length])
-}
-
 // Canonical TL, TR, BR, BL order, ported from the reference web scanner.
+// Edge length is deliberately not used: a portrait card has two short edges,
+// and under perspective one is always marginally shorter, so choosing the
+// shortest edge as the top flips the card 180° between frames. The user holds
+// the card in the same orientation they see, so the corner nearest the frame's
+// top-left is the correct reference.
 function orderCorners(points, width, height) {
   const cx = points.reduce((sum, [x]) => sum + x, 0) / points.length
   const cy = points.reduce((sum, [, y]) => sum + y, 0) / points.length
@@ -82,7 +74,7 @@ function orderCorners(points, width, height) {
   const canonical = signedArea < 0
     ? [ordered[0], ordered[3], ordered[2], ordered[1]]
     : ordered
-  return width && height ? orientShortestEdgeTop(canonical, width, height) : canonical
+  return canonical
 }
 
 function quadArea(corners) {
