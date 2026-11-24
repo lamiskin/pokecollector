@@ -477,54 +477,30 @@ def create_custom_card(
     current_user: User = Depends(get_current_user),
 ):
     """Create a card manually (not from TCGdex API)."""
-    # Custom IDs must be collision-safe across every user and template clone.
-    card_id = f"custom-{uuid4().hex}"
-    image_url = (data.image_url or "").strip()
-    if image_url:
-        try:
-            image_url = validate_public_https_image_url(image_url)
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    from services.custom_cards import stage_custom_card
 
-    # Derive language from the set if not explicitly provided
-    card_lang = data.lang
-    if not card_lang and data.set_id:
-        existing_set = db.query(Set).filter(
-            (Set.tcg_set_id == data.set_id) | (Set.id == data.set_id)
-        ).first()
-        if existing_set:
-            card_lang = existing_set.lang
-    card_lang = card_lang or "en"
-
-    # Ensure set record exists if set_id given
-    if data.set_id:
-        existing_set = db.query(Set).filter(
-            (Set.tcg_set_id == data.set_id) | (Set.id == data.set_id)
-        ).first()
-        if not existing_set:
-            db.add(Set(id=data.set_id, name=data.set_id, total=0, tcg_set_id=data.set_id, lang=card_lang))
-
-    # image_url is stored as images_small and images_large (unchanged, not TCGdex)
-    card = Card(
-        id=card_id,
-        name=data.name,
-        set_id=data.set_id or None,
-        number=data.number or None,
-        rarity=data.rarity or None,
-        types=data.types or None,
-        hp=data.hp or None,
-        artist=data.artist or None,
-        images_small=image_url or None,
-        images_large=image_url or None,
-        is_custom=True,
-        custom_owner_id=current_user.id,
-        is_shared_template=data.is_shared_template,
-        lang=card_lang,
-    )
-    db.add(card)
     try:
+        card = stage_custom_card(
+            db,
+            current_user,
+            name=data.name,
+            set_id=data.set_id,
+            number=data.number,
+            rarity=data.rarity,
+            types=data.types,
+            hp=data.hp,
+            artist=data.artist,
+            image_url=data.image_url,
+            lang=data.lang,
+            is_shared_template=data.is_shared_template,
+        )
         db.commit()
         db.refresh(card)
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
@@ -1568,9 +1544,28 @@ def migrate_custom_card(
                 if k != "id":
                     setattr(existing_api_card, k, v)
             existing_api_card.is_custom = False
+            api_card_row = existing_api_card
         else:
             parsed["is_custom"] = False
-            db.add(Card(**parsed))
+            api_card_row = Card(**parsed)
+            db.add(api_card_row)
+
+        # A custom card stores its manual image in the TCGdex image columns. A
+        # brand-new set often has no artwork yet, so carrying the manual image
+        # across keeps the card from silently downgrading to the card back.
+        # Real API art always wins, an existing manual fallback is left alone,
+        # and upsert_card clears this fallback once TCGdex art arrives, so the
+        # copy is self-healing.
+        if not (api_card_row.images_small or api_card_row.images_large) and not api_card_row.custom_image_url:
+            manual_image = (
+                custom_card_obj.images_small or custom_card_obj.images_large or ""
+            ).strip()
+            if manual_image:
+                try:
+                    api_card_row.custom_image_url = validate_public_https_image_url(manual_image)
+                except ValueError:
+                    # Only public HTTPS art may be served by the image proxy.
+                    pass
 
         db.flush()
     except HTTPException:
