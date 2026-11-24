@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Camera, Download, ImagePlus, Loader2, RefreshCw, RotateCw, Save, ScanLine, Trash2, VideoOff } from 'lucide-react'
+import { Camera, Check, Download, ImagePlus, Loader2, RefreshCw, RotateCw, Save, ScanLine, Trash2, VideoOff, X } from 'lucide-react'
 import {
   deleteCaptureLabEntry,
   enqueueScanJob,
@@ -46,7 +46,6 @@ import {
   AUTO_DRIFT_WINDOW_MS,
   AUTO_STABLE_GAP_MS,
   AUTO_JUMP_MOVE,
-  AUTO_TOTAL_MOVE,
   maxCornerMovement,
 } from '../utils/autoHold'
 import { computeMotionScore, toGrayscale } from '../utils/webcamStability'
@@ -119,14 +118,15 @@ const MIN_CARD_AREA = 0.12
 // on different phones; this is wall-clock. The window must stay open for
 // AUTO_STABLE_MS, then auto-capture disarms until the quad has been absent for
 // AUTO_REARM_MS or has moved more than AUTO_REARM_MOVE. Whether the window stays
-// open is decided per observation in autoHold.js: slow drift is normal, fast
-// motion cancels.
-const AUTO_STABLE_MS = 1200
+// open is decided per observation in autoHold.js against a median of the last
+// 500 ms: tremor and single tracker corrections are normal, sustained movement
+// cancels.
+const AUTO_STABLE_MS = 800
 // The hold window is wall-clock, but the capture must not wait for the next
 // model result: detection is device-dependent (~1 s here), so that would add
 // up to a second of dead time after the user has already held long enough.
 const AUTO_FIRE_CHECK_MS = 100
-const AUTO_REARM_MOVE = 0.2
+const AUTO_REARM_MOVE = 0.12
 const AUTO_REARM_MS = 800
 // Auto-capture stability may follow the tracker for up to this long between
 // model results. Separate from capture geometry freshness so changing capture
@@ -193,6 +193,7 @@ function newAutoState() {
     lastCorners: null,
     lastQualifyingTs: null,
     history: [],
+    lastSource: 'tracked',
     disarmed: false,
     captureCorners: null,
     absentSince: null,
@@ -436,6 +437,7 @@ export default function CaptureLab() {
   const diagPhaseRef = useRef('none')
   const diagSampleRef = useRef(null)
   const diagSendingRef = useRef(false)
+  const lastHoldDriftRef = useRef(null)
   const trackerFrameMsRef = useRef(null)
   const modelIntervalMsRef = useRef(null)
   const trackInLostRef = useRef(false)
@@ -612,7 +614,6 @@ export default function CaptureLab() {
         drift_window_ms: AUTO_DRIFT_WINDOW_MS,
         drift_move: AUTO_DRIFT_WINDOW_MOVE,
         jump_move: AUTO_JUMP_MOVE,
-        total_move: AUTO_TOTAL_MOVE,
         gap_ms: AUTO_STABLE_GAP_MS,
       },
       tracker: {
@@ -728,6 +729,19 @@ export default function CaptureLab() {
         liveScheduleMs: liveScheduleMsRef.current,
         quad: quad ? quad.map(([x, y]) => [Number(x.toFixed(4)), Number(y.toFixed(4))]) : null,
         holdMs: holdTs == null ? null : Math.round(now - holdTs),
+        holdElapsedMs: holdTs == null ? null : Math.round(now - holdTs),
+        holdDrift: lastHoldDriftRef.current,
+        holdSource: autoStateRef.current.lastSource || 'tracked',
+        trackMisses: trackerFailuresRef.current,
+        confirmAgeMs: lastConfirmTsRef.current == null
+          ? null
+          : Math.round(now - lastConfirmTsRef.current),
+        motionScore: Number.isFinite(motionScoreRef.current)
+          ? Math.round(motionScoreRef.current * 10) / 10
+          : null,
+        trackerIntervalMs: trackerFpsRef.current == null
+          ? null
+          : Math.round(trackerFpsRef.current),
       }
 
       if ((diag.samples.length + 1) % DIAG_SNAPSHOT_EVERY === 0) {
@@ -805,6 +819,30 @@ export default function CaptureLab() {
     }
   }
 
+  function markDiagnostics(label) {
+    const now = performance.now()
+    const hasTracked = trackedQuadRef.current != null
+    const quadAgeMs = hasTracked && trackerLastTsRef.current != null
+      ? Math.round(now - trackerLastTsRef.current)
+      : (lastDetectionAtRef.current == null
+        ? null
+        : Math.round(now - lastDetectionAtRef.current))
+    recordDiagEvent('mark', {
+      label,
+      phase: diagPhaseRef.current,
+      phaseReason: phaseReasonRef.current,
+      quadAgeMs,
+      confirmAgeMs: lastConfirmTsRef.current == null
+        ? null
+        : Math.round(now - lastConfirmTsRef.current),
+      holdElapsedMs: autoStateRef.current.anchorTs == null
+        ? null
+        : Math.round(now - autoStateRef.current.anchorTs),
+      drift: lastHoldDriftRef.current,
+    })
+    setCaptureNote(label === 'good' ? 'Marked: good' : 'Marked: wrong')
+  }
+
   // The confirmation pulse is a render-time state change: expire it so the
   // ring falls back to dashed tracking even if no new frame arrives.
   useEffect(() => {
@@ -847,6 +885,7 @@ export default function CaptureLab() {
     lastConfirmTsRef.current = null
     lastConfirmCornersRef.current = null
     lastConfirmSharpnessRef.current = null
+    lastHoldDriftRef.current = null
     autoStateRef.current = newAutoState()
     stopAutoFireTimer()
     quadSourceRef.current = null
@@ -1198,6 +1237,7 @@ export default function CaptureLab() {
     state.lastQualifyingTs = null
     state.absentSince = null
     state.history = []
+    state.lastSource = 'tracked'
     setAutoDisarmed(false)
     setAutoHoldStartTs(null)
     setHoldHint('')
@@ -1442,7 +1482,15 @@ export default function CaptureLab() {
         addFiles([new File([blob], `card-${Date.now()}.jpg`, { type: 'image/jpeg' })])
         // The success beat starts only once the File exists and is staged.
         setCaptureBeatAt(performance.now())
-        recordDiagEvent('capture', { mode, rectified: true, corners })
+        recordDiagEvent('capture', {
+          mode,
+          rectified: true,
+          corners,
+          areaFraction: Number(quadAreaFraction(corners).toFixed(4)),
+          sourceLongEdge: Math.max(acquisition.canvas.width, acquisition.canvas.height),
+          jpegBytes: blob.size,
+          quadSource: decision.source,
+        })
         recordDiagEvent('capture-attempt', {
           ok: true,
           retry,
@@ -1511,23 +1559,24 @@ export default function CaptureLab() {
     )
   }
 
-  const startAutoWindow = (corners, now) => {
+  const startAutoWindow = (corners, now, source = 'tracked') => {
     const state = autoStateRef.current
     state.anchorCorners = corners
     state.anchorTs = now
     state.lastCorners = corners
     state.lastQualifyingTs = now
-    state.history = [{ corners, t: now }]
+    state.lastSource = source
+    state.history = [{ corners, t: now, source }]
     setAutoHoldStartTs(now)
     startAutoFireTimer()
   }
 
   // One observation of the held card: a model result, or a fresh tracked quad.
-  // Judge it against the previous observation, not the window anchor, so slow
-  // hand drift cannot cancel a calm hold; only fast motion or a large total
-  // excursion does. Tracked quads also refresh the qualifying timestamp, which
-  // keeps the gap guard about a stalled loop rather than about model rate.
-  const noteAutoObservation = (corners, now) => {
+  // Judge tracked motion against the median quad of the last 500 ms so a
+  // tracker correction or one rogue sample cannot cancel a calm hold. A model
+  // observation re-baselines the history at the detector's frame without
+  // stopping the hold clock.
+  const noteAutoObservation = (corners, now, source = 'tracked') => {
     const state = autoStateRef.current
     if (!autoCaptureRef.current || state.disarmed || !corners) return
     const decision = autoHoldDecision({
@@ -1537,10 +1586,13 @@ export default function CaptureLab() {
       now,
       lastQualifyingTs: state.lastQualifyingTs,
       history: state.history || [],
+      source,
+      lastSource: state.lastSource || 'tracked',
     })
+    lastHoldDriftRef.current = decision.drift == null ? null : decision.drift
     if (decision.action === 'start') {
       setHoldHint('')
-      startAutoWindow(corners, now)
+      startAutoWindow(corners, now, source)
       return
     }
     if (decision.action === 'restart') {
@@ -1552,19 +1604,22 @@ export default function CaptureLab() {
           reason: decision.reason,
           heldMs: Math.round(heldMs),
           step: decision.step == null ? null : Number(decision.step.toFixed(4)),
-          total: decision.total == null ? null : Number(decision.total.toFixed(4)),
           drift: decision.drift == null ? null : Number(decision.drift.toFixed(4)),
         })
       }
       // Only sustained motion earns the hint; gap resets are a stalled loop.
-      startAutoWindow(corners, now)
+      startAutoWindow(corners, now, source)
       setHoldHint(decision.reason === 'gap' ? '' : 'Hold still')
       return
     }
     state.lastCorners = corners
     state.lastQualifyingTs = now
+    state.lastSource = source
     const history = state.history || (state.history = [])
-    history.push({ corners, t: now })
+    // A model adoption moved the coordinate frame; keep the clock but discard
+    // history recorded in the old frame, or the step would read as drift.
+    if (decision.reanchor) history.length = 0
+    history.push({ corners, t: now, source })
     const cutoff = now - AUTO_DRIFT_WINDOW_MS
     while (history.length > 0 && history[0].t < cutoff) history.shift()
     if (history.length > 60) history.splice(0, history.length - 60)
@@ -1585,6 +1640,7 @@ export default function CaptureLab() {
       state.lastCorners = null
       state.lastQualifyingTs = null
       state.history = []
+      state.lastSource = 'tracked'
       stopAutoFireTimer()
       setAutoHoldStartTs(null)
       setHoldHint('')
@@ -1631,7 +1687,11 @@ export default function CaptureLab() {
     const trackerFresh = tracked != null
       && trackerLastTsRef.current != null
       && now - trackerLastTsRef.current <= AUTO_TRACK_OBS_MAX_AGE_MS
-    noteAutoObservation(trackerFresh ? tracked : result.corners, now)
+    noteAutoObservation(
+      trackerFresh ? tracked : result.corners,
+      now,
+      trackerFresh ? 'tracked' : 'model',
+    )
   }
 
   // The detection frame is kept until its result is consumed; a stale frame
@@ -1981,6 +2041,9 @@ export default function CaptureLab() {
               recordDiagEvent('track-recovered', { via: 'adopt' })
             }
             applyQuadToPolygon(tentativeQuad, { tracked: true })
+            // The adopted quad is the detector's coordinate frame; re-baseline
+            // the hold history here instead of reading the correction as motion.
+            noteAutoObservation(tentativeQuad, performance.now(), 'model')
             trackerRafRef.current = window.requestAnimationFrame(() => trackerLoopRef.current?.())
             return
           }
@@ -2042,7 +2105,7 @@ export default function CaptureLab() {
       // the freshest geometry. It refines an open window but never opens one:
       // the model result stays the authority on whether the card qualifies.
       if (autoCaptureRef.current && autoStateRef.current.anchorTs != null) {
-        noteAutoObservation(tracked, now)
+        noteAutoObservation(tracked, now, 'tracked')
       }
       if (trackInLostRef.current) {
         trackInLostRef.current = false
@@ -2519,6 +2582,35 @@ export default function CaptureLab() {
               pendingCount={pending.length}
             />
           ) : null}
+        </div>
+
+        {/* Kept directly under the preview so both marks stay in thumb reach
+            while the phone is held in one hand with the camera running. */}
+        <div
+          role="group"
+          aria-label="Mark the current live detection"
+          className="mt-2 grid grid-cols-2 gap-3 sm:max-w-sm"
+        >
+          <button
+            type="button"
+            className="btn-ghost-sm min-h-12 gap-1.5 text-sm"
+            disabled={!liveDetection}
+            onClick={() => markDiagnostics('good')}
+          >
+            <Check size={18} aria-hidden />
+            Mark: good
+            <span className="sr-only"> (live detection is correct)</span>
+          </button>
+          <button
+            type="button"
+            className="btn-ghost-sm min-h-12 gap-1.5 text-sm"
+            disabled={!liveDetection}
+            onClick={() => markDiagnostics('wrong')}
+          >
+            <X size={18} aria-hidden />
+            Mark: wrong
+            <span className="sr-only"> (live detection is wrong)</span>
+          </button>
         </div>
 
         {liveDetection ? (

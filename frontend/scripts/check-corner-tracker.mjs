@@ -221,21 +221,28 @@ assert.equal(isPatchMatchAcceptable(676, 300), false)
   assert.deepEqual(derivePhase({ hasModel: false }), { phase: 'none', reason: 'no-quad' })
 }
 
-// Auto-capture hold: judge smoothness over a rolling window so tracker jitter
-// and slow creep survive while sustained displacement cancels.
+// Auto-capture hold: judge smoothness against the median of a rolling window so
+// tracker jitter, one correction, and a couple of rogue samples survive while
+// sustained displacement cancels. Model adoptions re-baseline the window.
 {
   const quadAt = dx => [
     [0.2 + dx, 0.2], [0.8 + dx, 0.2], [0.8 + dx, 0.8], [0.2 + dx, 0.8],
   ]
-  const anchor = quadAt(0)
-  const run = (deltas, stepMs) => {
-    let last = anchor
-    const history = [{ corners: anchor, t: 0 }]
+  const base = quadAt(0)
+  // Mirrors the caller: tracked observations fill history; a model observation
+  // keeps the hold clock but discards the old coordinate frame.
+  const simulate = (observations, stepMs = 33) => {
     let t = 0
+    let anchor = base
+    let last = base
+    let lastSource = 'tracked'
+    let history = [{ corners: base, t: 0, source: 'tracked' }]
     let decision = null
-    for (const dx of deltas) {
+    let firstRestart = null
+    for (const observation of observations) {
       t += stepMs
-      const corners = quadAt(dx)
+      const corners = quadAt(observation.dx)
+      const source = observation.source || 'tracked'
       decision = autoHoldDecision({
         anchorCorners: anchor,
         lastCorners: last,
@@ -243,33 +250,83 @@ assert.equal(isPatchMatchAcceptable(676, 300), false)
         now: t,
         lastQualifyingTs: t - stepMs,
         history,
+        source,
+        lastSource,
       })
-      history.push({ corners, t })
-      const cutoff = t - AUTO_DRIFT_WINDOW_MS
-      while (history.length > 0 && history[0].t < cutoff) history.shift()
+      if (decision.action === 'restart') {
+        if (!firstRestart) firstRestart = decision
+        anchor = corners
+        history = [{ corners, t, source }]
+      } else if (decision.action === 'keep') {
+        if (decision.reanchor) history = []
+        history.push({ corners, t, source })
+        const cutoff = t - AUTO_DRIFT_WINDOW_MS
+        while (history.length > 0 && history[0].t < cutoff) history.shift()
+      }
       last = corners
+      lastSource = source
     }
-    return decision
+    return firstRestart || decision
   }
 
   // Ten observations of ±2 % jitter inside 500 ms: ordinary tremor keeps it.
-  const jitter = Array.from({ length: 10 }, (_, i) => (i % 3 === 0 ? 0.02 : i % 2 === 0 ? 0.01 : 0))
-  assert.equal(run(jitter, 50).action, 'keep')
-  // 1 %/frame creep for 1.2 s stays below the total cap.
-  assert.equal(run([0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07], 200).action, 'keep')
-  // 4 % inside 200 ms is sustained movement, not jitter.
-  assert.equal(run([0.04], 200).reason, 'drift')
-  // 8 % in one step is a discontinuity.
-  assert.equal(run([0.08], 100).reason, 'jump')
-  // 20 % total, built from plausible steps, hits the total cap.
-  assert.equal(run([0.04, 0.08, 0.12, 0.16, 0.2], 100).reason, 'total')
+  const jitter = Array.from({ length: 10 }, (_, i) => ({
+    dx: i % 3 === 0 ? 0.02 : i % 2 === 0 ? 0.01 : 0,
+  }))
+  assert.equal(simulate(jitter, 50).action, 'keep')
+
+  // A single 7 % model adoption step keeps the window: the correction is a
+  // coordinate-frame change, not the card jumping, and the history restarts at
+  // the adopted quad.
+  const adoption = [
+    ...Array.from({ length: 10 }, () => ({ dx: 0 })),
+    { dx: 0.07, source: 'model' },
+    ...Array.from({ length: 6 }, () => ({ dx: 0.07 })),
+  ]
+  assert.equal(simulate(adoption).action, 'keep')
+
+  // 1 %/frame creep for 800 ms stays below the median drift threshold.
+  const creep = Array.from({ length: 8 }, (_, i) => ({ dx: 0.01 * (i + 1) }))
+  assert.equal(simulate(creep, 100).action, 'keep')
+
+  // 4 % sustained movement within 200 ms: the median still sits at the old
+  // position, so this cancels as drift.
+  const sustained = [
+    ...Array.from({ length: 10 }, () => ({ dx: 0 })),
+    ...Array.from({ length: 6 }, () => ({ dx: 0.04 })),
+  ]
+  assert.equal(simulate(sustained).reason, 'drift')
+
+  // 8 % in one tracked-to-tracked step is a discontinuity.
+  const jump = [...Array.from({ length: 5 }, () => ({ dx: 0 })), { dx: 0.08 }]
+  assert.equal(simulate(jump).reason, 'jump')
+
+  // Two anomalous samples among fifteen cannot move the median, so the window
+  // survives when the card itself has not moved.
+  const outliers = [
+    ...Array.from({ length: 13 }, (_, i) => ({ corners: base, t: i * 33, source: 'tracked' })),
+    ...Array.from({ length: 2 }, (_, i) => ({ corners: quadAt(0.06), t: 430 + i * 33, source: 'tracked' })),
+  ]
+  assert.equal(
+    autoHoldDecision({
+      anchorCorners: base,
+      lastCorners: quadAt(0.06),
+      corners: base,
+      now: 500,
+      lastQualifyingTs: 480,
+      history: outliers,
+      source: 'tracked',
+      lastSource: 'tracked',
+    }).action,
+    'keep',
+  )
 
   // No window yet, and a stalled loop, both restart the clock.
   assert.equal(
     autoHoldDecision({
       anchorCorners: null,
       lastCorners: null,
-      corners: anchor,
+      corners: base,
       now: 0,
       lastQualifyingTs: null,
     }).action,
@@ -277,16 +334,17 @@ assert.equal(isPatchMatchAcceptable(676, 300), false)
   )
   assert.equal(
     autoHoldDecision({
-      anchorCorners: anchor,
-      lastCorners: anchor,
-      corners: anchor,
+      anchorCorners: base,
+      lastCorners: base,
+      corners: base,
       now: 2000,
       lastQualifyingTs: 0,
-      history: [{ corners: anchor, t: 0 }],
+      history: [{ corners: base, t: 0, source: 'tracked' }],
     }).reason,
     'gap',
   )
 }
+
 // Capture geometry may not outlive the frame it is applied to. A stale tracked
 // quad is a rejection, not a fallback to the model; the model is only usable
 // when no tracked quad exists at all.

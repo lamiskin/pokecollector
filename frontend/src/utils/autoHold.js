@@ -4,22 +4,22 @@
 // and the tracker jitters between frames, while the card itself barely moves.
 // A per-observation step threshold therefore measures tracker noise, and means
 // completely different things at 7 fps and 38 fps. Instead, judge sustained
-// displacement over a short rolling window: only motion that persists across
-// ~500 ms counts. A hard single-step discontinuity check still catches a real
-// jump, and a generous total cap stops a slow pan from passing as a hold.
+// displacement against the median quad over a short rolling window: a single
+// tracker correction or a rogue sample cannot move the median, while steady
+// movement does. Model results are source-aware: an adoption legitimately
+// re-anchors the coordinate frame, so it keeps the window and re-baselines the
+// history rather than reading as the card jumping.
 
 // Window used for the smoothness test. Observations older than this are
 // irrelevant: ordinary tremor cancels out within half a second.
 export const AUTO_DRIFT_WINDOW_MS = 500
-// Displacement from the oldest observation still inside the window that counts
-// as real movement rather than jitter (frame fractions).
+// Displacement from the median quad that counts as real movement rather than
+// jitter (frame fractions).
 export const AUTO_DRIFT_WINDOW_MOVE = 0.035
-// A single large jump is a different gesture (lifting, replacing, panning).
+// A single large tracked-to-tracked step is a different gesture (lifting,
+// replacing, panning). A model adoption is not judged by this: it deliberately
+// shifts the quad to the detector's frame.
 export const AUTO_JUMP_MOVE = 0.07
-// Cumulative movement from the window anchor over the whole hold. Slow but
-// sustained motion is still motion; this is the loose ceiling that keeps a pan
-// from masquerading as a hold.
-export const AUTO_TOTAL_MOVE = 0.15
 // Qualifying observations further apart than this restart the window, so a
 // stalled detection loop cannot accumulate credit across a pause.
 export const AUTO_STABLE_GAP_MS = 1500
@@ -33,19 +33,48 @@ export function maxCornerMovement(a, b) {
   return movement
 }
 
+function median(values) {
+  if (values.length === 0) return 0
+  const sorted = [...values].sort((a, b) => a - b)
+  const middle = sorted.length >> 1
+  return sorted.length % 2 === 1
+    ? sorted[middle]
+    : (sorted[middle - 1] + sorted[middle]) / 2
+}
+
+// Per-coordinate median of the observations inside the window, including the
+// current one. A median needs half the window to move, so one re-anchor or two
+// rogue samples cannot shift it.
+export function medianQuad(observations) {
+  if (!observations || observations.length === 0) return null
+  const xs = [[], [], [], []]
+  const ys = [[], [], [], []]
+  for (const observation of observations) {
+    if (!observation || !observation.corners) continue
+    for (let i = 0; i < 4; i += 1) {
+      xs[i].push(observation.corners[i][0])
+      ys[i].push(observation.corners[i][1])
+    }
+  }
+  const quad = []
+  for (let i = 0; i < 4; i += 1) quad.push([median(xs[i]), median(ys[i])])
+  return quad
+}
+
 /**
  * Decide what one observation means for the current hold window.
  *
  * `anchorCorners` is the quad the window's clock started from, `lastCorners`
- * the previous observation, `history` recent `{corners, t}` observations still
- * inside the drift window, and `corners` this observation. Coordinates are
- * frame fractions. Returns:
+ * the previous observation, `history` recent `{corners, t, source}` observations
+ * still inside the drift window, and `corners` this observation. `source` is
+ * `tracked` or `model`, as is `lastSource` for the previous observation.
+ * Coordinates are frame fractions. Returns:
  *   { action: 'start' }                                    no window open yet
- *   { action: 'restart', reason, step, total, drift }      motion cancelled it
- *   { action: 'keep', step, total, drift }                 the window survives
+ *   { action: 'restart', reason, step, drift }             tracked motion
+ *   { action: 'keep', reanchor?, step, drift }             the window survives
  *
- * Restart reasons: `gap` (stalled loop), `jump` (one large step), `total`
- * (whole-hold cap), `drift` (sustained movement inside the short window).
+ * Restart reasons: `gap` (stalled loop), `jump` (one large tracked-to-tracked
+ * step), `drift` (sustained movement against the median).
  */
 export function autoHoldDecision({
   anchorCorners,
@@ -54,27 +83,35 @@ export function autoHoldDecision({
   now,
   lastQualifyingTs,
   history = [],
+  source = 'tracked',
+  lastSource = 'tracked',
 }) {
   if (!anchorCorners) return { action: 'start' }
   const gap = lastQualifyingTs == null ? Infinity : now - lastQualifyingTs
   if (gap > AUTO_STABLE_GAP_MS) return { action: 'restart', reason: 'gap' }
+
+  // A model adoption moves the quad to the detector's frame on purpose. Keep
+  // the hold clock, but let the caller re-baseline the history at this quad so
+  // the correction is not later mistaken for user movement.
+  if (source === 'model') {
+    return { action: 'keep', reanchor: true, step: 0, drift: 0 }
+  }
+
   const step = lastCorners ? maxCornerMovement(lastCorners, corners) : 0
-  const total = maxCornerMovement(anchorCorners, corners)
-  if (step > AUTO_JUMP_MOVE) return { action: 'restart', reason: 'jump', step, total }
-  // Order matters: a large excursion reports the total cap even when it was
-  // built from individually plausible steps.
-  if (total > AUTO_TOTAL_MOVE) return { action: 'restart', reason: 'total', step, total }
+  // Only tracked-to-tracked steps are gestures; a step out of a model result is
+  // the coordinate frame settling, not the card jumping.
+  if (lastSource === 'tracked' && step > AUTO_JUMP_MOVE) {
+    return { action: 'restart', reason: 'jump', step, drift: 0 }
+  }
+
   const windowStart = now - AUTO_DRIFT_WINDOW_MS
-  let oldest = null
-  for (const observation of history) {
-    if (observation && observation.corners && observation.t >= windowStart) {
-      oldest = observation
-      break
-    }
-  }
-  const drift = oldest ? maxCornerMovement(oldest.corners, corners) : 0
+  const inside = history.filter(observation => (
+    observation && observation.corners && observation.t >= windowStart
+  ))
+  inside.push({ corners, t: now, source })
+  const drift = maxCornerMovement(medianQuad(inside), corners)
   if (drift > AUTO_DRIFT_WINDOW_MOVE) {
-    return { action: 'restart', reason: 'drift', step, total, drift }
+    return { action: 'restart', reason: 'drift', step, drift }
   }
-  return { action: 'keep', step, total, drift }
+  return { action: 'keep', step, drift }
 }
