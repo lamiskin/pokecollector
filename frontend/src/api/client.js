@@ -211,6 +211,11 @@ export const resolveScanJobItem = (jobId, itemId, cardId = null) =>
 export const resolveAndAddScanJobItem = (jobId, itemId, data) =>
   api.post(`/cards/recognize/jobs/${jobId}/items/${itemId}/resolve-and-add`, data)
     .then(r => r.data)
+// Creates a custom catalogue card from a scanned item recognition and adds it
+// to the collection in one step, for a card no candidate matched.
+export const createCustomCardFromScanItem = (jobId, itemId, data) =>
+  api.post(`/cards/recognize/jobs/${jobId}/items/${itemId}/create-custom`, data)
+    .then(r => r.data)
 export const retryScanJobItem = (jobId, itemId) =>
   api.post(`/cards/recognize/jobs/${jobId}/items/${itemId}/retry`).then(r => r.data)
 export const deleteScanJob = jobId =>

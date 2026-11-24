@@ -19,9 +19,10 @@ and `../api`, and `../pages` owns routing and orchestration.
   Analytics species list; each caller keeps its own card rendering inside.
 - **Scanning** — `UnifiedCardScanner` (multi-file capture → `enqueueScanJob`),
   `ScanReview` (persistent batch review: `ScanItemPanel`, `CandidateGrid`,
-  `CardZoomModal`), and `CardScanner`'s `ScanAddModal` (add a match to the
-  collection with best-effort own-photo attach). `CardScanner` retains the
-  single-shot inline scan flow.
+  `CardZoomModal`), `ScanCustomCardModal` (turn a photo no candidate matched
+  into a custom card and collection item), and `CardScanner`'s `ScanAddModal`
+  (add a match to the collection with best-effort own-photo attach).
+  `CardScanner` retains the single-shot inline scan flow.
 - **Navigation chrome** — `Layout` (route shell + `<Outlet/>`), `AppNav` (top
   title strip + floating Pokéball home button), `TabNav` / `AnalyticsSectionNav`
   (sub-nav tabs), `PublicHomeButton` (public directory entry point). `Sidebar`
@@ -79,7 +80,10 @@ and `../api`, and `../pages` owns routing and orchestration.
    The comparison's **Add as NM · {variant}** action displays and files that
    catalogue default, with quantity one and NM condition. `JobDetail` sends
    either request and both best-effort attach the scan photo via
-   `attachScanFallbackPhoto` — a photo failure never blocks the add. Both scan-add
+   `attachScanFallbackPhoto` — a photo failure never blocks the add. A photo
+   with no usable match offers `ScanCustomCardModal`, which creates a custom
+   card from the recognition data and adds the photographed card to the
+   collection with the same photo-attach path. Both scan-add
    and card-detail add forms use `getSelectableVariants` to disable explicitly
    excluded finishes while leaving unknown evidence editable.
 2. **Display.** Pages fetch collection/search/set rows, normalize them with
@@ -109,7 +113,7 @@ and `../api`, and `../pages` owns routing and orchestration.
 - **Pages** import these components directly — e.g. `Collection` (MoneyInput,
   PrintingDetailSelector/TagManager, CollectionCard*), `CardSearch` (CardItem,
   CustomCardModal, UnifiedCardScanner, PrintingDetailSelector), `ScanQueue`
-  (ScanAddModal, ScanReview), `Products`/`Analytics` (PeriodSelector, MoneyInput,
+  (ScanAddModal, ScanReview, ScanCustomCardModal), `Products`/`Analytics` (PeriodSelector, MoneyInput,
   CollectionCard*, AnalyticsSectionNav), `Dashboard` (TrainerCard,
   CollectionCardDisplay), `Settings`/`Binders` (AvatarPicker), `Trades`
   (MoneyInput, CustomCardModal), and `CardModal` consumers (`UserCollection`,

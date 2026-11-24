@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, BookOpen, Clock3, Loader2, PackageCheck, RefreshCw, ScanLine, Search, Trash2 } from 'lucide-react'
+import { ArrowLeft, BookOpen, Check, Clock3, Loader2, PackageCheck, Plus, RefreshCw, ScanLine, Search, Trash2 } from 'lucide-react'
 import toast from 'react-hot-toast'
 import {
   deleteScanJob,
@@ -14,6 +14,7 @@ import {
 } from '../api/client'
 import { ScanAddModal, attachScanFallbackPhoto } from '../components/CardScanner'
 import { CardZoomModal, ScanItemPanel, useScanItemPhoto } from '../components/ScanReview'
+import { ScanCustomCardModal } from '../components/ScanCustomCardModal'
 import ConfirmDialog from '../components/ui/ConfirmDialog'
 import Modal from '../components/ui/Modal'
 import { useSettings } from '../contexts/SettingsContext'
@@ -128,15 +129,21 @@ function JobDetail({ jobId, onObscuredChange }) {
   // see past its own item, so the page has to be the thing that remembers
   // where the reviewer is in the batch.
   const [review, setReview] = useState(null) // { itemId, matchIndex }
+  // A no-match item whose custom card the reviewer created in this session.
+  // The item stays in the job until the server marks it resolved, so remember
+  // which photos have already been turned into a card and stop offering the
+  // same action for them.
+  const [customCardItem, setCustomCardItem] = useState(null)
+  const [manuallyAdded, setManuallyAdded] = useState(() => new Set())
   // The add modal only needs to know the add succeeded. The full response also
   // carries the best-effort filing result, kept here so this page can explain
   // a shortfall without making the modal aware of allocation at all.
   const allocationRef = useRef(null)
 
   useEffect(() => {
-    onObscuredChange(Boolean(addSelection || confirmation || itemModalOpen || review))
+    onObscuredChange(Boolean(addSelection || confirmation || itemModalOpen || review || customCardItem))
     return () => onObscuredChange(false)
-  }, [addSelection, confirmation, itemModalOpen, review, onObscuredChange])
+  }, [addSelection, confirmation, itemModalOpen, review, customCardItem, onObscuredChange])
 
   const { data: job, isLoading, isError } = useQuery({
     queryKey: ['scan-job', jobId],
@@ -282,6 +289,23 @@ function JobDetail({ jobId, onObscuredChange }) {
     }
   }
 
+  // The dialog has created a custom card for this photo and added it to the
+  // collection. Remember the item so neither surface offers the same action
+  // again, then walk on when it came from the full-screen no-match surface —
+  // the same continuation a successful retry gets.
+  const customCardCreated = item => {
+    setManuallyAdded(current => {
+      const next = new Set(current)
+      next.add(item.id)
+      return next
+    })
+    setCustomCardItem(null)
+    invalidateCardState(queryClient)
+    invalidateTcgdexFilterLanguages(queryClient)
+    invalidate()
+    if (review?.itemId === item.id) openNextReview(item.id)
+  }
+
   if (isLoading) {
     return <div className="flex justify-center py-16"><Loader2 size={28} className="animate-spin text-brand-red" /></div>
   }
@@ -348,6 +372,8 @@ function JobDetail({ jobId, onObscuredChange }) {
             onRetry={itemToRetry => retryMutation.mutate(itemToRetry)}
             onDismiss={dismiss}
             onReview={(scanItem, matchIndex) => setReview({ itemId: scanItem.id, matchIndex })}
+            onCustomCard={setCustomCardItem}
+            customCardHandled={manuallyAdded.has(item.id)}
             onModalChange={setItemModalOpen}
             retryNow={retryNow}
             t={t}
@@ -405,10 +431,22 @@ function JobDetail({ jobId, onObscuredChange }) {
                   : reviewItem.error || t('scanner.noMatches')}
               </p>
               <div className="flex flex-wrap items-center justify-center gap-2">
-                <button type="button" onClick={() => retryFromReview(reviewItem)} disabled={!reviewItem.has_image}
-                  className="btn-primary justify-center">
-                  <RefreshCw size={14} /> {reviewItem.batch_mode ? t('scanner.retryIndividually') : t('common.retry')}
-                </button>
+                {manuallyAdded.has(reviewItem.id) ? (
+                  <p className="flex items-center gap-1.5 text-sm font-semibold text-green">
+                    <Check size={14} aria-hidden /> {t('scanner.manualCardHandled')}
+                  </p>
+                ) : (
+                  <>
+                    <button type="button" onClick={() => setCustomCardItem(reviewItem)}
+                      className="btn-primary justify-center">
+                      <Plus size={14} aria-hidden /> {t('scanner.addCardManually')}
+                    </button>
+                    <button type="button" onClick={() => retryFromReview(reviewItem)} disabled={!reviewItem.has_image}
+                      className="btn-secondary justify-center">
+                      <RefreshCw size={14} /> {reviewItem.batch_mode ? t('scanner.retryIndividually') : t('common.retry')}
+                    </button>
+                  </>
+                )}
                 <button type="button" onClick={() => dismiss(reviewItem, true)}
                   className="btn-ghost border-brand-red/30 text-brand-red hover:bg-brand-red/10">
                   <Trash2 size={14} /> {t('scanner.dismissScan')}
@@ -473,6 +511,15 @@ function JobDetail({ jobId, onObscuredChange }) {
             if (remaining.length === 0) navigate('/scans', { replace: true })
             else if (cameFromReview) openNextReview(finishedItemId)
           }}
+        />
+      )}
+
+      {customCardItem && (
+        <ScanCustomCardModal
+          jobId={jobId}
+          item={customCardItem}
+          onClose={() => setCustomCardItem(null)}
+          onCreated={() => customCardCreated(customCardItem)}
         />
       )}
 
