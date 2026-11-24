@@ -1,4 +1,5 @@
 import httpx
+import html
 import os
 import logging
 
@@ -147,11 +148,24 @@ def send_price_alert(card_name: str, current_price: float, threshold: float, ale
 
 
 def send_new_sets_notification(new_sets: list, db=None, user_id=None):
-    """Notify about newly detected sets."""
+    """Notify about newly detected sets.
+
+    Telegram messages stay short: at most ten sets are listed and a trailing
+    line reports how many more were detected.
+    """
     if not new_sets:
         return False
 
-    sets_list = "\n".join([f"• {s['name']} ({s['series']})" for s in new_sets[:10]])
+    listed = new_sets[:10]
+    sets_list = "\n".join(
+        f"• {html.escape(str(entry.get('name', '')))} "
+        f"({html.escape(str(entry.get('series') or ''))})"
+        for entry in listed
+    )
+    remaining = len(new_sets) - len(listed)
+    if remaining > 0:
+        sets_list += f"\n… and {remaining} more"
+
     text = (
         f"🆕 <b>New Pokemon Sets Detected!</b>\n\n"
         f"{sets_list}\n\n"

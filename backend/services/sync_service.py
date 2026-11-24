@@ -34,6 +34,7 @@ PRICE_SYNC_DB_CHUNK_SIZE = 400  # Stay below SQLite's common 999-parameter limit
 PRICE_HISTORY_UPSERT_CHUNK_SIZE = 100  # Seven bound values per row; safe for older SQLite builds.
 PRICE_HISTORY_ADVISORY_LOCK_ID = 0x506F6B6550726963  # "PokePric" as a signed 64-bit int.
 COMPLETE_SET_CARD_REFRESH_LIMIT = 25
+TELEGRAM_SETTING_KEYS = ("telegram_bot_token", "telegram_chat_id")
 
 
 def _user_price_field(db: Session, user_id: int | None) -> str:
@@ -588,6 +589,53 @@ def record_price_history_batch(
     return len(rows)
 
 
+def _telegram_recipient_user_ids(db: Session) -> list[int]:
+    """Users with a complete per-user Telegram configuration.
+
+    Price alerts notify the owner of the wishlist item; a catalogue-wide event
+    has no single owner, so the same per-user credentials decide the recipients.
+    A user missing either half of the pair is skipped rather than sent a message
+    that ``telegram.send_message`` would only drop.
+    """
+    rows = db.query(UserSetting.user_id, UserSetting.key).filter(
+        UserSetting.key.in_(TELEGRAM_SETTING_KEYS),
+        UserSetting.value.isnot(None),
+        UserSetting.value != "",
+    ).all()
+    configured: dict[int, set[str]] = {}
+    for user_id, key in rows:
+        configured.setdefault(user_id, set()).add(key)
+    return sorted(
+        user_id
+        for user_id, keys in configured.items()
+        if keys == set(TELEGRAM_SETTING_KEYS)
+    )
+
+
+def _notify_new_sets(db: Session, new_sets: list[dict]) -> None:
+    """Notify configured Telegram recipients about newly detected sets.
+
+    Never raises: a notification must not fail a full sync. Digital sets are
+    skipped because they cannot be collected physically.
+    """
+    if not new_sets:
+        return
+    notify_sets = [entry for entry in new_sets if not entry.get("is_digital")]
+    if not notify_sets:
+        return
+
+    try:
+        recipients = _telegram_recipient_user_ids(db)
+        if recipients:
+            for user_id in recipients:
+                telegram.send_new_sets_notification(notify_sets, db=db, user_id=user_id)
+        else:
+            # No per-user configuration: one message to the global chat/env target.
+            telegram.send_new_sets_notification(notify_sets, db=db)
+    except Exception as exc:
+        logger.warning("New set notification failed (non-fatal): %s", exc)
+
+
 def check_wishlist_alerts(db: Session, updated_card_ids: list):
     """Check wishlist items for price alerts and send Telegram notifications."""
     if not updated_card_ids:
@@ -836,6 +884,7 @@ def _perform_full_sync_locked(db: Session) -> dict:
                 duplicate_sets,
             )
         known_set_ids = {s.id for s in db.query(Set.id).all()}
+        new_sets: list[dict] = []
 
         for parsed in parsed_sets:
             is_new = parsed["id"] not in known_set_ids
@@ -845,10 +894,21 @@ def _perform_full_sync_locked(db: Session) -> dict:
                 s = db.query(Set).filter(Set.id == parsed["id"]).first()
                 if s:
                     s.is_new = True
+                new_sets.append({
+                    "id": parsed["id"],
+                    "name": parsed.get("name") or parsed["id"],
+                    "series": parsed.get("series") or "Unknown series",
+                    "is_digital": bool(parsed.get("is_digital")),
+                })
             sets_updated += 1
 
         db.commit()
         logger.info(f"Synced {sets_updated} sets")
+
+        # Announce genuine additions only. A first sync (empty catalogue) is the
+        # whole catalogue and must not produce a spam message.
+        if known_set_ids:
+            _notify_new_sets(db, new_sets)
 
         pinned_sets_updated = _ensure_pinned_set_rows(db, pinned_set_pairs)
         if pinned_sets_updated:
