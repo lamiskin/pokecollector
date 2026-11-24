@@ -21,6 +21,7 @@ import {
   derivePhase,
   evaluateTentative,
   FIRST_TRACK_RADIUS,
+  isCorroborated,
   MAX_AREA_RATIO,
   MAX_FRAME_MOVE,
   MAX_PATCH_MSE_FLOOR,
@@ -41,8 +42,9 @@ import {
 } from '../utils/cornerTracker'
 import {
   autoHoldDecision,
+  AUTO_DRIFT_WINDOW_MOVE,
+  AUTO_DRIFT_WINDOW_MS,
   AUTO_STABLE_GAP_MS,
-  AUTO_STEP_MOVE,
   AUTO_JUMP_MOVE,
   AUTO_TOTAL_MOVE,
   maxCornerMovement,
@@ -74,10 +76,18 @@ const DIAG_SNAPSHOT_EDGE = 320
 // own 384×384 squash; full-resolution bitmaps are expensive on phones.
 const LIVE_MAX_EDGE = 640
 const LIVE_MIN_INTERVAL_MS = 120
+// When hunting for a new card there is no tracker to carry the outline, so run
+// the next detection as soon as inference finishes plus a small gap.
+const HUNT_GAP_MS = 120
+// After a capture, look for the next card while the user is still panning.
+const CAPTURE_HUNT_DELAY_MS = 150
 const LIVE_SEQ_BASE = 1_000_000
 // Capture waits at most this long for a video frame newer than the last one it
 // used; a frozen feed must not be captured twice or reported as success.
 const CAPTURE_FRAME_WAIT_MS = 200
+// One bounded retry after a stale geometry result: request a fresh detection
+// and try the capture again when it lands.
+const CAPTURE_RETRY_MS = 900
 // Solid-ring confirmation pulse after an accepted model result; long enough to
 // register, short enough that the dashed tracking state still dominates.
 const CONFIRM_PULSE_MS = 300
@@ -117,7 +127,7 @@ const AUTO_STABLE_MS = 1200
 // up to a second of dead time after the user has already held long enough.
 const AUTO_FIRE_CHECK_MS = 100
 const AUTO_REARM_MOVE = 0.2
-const AUTO_REARM_MS = 1500
+const AUTO_REARM_MS = 800
 // Auto-capture stability may follow the tracker for up to this long between
 // model results. Separate from capture geometry freshness so changing capture
 // rules cannot silently change the hold rule.
@@ -182,6 +192,7 @@ function newAutoState() {
     anchorTs: null,
     lastCorners: null,
     lastQualifyingTs: null,
+    history: [],
     disarmed: false,
     captureCorners: null,
     absentSince: null,
@@ -391,6 +402,7 @@ export default function CaptureLab() {
   const liveResultRef = useRef(null)
   const liveLoopRef = useRef(null)
   const liveScheduleRef = useRef(null)
+  const liveScheduleMsRef = useRef(null)
   const liveResultHandlerRef = useRef(null)
   const liveErrorHandlerRef = useRef(null)
   const motionCanvasRef = useRef(null)
@@ -413,6 +425,10 @@ export default function CaptureLab() {
   const tentativeRef = useRef(null)
   const lastCapturedFrameTimeRef = useRef(null)
   const captureInFlightRef = useRef(false)
+  const pendingCaptureRetryRef = useRef(null)
+  const lastConfirmTsRef = useRef(null)
+  const lastConfirmCornersRef = useRef(null)
+  const lastConfirmSharpnessRef = useRef(null)
   const trackerStatsRef = useRef({ hits: 0, attempts: 0, reason: 'frame' })
   const diagRef = useRef({ startedAt: null, samples: [], events: [], meta: null, frames: 0 })
   const diagTimerRef = useRef(null)
@@ -465,6 +481,7 @@ export default function CaptureLab() {
   const [detectAgeMs, setDetectAgeMs] = useState(null)
   const [autoCapture, setAutoCapture] = useState(false)
   const [autoDisarmed, setAutoDisarmed] = useState(false)
+  const [holdHint, setHoldHint] = useState('')
   const [autoHoldStartTs, setAutoHoldStartTs] = useState(null)
   const [quadSource, setQuadSource] = useState(null)
   const [captureBeatAt, setCaptureBeatAt] = useState(null)
@@ -500,6 +517,7 @@ export default function CaptureLab() {
       window.clearInterval(motionTimerRef.current)
       window.clearInterval(autoFireTimerRef.current)
       window.clearInterval(diagTimerRef.current)
+      pendingCaptureRetryRef.current?.(false)
       if (trackerRafRef.current != null) window.cancelAnimationFrame(trackerRafRef.current)
       trackerRef.current?.reset()
       liveDetectionRef.current = false
@@ -591,7 +609,8 @@ export default function CaptureLab() {
       // produced its hold-reset events.
       auto_hold: {
         stable_ms: AUTO_STABLE_MS,
-        step_move: AUTO_STEP_MOVE,
+        drift_window_ms: AUTO_DRIFT_WINDOW_MS,
+        drift_move: AUTO_DRIFT_WINDOW_MOVE,
         jump_move: AUTO_JUMP_MOVE,
         total_move: AUTO_TOTAL_MOVE,
         gap_ms: AUTO_STABLE_GAP_MS,
@@ -704,6 +723,9 @@ export default function CaptureLab() {
         detectParts: model?.detectParts ?? null,
         trackMs: trackerFrameMsRef.current,
         modelIntervalMs: modelIntervalMsRef.current,
+        parked: liveParkedRef.current,
+        hunting: !model?.usable,
+        liveScheduleMs: liveScheduleMsRef.current,
         quad: quad ? quad.map(([x, y]) => [Number(x.toFixed(4)), Number(y.toFixed(4))]) : null,
         holdMs: holdTs == null ? null : Math.round(now - holdTs),
       }
@@ -820,6 +842,11 @@ export default function CaptureLab() {
     setConfirmPulseUntil(0)
     setCaptureBeatAt(null)
     setCaptureNote('')
+    setHoldHint('')
+    pendingCaptureRetryRef.current?.(false)
+    lastConfirmTsRef.current = null
+    lastConfirmCornersRef.current = null
+    lastConfirmSharpnessRef.current = null
     autoStateRef.current = newAutoState()
     stopAutoFireTimer()
     quadSourceRef.current = null
@@ -1170,8 +1197,11 @@ export default function CaptureLab() {
     state.lastCorners = null
     state.lastQualifyingTs = null
     state.absentSince = null
+    state.history = []
     setAutoDisarmed(false)
     setAutoHoldStartTs(null)
+    setHoldHint('')
+    liveScheduleRef.current?.(0)
   }
 
   const disarmAutoCapture = corners => {
@@ -1184,136 +1214,252 @@ export default function CaptureLab() {
     state.lastQualifyingTs = null
     setAutoDisarmed(true)
     setAutoHoldStartTs(null)
+    setHoldHint('')
     setCaptureNote('Auto-captured the card. Waiting for the card to move.')
   }
+
+  const waitForModelResult = deadline => new Promise(resolve => {
+    const remaining = Math.max(0, deadline - performance.now())
+    const timer = window.setTimeout(() => {
+      pendingCaptureRetryRef.current = null
+      resolve(false)
+    }, remaining)
+    pendingCaptureRetryRef.current = ok => {
+      window.clearTimeout(timer)
+      pendingCaptureRetryRef.current = null
+      resolve(Boolean(ok))
+    }
+    // No-op when a detection is already running: its result resolves the wait.
+    // Otherwise request one immediately.
+    liveScheduleRef.current?.(0)
+  })
 
   const captureWithFreshGeometry = async ({ auto = false } = {}) => {
     if (captureInFlightRef.current) return false
     captureInFlightRef.current = true
     const mode = auto ? 'auto' : 'manual'
     try {
-      const acquisition = await acquireVideoFrame()
-      if (!acquisition.ok) {
-        setCaptureNote(
-          acquisition.reason === 'stalled'
-            ? 'The camera did not deliver a new frame; nothing captured.'
-            : 'The video frame is not ready; nothing captured.',
-        )
-        recordDiagEvent('capture-attempt', {
-          ok: false,
-          reason: acquisition.reason,
-          waitedMs: acquisition.waitedMs,
-          quadAgeMs: null,
-          frameTime: acquisition.frameTime,
-        })
-        if (auto) rearmAutoCapture()
-        return false
-      }
+      // Two passes at most: the first may fail on stale geometry, then a fresh
+      // detection is requested and the capture is retried once.
+      for (let pass = 0; pass < 2; pass += 1) {
+        const retry = pass > 0
+        const acquisition = await acquireVideoFrame()
+        if (!acquisition.ok) {
+          setCaptureNote(
+            acquisition.reason === 'stalled'
+              ? 'The camera did not deliver a new frame; nothing captured.'
+              : 'The video frame is not ready; nothing captured.',
+          )
+          recordDiagEvent('capture-attempt', {
+            ok: false,
+            retry,
+            reason: acquisition.reason,
+            waitedMs: acquisition.waitedMs,
+            quadAgeMs: null,
+            frameTime: acquisition.frameTime,
+            sharpness: null,
+            corroborateAgeMs: null,
+          })
+          if (auto) rearmAutoCapture()
+          return false
+        }
 
-      const now = performance.now()
-      const hasTracked = trackedQuadRef.current != null
-      const trackedAgeMs = hasTracked && trackerLastTsRef.current != null
-        ? now - trackerLastTsRef.current
-        : null
-      const modelAgeMs = lastDetectionAtRef.current != null
-        ? now - lastDetectionAtRef.current
-        : null
-      const decision = shouldAcceptCapture({ hasTracked, trackedAgeMs, modelAgeMs })
-      const quadAgeMs = decision.source === 'tracked'
-        ? (trackedAgeMs == null ? null : Math.round(trackedAgeMs))
-        : (modelAgeMs == null ? null : Math.round(modelAgeMs))
-      if (!decision.ok) {
-        setCaptureNote('Waiting for a fresh look at the card; nothing captured.')
+        const now = performance.now()
+        const hasTracked = trackedQuadRef.current != null
+        const trackedAgeMs = hasTracked && trackerLastTsRef.current != null
+          ? now - trackerLastTsRef.current
+          : null
+        const modelAgeMs = lastDetectionAtRef.current != null
+          ? now - lastDetectionAtRef.current
+          : null
+        const decision = shouldAcceptCapture({
+          hasTracked,
+          trackedAgeMs,
+          modelAgeMs,
+          modelUsable: Boolean(liveResultRef.current?.usable),
+        })
+        const quadAgeMs = decision.source === 'tracked'
+          ? (trackedAgeMs == null ? null : Math.round(trackedAgeMs))
+          : (modelAgeMs == null ? null : Math.round(modelAgeMs))
+        if (!decision.ok) {
+          recordDiagEvent('capture-attempt', {
+            ok: false,
+            retry,
+            reason: decision.reason,
+            waitedMs: acquisition.waitedMs,
+            quadAgeMs,
+            frameTime: acquisition.frameTime,
+            sharpness: null,
+            corroborateAgeMs: null,
+          })
+          if (!retry && liveDetectionRef.current) {
+            setCaptureNote('Getting a fresh look at the card…')
+            const retryStarted = performance.now()
+            const landed = await waitForModelResult(performance.now() + CAPTURE_RETRY_MS)
+            if (landed) continue
+            recordDiagEvent('capture-attempt', {
+              ok: false,
+              retry: true,
+              reason: 'retry-timeout',
+              waitedMs: Math.round(performance.now() - retryStarted),
+              quadAgeMs,
+              frameTime: acquisition.frameTime,
+              sharpness: null,
+              corroborateAgeMs: null,
+            })
+          }
+          setCaptureNote('Waiting for a fresh look at the card; nothing captured.')
+          if (auto) rearmAutoCapture()
+          return false
+        }
+        const corners = decision.source === 'tracked'
+          ? trackedQuadRef.current
+          : liveResultRef.current?.corners
+        if (!corners) {
+          setCaptureNote('Waiting for a fresh look at the card; nothing captured.')
+          recordDiagEvent('capture-attempt', {
+            ok: false,
+            retry,
+            reason: 'no-quad',
+            waitedMs: acquisition.waitedMs,
+            quadAgeMs,
+            frameTime: acquisition.frameTime,
+            sharpness: null,
+            corroborateAgeMs: null,
+          })
+          if (auto) rearmAutoCapture()
+          return false
+        }
+
+        // Automatic capture needs the detector itself to have confirmed this
+        // geometry recently; a quad carried only by the tracker may be a wrong
+        // region, so it must not auto-capture.
+        const confirmAgeMs = lastConfirmTsRef.current == null
+          ? null
+          : performance.now() - lastConfirmTsRef.current
+        const captureSharpness = decision.source === 'model'
+          ? (liveResultRef.current?.sharpness ?? null)
+          : lastConfirmSharpnessRef.current
+        const corroborateAgeMs = decision.source === 'model'
+          ? 0
+          : (confirmAgeMs == null ? null : Math.round(confirmAgeMs))
+        const corroborated = decision.source === 'model' || isCorroborated({
+          lastConfirmTs: lastConfirmTsRef.current,
+          now: performance.now(),
+          quadAgreement: cornerAgreement({
+            trackedCorners: corners,
+            modelCorners: lastConfirmCornersRef.current,
+          }),
+        })
+        if (auto && !corroborated) {
+          recordDiagEvent('capture-attempt', {
+            ok: false,
+            retry,
+            reason: 'uncorroborated',
+            waitedMs: acquisition.waitedMs,
+            quadAgeMs,
+            frameTime: acquisition.frameTime,
+            sharpness: captureSharpness,
+            corroborateAgeMs,
+          })
+          if (!retry && liveDetectionRef.current) {
+            setCaptureNote('Checking the card with the detector…')
+            const retryStarted = performance.now()
+            const landed = await waitForModelResult(performance.now() + CAPTURE_RETRY_MS)
+            if (landed) continue
+            recordDiagEvent('capture-attempt', {
+              ok: false,
+              retry: true,
+              reason: 'retry-timeout',
+              waitedMs: Math.round(performance.now() - retryStarted),
+              quadAgeMs,
+              frameTime: acquisition.frameTime,
+              sharpness: captureSharpness,
+              corroborateAgeMs,
+            })
+          }
+          setCaptureNote('Waiting for the detector to confirm the card; nothing captured.')
+          rearmAutoCapture()
+          return false
+        }
+
+        // The frame is now committed to this capture attempt; a retry must wait
+        // for a different decoded frame.
+        lastCapturedFrameTimeRef.current = acquisition.frameTime
+
+        let warped
+        try {
+          const frame = acquisition.context.getImageData(
+            0,
+            0,
+            acquisition.canvas.width,
+            acquisition.canvas.height,
+          )
+          const quad = corners.map(([x, y]) => [
+            x * acquisition.canvas.width,
+            y * acquisition.canvas.height,
+          ])
+          warped = warpQuad(frame, quad, CARD_TARGET_WIDTH, CARD_TARGET_HEIGHT, CARD_CROP_INSET)
+        } catch (error) {
+          setCaptureNote(`Perspective correction failed (${error.message}); nothing captured.`)
+          recordDiagEvent('capture-attempt', {
+            ok: false,
+            retry,
+            reason: 'warp',
+            waitedMs: acquisition.waitedMs,
+            quadAgeMs,
+            frameTime: acquisition.frameTime,
+            sharpness: captureSharpness,
+            corroborateAgeMs,
+          })
+          if (auto) rearmAutoCapture()
+          return false
+        }
+
+        const output = document.createElement('canvas')
+        output.width = CARD_TARGET_WIDTH
+        output.height = CARD_TARGET_HEIGHT
+        output.getContext('2d').putImageData(warped, 0, 0)
+        const blob = await new Promise(resolve => {
+          output.toBlob(resolve, 'image/jpeg', 0.92)
+        })
+        if (!blob) {
+          setCaptureNote('The capture could not be encoded; nothing captured.')
+          recordDiagEvent('capture-attempt', {
+            ok: false,
+            retry,
+            reason: 'encode',
+            waitedMs: acquisition.waitedMs,
+            quadAgeMs,
+            frameTime: acquisition.frameTime,
+            sharpness: captureSharpness,
+            corroborateAgeMs,
+          })
+          if (auto) rearmAutoCapture()
+          return false
+        }
+
+        addFiles([new File([blob], `card-${Date.now()}.jpg`, { type: 'image/jpeg' })])
+        // The success beat starts only once the File exists and is staged.
+        setCaptureBeatAt(performance.now())
+        recordDiagEvent('capture', { mode, rectified: true, corners })
         recordDiagEvent('capture-attempt', {
-          ok: false,
-          reason: decision.reason,
+          ok: true,
+          retry,
+          reason: 'ok',
           waitedMs: acquisition.waitedMs,
           quadAgeMs,
           frameTime: acquisition.frameTime,
+          sharpness: captureSharpness,
+          corroborateAgeMs,
         })
-        if (auto) rearmAutoCapture()
-        return false
+        // Start hunting for the next card while the user is still panning.
+        liveScheduleRef.current?.(CAPTURE_HUNT_DELAY_MS)
+        if (auto) disarmAutoCapture(corners)
+        else setCaptureNote('Captured a rectified card crop.')
+        return true
       }
-      const corners = decision.source === 'tracked'
-        ? trackedQuadRef.current
-        : liveResultRef.current?.corners
-      if (!corners) {
-        setCaptureNote('Waiting for a fresh look at the card; nothing captured.')
-        recordDiagEvent('capture-attempt', {
-          ok: false,
-          reason: 'no-quad',
-          waitedMs: acquisition.waitedMs,
-          quadAgeMs,
-          frameTime: acquisition.frameTime,
-        })
-        if (auto) rearmAutoCapture()
-        return false
-      }
-
-      // The frame is now committed to this capture attempt; a retry must wait
-      // for a different decoded frame.
-      lastCapturedFrameTimeRef.current = acquisition.frameTime
-
-      let warped
-      try {
-        const frame = acquisition.context.getImageData(
-          0,
-          0,
-          acquisition.canvas.width,
-          acquisition.canvas.height,
-        )
-        const quad = corners.map(([x, y]) => [
-          x * acquisition.canvas.width,
-          y * acquisition.canvas.height,
-        ])
-        warped = warpQuad(frame, quad, CARD_TARGET_WIDTH, CARD_TARGET_HEIGHT, CARD_CROP_INSET)
-      } catch (error) {
-        setCaptureNote(`Perspective correction failed (${error.message}); nothing captured.`)
-        recordDiagEvent('capture-attempt', {
-          ok: false,
-          reason: 'warp',
-          waitedMs: acquisition.waitedMs,
-          quadAgeMs,
-          frameTime: acquisition.frameTime,
-        })
-        if (auto) rearmAutoCapture()
-        return false
-      }
-
-      const output = document.createElement('canvas')
-      output.width = CARD_TARGET_WIDTH
-      output.height = CARD_TARGET_HEIGHT
-      output.getContext('2d').putImageData(warped, 0, 0)
-      const blob = await new Promise(resolve => {
-        output.toBlob(resolve, 'image/jpeg', 0.92)
-      })
-      if (!blob) {
-        setCaptureNote('The capture could not be encoded; nothing captured.')
-        recordDiagEvent('capture-attempt', {
-          ok: false,
-          reason: 'encode',
-          waitedMs: acquisition.waitedMs,
-          quadAgeMs,
-          frameTime: acquisition.frameTime,
-        })
-        if (auto) rearmAutoCapture()
-        return false
-      }
-
-      addFiles([new File([blob], `card-${Date.now()}.jpg`, { type: 'image/jpeg' })])
-      // The success beat starts only once the File exists and is staged.
-      setCaptureBeatAt(performance.now())
-      recordDiagEvent('capture', { mode, rectified: true, corners })
-      recordDiagEvent('capture-attempt', {
-        ok: true,
-        reason: 'ok',
-        waitedMs: acquisition.waitedMs,
-        quadAgeMs,
-        frameTime: acquisition.frameTime,
-      })
-      if (auto) disarmAutoCapture(corners)
-      else setCaptureNote('Captured a rectified card crop.')
-      return true
+      return false
     } finally {
       captureInFlightRef.current = false
     }
@@ -1371,6 +1517,7 @@ export default function CaptureLab() {
     state.anchorTs = now
     state.lastCorners = corners
     state.lastQualifyingTs = now
+    state.history = [{ corners, t: now }]
     setAutoHoldStartTs(now)
     startAutoFireTimer()
   }
@@ -1389,8 +1536,10 @@ export default function CaptureLab() {
       corners,
       now,
       lastQualifyingTs: state.lastQualifyingTs,
+      history: state.history || [],
     })
     if (decision.action === 'start') {
+      setHoldHint('')
       startAutoWindow(corners, now)
       return
     }
@@ -1404,13 +1553,22 @@ export default function CaptureLab() {
           heldMs: Math.round(heldMs),
           step: decision.step == null ? null : Number(decision.step.toFixed(4)),
           total: decision.total == null ? null : Number(decision.total.toFixed(4)),
+          drift: decision.drift == null ? null : Number(decision.drift.toFixed(4)),
         })
       }
+      // Only sustained motion earns the hint; gap resets are a stalled loop.
       startAutoWindow(corners, now)
+      setHoldHint(decision.reason === 'gap' ? '' : 'Hold still')
       return
     }
     state.lastCorners = corners
     state.lastQualifyingTs = now
+    const history = state.history || (state.history = [])
+    history.push({ corners, t: now })
+    const cutoff = now - AUTO_DRIFT_WINDOW_MS
+    while (history.length > 0 && history[0].t < cutoff) history.shift()
+    if (history.length > 60) history.splice(0, history.length - 60)
+    setHoldHint('')
     // The clock-driven fire check owns closing; observations only judge motion.
   }
 
@@ -1426,8 +1584,10 @@ export default function CaptureLab() {
       state.anchorTs = null
       state.lastCorners = null
       state.lastQualifyingTs = null
+      state.history = []
       stopAutoFireTimer()
       setAutoHoldStartTs(null)
+      setHoldHint('')
     }
 
     if (!qualifies) {
@@ -1440,6 +1600,8 @@ export default function CaptureLab() {
           state.absentSince = null
           setAutoDisarmed(false)
           setCaptureNote('')
+          setHoldHint('')
+          liveScheduleRef.current?.(0)
         }
       }
       return
@@ -1452,6 +1614,7 @@ export default function CaptureLab() {
         state.captureCorners = null
         setAutoDisarmed(false)
         setCaptureNote('')
+        liveScheduleRef.current?.(0)
       }
       return
     }
@@ -1549,7 +1712,14 @@ export default function CaptureLab() {
       // Geometry and patches stay with the tracker; the model only refreshes
       // the shape anchor, and the model is still the authority on sharpness.
       tentativeRef.current = null
-      if (result.usable) tracker.refreshAnchor(result.corners)
+      if (result.usable) {
+        tracker.refreshAnchor(result.corners)
+        // The detector has just agreed with this geometry: the only evidence
+        // that may later authorise an automatic capture.
+        lastConfirmTsRef.current = now
+        lastConfirmCornersRef.current = result.corners
+        lastConfirmSharpnessRef.current = result.sharpness ?? null
+      }
       // An accepted result earns a brief solid confirmation; a reanchor seed
       // or discard does not.
       if (result.usable) setConfirmPulseUntil(performance.now() + CONFIRM_PULSE_MS)
@@ -1563,7 +1733,13 @@ export default function CaptureLab() {
         try {
           const tentative = createTracker()
           tentative.setReference(sample.gray, sample.width, sample.height, result.corners)
-          tentativeRef.current = { tracker: tentative, hits: 0, misses: 0 }
+          tentativeRef.current = {
+            tracker: tentative,
+            hits: 0,
+            misses: 0,
+            modelCorners: result.corners,
+            sharpness: result.sharpness ?? null,
+          }
           recordDiagEvent('reanchor', { agreement: agreement == null ? null : Number(agreement.toFixed(4)) })
           startTrackerLoop()
         } catch {
@@ -1597,7 +1773,16 @@ export default function CaptureLab() {
     }
 
     evaluateAutoCapture(result)
-    liveScheduleRef.current?.(Math.max(LIVE_MIN_INTERVAL_MS, 2 * message.ms))
+    // A capture waiting on stale geometry retries as soon as this result lands.
+    pendingCaptureRetryRef.current?.(true)
+    // Hunting (no usable card) is latency-bound: start the next look as soon as
+    // inference ends. A usable card keeps the relaxed cadence because the
+    // tracker carries the outline and the phone should not burn in the meantime.
+    const detectMs = Number.isFinite(message.ms) ? message.ms : 0
+    const nextDelay = result.usable
+      ? Math.max(LIVE_MIN_INTERVAL_MS, 2 * detectMs)
+      : Math.max(LIVE_MIN_INTERVAL_MS, detectMs + HUNT_GAP_MS)
+    liveScheduleRef.current?.(nextDelay)
   }
 
   const drawLiveFrame = () => {
@@ -1617,9 +1802,10 @@ export default function CaptureLab() {
   const runLiveDetection = async () => {
     if (!liveDetectionRef.current || liveInFlightRef.current || status !== 'live') return
 
-    // With no card tracked and a static scene, inference is pure cost: park the
-    // loop and let the motion ticker or the idle heartbeat wake it again.
-    if (!liveResultRef.current?.usable) {
+    // Auto-capture is always hunting for the next card, so never park in that
+    // mode: holding a new card still is exactly what a parked loop waits for.
+    // The idle optimisation remains for auto-off sessions with no card in view.
+    if (!autoCaptureRef.current && !liveResultRef.current?.usable) {
       const motion = motionScoreRef.current
       const heartbeatDue = lastDetectionAtRef.current == null
         || performance.now() - lastDetectionAtRef.current >= IDLE_HEARTBEAT_MS
@@ -1777,6 +1963,9 @@ export default function CaptureLab() {
           tentative.misses = 0
           if (evaluateTentative(tentative) === 'adopt') {
             trackerRef.current = tentative.tracker
+            lastConfirmTsRef.current = performance.now()
+            lastConfirmCornersRef.current = tentative.modelCorners
+            lastConfirmSharpnessRef.current = tentative.sharpness
             tentativeRef.current = null
             trackedQuadRef.current = tentativeQuad
             trackerFailuresRef.current = 0
@@ -1898,6 +2087,7 @@ export default function CaptureLab() {
   autoFireRef.current = fireAutoCaptureIfDue
   liveLoopRef.current = runLiveDetection
   liveScheduleRef.current = delay => {
+    liveScheduleMsRef.current = delay
     window.clearTimeout(liveTimerRef.current)
     liveTimerRef.current = window.setTimeout(() => liveLoopRef.current?.(), delay)
   }
@@ -1918,6 +2108,7 @@ export default function CaptureLab() {
     setLiveDetection(true)
     setDetectorError('')
     setCaptureNote('')
+    setHoldHint('')
     setAutoHoldStartTs(null)
     autoStateRef.current = newAutoState()
     motionLastGrayRef.current = null
@@ -1939,6 +2130,11 @@ export default function CaptureLab() {
     if (!enabled) {
       setAutoDisarmed(false)
       setCaptureNote('')
+      setHoldHint('')
+    } else {
+      // Hunting starts now; never leave auto mode parked.
+      liveParkedRef.current = false
+      liveScheduleRef.current?.(0)
     }
   }
 
@@ -2356,6 +2552,7 @@ export default function CaptureLab() {
                 ) : null}
               </>
             ) : null}
+            {holdHint ? <p className="mt-1 text-xs text-yellow">{holdHint}</p> : null}
             {captureNote ? <p className="mt-1 text-text-muted">{captureNote}</p> : null}
           </div>
         ) : null}

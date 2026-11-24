@@ -6,15 +6,17 @@ import assert from 'node:assert/strict'
 import {
   CAPTURE_MODEL_MAX_AGE_MS,
   CAPTURE_QUAD_MAX_AGE_MS,
+  cornerAgreement,
   createTracker,
   derivePhase,
   evaluateTentative,
+  isCorroborated,
   isPatchMatchAcceptable,
   shouldAcceptCapture,
   shouldKeepTracking,
   TRACK_LOST_AFTER,
 } from '../src/utils/cornerTracker.js'
-import { autoHoldDecision } from '../src/utils/autoHold.js'
+import { autoHoldDecision, AUTO_DRIFT_WINDOW_MS } from '../src/utils/autoHold.js'
 
 const width = 160
 const height = 160
@@ -219,53 +221,50 @@ assert.equal(isPatchMatchAcceptable(676, 300), false)
   assert.deepEqual(derivePhase({ hasModel: false }), { phase: 'none', reason: 'no-quad' })
 }
 
-// Auto-capture hold rule: the user holds a card still, they do not freeze a
-// camera. Slow per-step drift must keep the window open; a single fast step, a
-// large jump, or a slow pan that adds up past the total cap must cancel it.
+// Auto-capture hold: judge smoothness over a rolling window so tracker jitter
+// and slow creep survive while sustained displacement cancels.
 {
   const quadAt = dx => [
-    [0.2 + dx, 0.2],
-    [0.8 + dx, 0.2],
-    [0.8 + dx, 0.8],
-    [0.2 + dx, 0.8],
+    [0.2 + dx, 0.2], [0.8 + dx, 0.2], [0.8 + dx, 0.8], [0.2 + dx, 0.8],
   ]
   const anchor = quadAt(0)
-  const decide = (lastCorners, corners, now, lastQualifyingTs = now - 100) => (
-    autoHoldDecision({
-      anchorCorners: anchor,
-      lastCorners,
-      corners,
-      now,
-      lastQualifyingTs,
-    })
-  )
-
-  // 0.5 % of the frame per observation, once per 100 ms, for 1.2 s: 6 % total.
-  for (let i = 1; i <= 12; i += 1) {
-    assert.equal(
-      decide(quadAt(0.005 * (i - 1)), quadAt(0.005 * i), i * 100).action,
-      'keep',
-      `0.5% step ${i} must keep the window`,
-    )
+  const run = (deltas, stepMs) => {
+    let last = anchor
+    const history = [{ corners: anchor, t: 0 }]
+    let t = 0
+    let decision = null
+    for (const dx of deltas) {
+      t += stepMs
+      const corners = quadAt(dx)
+      decision = autoHoldDecision({
+        anchorCorners: anchor,
+        lastCorners: last,
+        corners,
+        now: t,
+        lastQualifyingTs: t - stepMs,
+        history,
+      })
+      history.push({ corners, t })
+      const cutoff = t - AUTO_DRIFT_WINDOW_MS
+      while (history.length > 0 && history[0].t < cutoff) history.shift()
+      last = corners
+    }
+    return decision
   }
 
-  // A 6 % single step is a deliberate move, not drift.
-  assert.equal(decide(anchor, quadAt(0.06), 100).reason, 'jump')
-  // 2 % is still above the per-step allowance even though it is no jump.
-  assert.equal(decide(anchor, quadAt(0.02), 100).reason, 'step')
+  // Ten observations of ±2 % jitter inside 500 ms: ordinary tremor keeps it.
+  const jitter = Array.from({ length: 10 }, (_, i) => (i % 3 === 0 ? 0.02 : i % 2 === 0 ? 0.01 : 0))
+  assert.equal(run(jitter, 50).action, 'keep')
+  // 1 %/frame creep for 1.2 s stays below the total cap.
+  assert.equal(run([0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07], 200).action, 'keep')
+  // 4 % inside 200 ms is sustained movement, not jitter.
+  assert.equal(run([0.04], 200).reason, 'drift')
+  // 8 % in one step is a discontinuity.
+  assert.equal(run([0.08], 100).reason, 'jump')
+  // 20 % total, built from plausible steps, hits the total cap.
+  assert.equal(run([0.04, 0.08, 0.12, 0.16, 0.2], 100).reason, 'total')
 
-  // A slow pan: 1 % per step never trips the step rule but adds up to 11 % of
-  // the frame by the eleventh observation, so the total cap must close it.
-  let lastPan = anchor
-  let panDecision = null
-  for (let i = 1; i <= 12; i += 1) {
-    panDecision = decide(lastPan, quadAt(0.01 * i), i * 100)
-    lastPan = quadAt(0.01 * i)
-    if (panDecision.action === 'restart') break
-  }
-  assert.equal(panDecision.reason, 'total')
-
-  // No window yet, and a stalled detection loop (gap) both restart the clock.
+  // No window yet, and a stalled loop, both restart the clock.
   assert.equal(
     autoHoldDecision({
       anchorCorners: null,
@@ -276,9 +275,18 @@ assert.equal(isPatchMatchAcceptable(676, 300), false)
     }).action,
     'start',
   )
-  assert.equal(decide(anchor, anchor, 2000, 0).reason, 'gap')
+  assert.equal(
+    autoHoldDecision({
+      anchorCorners: anchor,
+      lastCorners: anchor,
+      corners: anchor,
+      now: 2000,
+      lastQualifyingTs: 0,
+      history: [{ corners: anchor, t: 0 }],
+    }).reason,
+    'gap',
+  )
 }
-
 // Capture geometry may not outlive the frame it is applied to. A stale tracked
 // quad is a rejection, not a fallback to the model; the model is only usable
 // when no tracked quad exists at all.
@@ -316,6 +324,38 @@ assert.equal(isPatchMatchAcceptable(676, 300), false)
   assert.deepEqual(
     shouldAcceptCapture({ hasTracked: false, modelAgeMs: null }),
     { ok: false, reason: 'stale-model', source: 'model' },
+  )
+  assert.deepEqual(
+    shouldAcceptCapture({ hasTracked: false, modelAgeMs: 10, modelUsable: false }),
+    { ok: false, reason: 'model-unusable', source: 'model' },
+  )
+}
+
+// Automatic capture requires recent detector corroboration of the geometry.
+{
+  assert.equal(
+    isCorroborated({ lastConfirmTs: 1000, now: 1500, quadAgreement: 0.02 }),
+    true,
+  )
+  assert.equal(
+    isCorroborated({ lastConfirmTs: 1000, now: 2600, quadAgreement: 0.02 }),
+    false,
+  )
+  assert.equal(
+    isCorroborated({ lastConfirmTs: null, now: 1000, quadAgreement: 0 }),
+    false,
+  )
+  assert.equal(
+    isCorroborated({ lastConfirmTs: 1000, now: 1200, quadAgreement: 0.15 }),
+    true,
+  )
+  assert.equal(
+    isCorroborated({ lastConfirmTs: 1000, now: 1200, quadAgreement: 0.35 }),
+    false,
+  )
+  assert.equal(
+    isCorroborated({ lastConfirmTs: 1000, now: 1200, quadAgreement: null }),
+    false,
   )
 }
 

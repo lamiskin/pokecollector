@@ -22,6 +22,12 @@ export const TRACK_LOST_AFTER = 8
 export const TRACK_KEEP_MS = 700
 // Corner agreement as a fraction of the frame (normalized coordinate distance).
 export const TRACK_AGREE_MAX = 0.06
+// Corroboration asks "is this the same object", not "is this the same quad".
+// Model and tracker routinely disagree by ~7 % of frame while both are looking
+// at one card, so the tight keep-threshold would refuse half of legitimate
+// captures. This limit only needs to separate "same card, drifted a little"
+// from "a different region entirely".
+export const CAPTURE_CORROBORATE_MAX_AGREE = 0.2
 // A tracked quad younger than this still owns the overlay phase.
 export const TRACK_PHASE_MAX_AGE_MS = 1000
 // A tentative re-anchor must produce two clean tracks before it replaces the
@@ -33,6 +39,9 @@ export const TENTATIVE_MAX_MISSES = 2
 // tracked quad exists at all.
 export const CAPTURE_QUAD_MAX_AGE_MS = 120
 export const CAPTURE_MODEL_MAX_AGE_MS = 500
+// An automatic capture needs the detector itself to have confirmed the geometry
+// recently; a quad carried only by the tracker is not enough.
+export const CAPTURE_CORROBORATE_MS = 1500
 export const MAX_FRAME_MOVE = 0.12
 // Relative score gate: accept a match only if it explains a useful share of the
 // patch's own variance, with a small absolute floor for low-signal patches.
@@ -134,17 +143,39 @@ export function derivePhase({
 
 // Pure decision for the capture path: which quad, if any, is tied closely
 // enough to the frame about to be drawn.
-export function shouldAcceptCapture({ hasTracked = false, trackedAgeMs = null, modelAgeMs = null }) {
+export function shouldAcceptCapture({
+  hasTracked = false,
+  trackedAgeMs = null,
+  modelAgeMs = null,
+  modelUsable = true,
+} = {}) {
   if (hasTracked) {
     if (trackedAgeMs == null || trackedAgeMs > CAPTURE_QUAD_MAX_AGE_MS) {
       return { ok: false, reason: 'stale-tracked', source: 'tracked' }
     }
     return { ok: true, reason: 'ok', source: 'tracked' }
   }
+  if (!modelUsable) {
+    return { ok: false, reason: 'model-unusable', source: 'model' }
+  }
   if (modelAgeMs == null || modelAgeMs > CAPTURE_MODEL_MAX_AGE_MS) {
     return { ok: false, reason: 'stale-model', source: 'model' }
   }
   return { ok: true, reason: 'ok', source: 'model' }
+}
+
+// True when the detector confirmed a geometry recently and that confirmation
+// still agrees with the quad about to be captured.
+export function isCorroborated({
+  lastConfirmTs,
+  now,
+  quadAgreement,
+  maxAgeMs = CAPTURE_CORROBORATE_MS,
+  maxAgreement = CAPTURE_CORROBORATE_MAX_AGREE,
+} = {}) {
+  if (lastConfirmTs == null) return false
+  if (now - lastConfirmTs > maxAgeMs) return false
+  return quadAgreement != null && quadAgreement <= maxAgreement
 }
 
 function pixelQuadArea(flat) {
