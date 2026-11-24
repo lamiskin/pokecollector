@@ -153,7 +153,8 @@ back to the `api/recognize.py` and `api/scan_jobs.py` routers.
 - **Sync / catalogue**: `sync_service`, `pokemon_api`, `card_upsert`,
   `card_fallbacks`, `card_metadata`, `card_visibility`, `card_values`,
   `card_numbers`, `price_utils`, `tcgdex_languages`, `digital_sets`,
-  `display_language`.
+  `display_language`, `card_artwork` (shared card-artwork cache key, fetch/store
+  and background warmer).
 - **Pokédex**: `pokedex` (static catalogue), `pokedex_forms`, `pokedex_backfill`,
   `pokedex_images`.
 - **Scanner**: `scan_storage`, `scan_queue`, `scan_trace`, `scan_providers`,

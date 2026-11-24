@@ -355,6 +355,13 @@ handling remain in place. Public artwork can be served by the bounded proxy
 cache described in [BACKEND.md](BACKEND.md#image-caching); private owner photos
 are excluded.
 
+A catalogue frame showing the large proxy paints that printing's small scan
+underneath while the large one loads, then cross-fades the large scan in over
+240 ms (no transition under `prefers-reduced-motion`). The underlay is
+decorative, non-interactive, never the zoom source, and only appears when the
+card records a small scan; owner photos, custom cards, custom-image proxies and
+cards without a small scan keep the previous skeleton.
+
 See [`CARD_SYSTEM.md`](CARD_SYSTEM.md) for usage, design tokens, review guidance, and the contributor-friendly process for proposing a new shared variant.
 
 `CardItem.jsx`, `UnifiedCard.jsx`, and the low-level state components remain implementation details of this public system and should not be imported by feature pages.

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useSettings } from '../contexts/SettingsContext'
 import { getCardVariantEffectClass } from '../utils/cardVariantEffect'
+import { resolveCardArtworkUnderlay } from '../utils/imageUrl'
 import CardImage from './CardImage'
 import HoloEffectOverlay from './HoloEffectOverlay'
 import FallbackBadges from './FallbackBadges'
@@ -124,6 +125,10 @@ export function CardArtworkFrame({
   const kinds = getCardFallbackKinds(card)
   const label = fallbackAriaLabel(t, kinds)
   const resolvedActionLabel = actionLabel || [alt, label].filter(Boolean).join(' · ') || undefined
+  // Derived from the card rather than a caller prop, so every frame that shows
+  // the catalogue large proxy gets the small-scan underlay for free. Compact
+  // thumbnails are single-image surfaces: a second load there is pure cost.
+  const underlayImage = thumbnail ? null : resolveCardArtworkUnderlay(card, image)
 
   return (
     <div
@@ -162,6 +167,7 @@ export function CardArtworkFrame({
             alt={alt}
             className={imageClassName}
             loading={loading}
+            underlaySrc={underlayImage}
             onLoadingChange={onLoadingChange}
             onStatusChange={onImageStatusChange}
             compactError={thumbnail}

@@ -31,6 +31,20 @@
     border-radius: var(--pc-card-art-radius);
     background: var(--color-elevated);
   }
+  /* Paint order, not a new stacking context: the underlay and the shimmer sit
+     below the real image, which is positioned so it paints above them. The
+     error panel keeps its z-index 40 in the frame's context so it still beats
+     the primary action layer (25) — isolating this subtree would trap it. */
+  .unified-card-underlay { z-index: 0; }
+  .unified-card-image-crossfade {
+    position: relative;
+    z-index: 1;
+    transition: opacity 240ms ease-out;
+  }
+  .unified-card-image-name { z-index: 2; }
+  @media (prefers-reduced-motion: reduce) {
+    .unified-card-image-crossfade { transition: none; }
+  }
   .unified-card-action-layer { position: relative; }
   .unified-card-primary-action {
     position: absolute;
