@@ -7,9 +7,12 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 
 from api.auth import get_current_user
-from models import User
+from database import get_db
+from models import ImageCache, User
 from services.postgres_cli import parse_database_url
 
 router = APIRouter()
@@ -193,14 +196,52 @@ async def restore_backup(
                 logger.warning("Could not remove temporary restore file %s", restore_path, exc_info=True)
 
 
+def _image_cache_byte_size(db: Session) -> int | None:
+    """Sum the cached blob sizes in SQL, without loading the blobs.
+
+    PostgreSQL needs ``octet_length`` for ``bytea``; SQLite (tests) only knows
+    ``length``. An unavailable size must not fail the clear operation.
+    """
+    dialect = getattr(getattr(db.get_bind(), "dialect", None), "name", None)
+    size_expression = "octet_length(data)" if dialect == "postgresql" else "length(data)"
+    try:
+        total = db.execute(
+            text(f"SELECT coalesce(sum({size_expression}), 0) FROM image_cache")
+        ).scalar()
+        return int(total or 0)
+    except Exception:
+        logger.warning("Could not measure the image cache size", exc_info=True)
+        db.rollback()
+        return None
+
+
 @router.post("/clear-image-cache")
-def clear_image_cache(current_user: User = Depends(get_current_user)):
-    """Clear the image cache directory (admin only)."""
+def clear_image_cache(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Clear the persisted image cache (admin only).
+
+    Cached card images live in the ``image_cache`` table, not on disk, so the
+    endpoint deletes those rows and reports how many were removed. Any files
+    left under the legacy ``/app/images`` directory are removed as well.
+    """
     if current_user.role != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
+
+    bytes_freed = _image_cache_byte_size(db)
+    deleted = db.query(ImageCache).delete(synchronize_session=False)
+    db.commit()
+
     import shutil
     images_dir = "/app/images"
     if os.path.exists(images_dir):
         shutil.rmtree(images_dir)
         os.makedirs(images_dir, exist_ok=True)
-    return {"message": "Image cache cleared"}
+
+    if bytes_freed is None:
+        message = f"Cleared {deleted} cached image(s)"
+    else:
+        message = f"Cleared {deleted} cached image(s), freed {bytes_freed} bytes"
+    logger.info(message)
+    return {"deleted": deleted, "bytes_freed": bytes_freed, "message": message}

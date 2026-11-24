@@ -23,6 +23,21 @@ class _FakeSession:
     def query(self, _model):
         return self
 
+    def filter(self, *_args, **_kwargs):
+        return self
+
+    def order_by(self, *_args, **_kwargs):
+        return self
+
+    def first(self):
+        return None
+
+    def all(self):
+        return []
+
+    def rollback(self):
+        return None
+
     def count(self):
         return 1
 
@@ -51,7 +66,7 @@ class _LateScanQueueScheduler:
 
 @unittest.skipUnless(DEPS, "backend scheduler dependencies are not installed")
 class SchedulerMisfireTests(unittest.TestCase):
-    def test_only_scan_queue_gets_grace_and_runs_after_a_late_wakeup(self):
+    def test_per_job_misfire_config_and_late_scan_queue_dispatch(self):
         scheduler = _LateScanQueueScheduler()
         calls = []
         completed = threading.Event()
@@ -94,9 +109,16 @@ class SchedulerMisfireTests(unittest.TestCase):
                 scan_job = scheduler.inner.get_job("scan_queue_maintenance_job")
                 self.assertEqual(scan_job.misfire_grace_time, 60)
                 self.assertTrue(scan_job.coalesce)
+                # The full sync tolerates a late wakeup (restart/suspend) because
+                # its cadence is re-derived from sync_log, and only one run may
+                # ever be in flight.
+                full_job = scheduler.inner.get_job("full_sync_job")
                 self.assertEqual(
-                    scheduler.inner.get_job("full_sync_job").misfire_grace_time, 1
+                    full_job.misfire_grace_time,
+                    scheduler_module.FULL_SYNC_MISFIRE_GRACE_SECONDS,
                 )
+                self.assertTrue(full_job.coalesce)
+                self.assertEqual(full_job.max_instances, 1)
                 self.assertEqual(
                     scheduler.inner.get_job("price_sync_job").misfire_grace_time, 1
                 )

@@ -28,6 +28,11 @@ class Set(Base):
     is_new = Column(Boolean, default=False)
     is_digital = Column(Boolean, default=False)
     lang = Column(String, default="en")      # TCGdex language code, NEVER "both"
+    # Set-level artwork sweep bookkeeping (services/artwork_backfill.py): when
+    # this set was last checked for newly published card art, and how many
+    # consecutive checks found nothing (drives the backoff schedule).
+    artwork_checked_at = Column(DateTime, nullable=True)
+    artwork_check_attempts = Column(Integer, nullable=True, default=0)
     updated_at = Column(DateTime, default=func.now())
 
     # Relationship to cards via tcg_set_id (no DB-level FK, joined in Python)

@@ -4,7 +4,8 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Crown, RefreshCw, Download, Upload, Plus, Pencil, Trash2, User, UserCheck, UserX, Zap, Copy, Link2, ShieldCheck, Unlink } from 'lucide-react'
 import {
   getSyncStatus, triggerSync, triggerAllPriceSync, rescheduleFullSync, reschedulePriceSync,
-  downloadBackup, restoreBackup, exportCSV,
+  getArtworkStatus, startArtworkRecheck,
+  downloadBackup, restoreBackup, exportCSV, clearImageCache,
   getSetting, setSetting, getTelegramStatus, saveSettings, setAuthMode,
   getUsers, createUser, updateUser, deleteUser, changePassword, changeAvatar, changeUsername,
   getContributors, getSupporters, getCustomMatches, downloadDebugLog,
@@ -105,6 +106,15 @@ function SelectControl({ value, options, onChange, disabled = false }) {
       ))}
     </select>
   )
+}
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB']
+  const exponent = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1)
+  const value = bytes / (1024 ** exponent)
+  const rounded = exponent === 0 || value >= 10 ? Math.round(value) : value.toFixed(1)
+  return `${rounded} ${units[exponent]}`
 }
 
 function TcgdexLanguageControl({ value, onChange, selectedLabel, fallbackNote }) {
@@ -420,6 +430,14 @@ export default function Settings() {
   const [geminiFallbackSaving, setGeminiFallbackSaving] = useState(false)
   const [thinkingFallbackSaving, setThinkingFallbackSaving] = useState(false)
   const [cardPhotosDeleting, setCardPhotosDeleting] = useState(false)
+  const [cacheClearing, setCacheClearing] = useState(false)
+  const [cacheClearResult, setCacheClearResult] = useState(null)
+  const [sweepPhase, setSweepPhase] = useState('idle')
+  const [sweepError, setSweepError] = useState('')
+  const [sweepResult, setSweepResult] = useState(null)
+  const sweepBaselineRef = useRef(null)
+  const sweepSeenRunningRef = useRef(false)
+  const sweepIdlePollsRef = useRef(0)
 
   // Recurring automatic full sync interval (days) and small price sync interval (minutes).
   const [fullSyncIntervalDays, setFullSyncIntervalDays] = useState('5')
@@ -524,6 +542,48 @@ export default function Settings() {
     queryFn: () => getSyncStatus().then((r) => r.data),
     refetchInterval: 10000,
   })
+
+  const { data: artworkStatus, dataUpdatedAt: artworkStatusUpdatedAt, isLoading: artworkStatusLoading, isError: artworkStatusError } = useQuery({
+    queryKey: ['artwork-status'],
+    queryFn: getArtworkStatus,
+    enabled: user?.role === 'admin',
+    // Poll only while a sweep is active (started here or elsewhere).
+    refetchInterval: (query) => (query.state.data?.running || sweepPhase === 'running' ? 2500 : false),
+  })
+
+  // A sweep runs in the background and only reports `running` plus refreshed
+  // counters, so completion is inferred from the running flag or a new
+  // lastSweepAt timestamp. Four idle polls (~10 s) cover a sweep that finishes
+  // before the first poll observes it.
+  useEffect(() => {
+    if (sweepPhase !== 'running' || !artworkStatus) return
+    if (artworkStatus.running) {
+      sweepSeenRunningRef.current = true
+      sweepIdlePollsRef.current = 0
+      return
+    }
+    const baseline = sweepBaselineRef.current
+    const sweepTimeChanged = Boolean(
+      baseline?.lastSweepAt && artworkStatus.lastSweepAt !== baseline.lastSweepAt,
+    )
+    if (sweepTimeChanged || sweepSeenRunningRef.current) {
+      finishArtworkSweep(artworkStatus)
+      return
+    }
+    sweepIdlePollsRef.current += 1
+    if (sweepIdlePollsRef.current >= 4) finishArtworkSweep(artworkStatus)
+  }, [artworkStatus, artworkStatusUpdatedAt, sweepPhase])
+
+  useEffect(() => {
+    if (!artworkStatusError || sweepPhase !== 'running') return
+    // A transient status failure can recover on the next poll; give the query a
+    // few retries before unlocking the action with an explanation.
+    const timeoutId = setTimeout(() => {
+      setSweepPhase('idle')
+      setSweepError(t('settings.artworkStatusError'))
+    }, 15000)
+    return () => clearTimeout(timeoutId)
+  }, [artworkStatusError, sweepPhase])
 
   const { data: customMatches = [] } = useQuery({
     queryKey: ['custom-matches'],
@@ -821,6 +881,63 @@ export default function Settings() {
     }
   }
 
+  const finishArtworkSweep = (status) => {
+    const baseline = sweepBaselineRef.current
+    const cardsFixed = baseline && Number.isFinite(baseline.imagelessCards) && Number.isFinite(status.imagelessCards)
+      ? Math.max(0, baseline.imagelessCards - status.imagelessCards)
+      : null
+    setSweepResult({ cardsFixed, imagelessCards: status.imagelessCards ?? null })
+    setSweepPhase('done')
+    sweepBaselineRef.current = null
+  }
+
+  const handleArtworkRecheck = async () => {
+    setSweepError('')
+    setSweepResult(null)
+    sweepBaselineRef.current = artworkStatus
+      ? { imagelessCards: artworkStatus.imagelessCards, lastSweepAt: artworkStatus.lastSweepAt }
+      : null
+    sweepSeenRunningRef.current = false
+    sweepIdlePollsRef.current = 0
+    setSweepPhase('running')
+    try {
+      const data = await startArtworkRecheck()
+      if (!data?.started) {
+        setSweepPhase('idle')
+        setSweepError(data?.reason || t('settings.artworkRecheckBusy'))
+        return
+      }
+      queryClient.invalidateQueries({ queryKey: ['artwork-status'] })
+    } catch (err) {
+      setSweepPhase('idle')
+      setSweepError(err.response?.data?.detail || t('settings.artworkRecheckFailed'))
+    }
+  }
+
+  const handleClearImageCache = async () => {
+    const confirmed = await confirmDialog({
+      title: t('settings.clearImageCache'),
+      message: t('settings.clearImageCacheConfirm'),
+      confirmLabel: t('common.clear'),
+      destructive: true,
+    })
+    if (!confirmed) return
+    setCacheClearing(true)
+    try {
+      const data = await clearImageCache()
+      const bytes = data?.bytes_freed == null ? null : Number(data.bytes_freed)
+      setCacheClearResult({
+        deleted: Number(data?.deleted) || 0,
+        bytes: Number.isFinite(bytes) ? bytes : null,
+      })
+      toast.success(t('settings.clearImageCacheSuccess'))
+    } catch (err) {
+      toast.error(err.response?.data?.detail || t('settings.clearImageCacheFailed'))
+    } finally {
+      setCacheClearing(false)
+    }
+  }
+
   const handleAdminBooleanSettingToggle = async (key, enabled) => {
     try {
       await updateSettings({ [key]: enabled ? 'true' : 'false' })
@@ -1012,6 +1129,14 @@ export default function Settings() {
   const lastFullSyncDescription = syncStatus?.last_full_sync?.status === 'error'
     ? `${t('settings.lastSyncFailed')} ${lastFullSyncText}${syncStatus.last_full_sync.error_message ? `: ${syncStatus.last_full_sync.error_message}` : ''}`
     : lastFullSyncText
+
+  const lastArtworkSweepText = artworkStatus?.lastSweepAt
+    ? formatDistanceToNow(new Date(artworkStatus.lastSweepAt), { addSuffix: true })
+    : t('settings.artworkNeverChecked')
+  const lastArtworkSweepTitle = artworkStatus?.lastSweepAt
+    ? new Date(artworkStatus.lastSweepAt).toLocaleString()
+    : undefined
+  const artworkBusy = sweepPhase === 'running' || Boolean(artworkStatus?.running)
 
   return (
     <div className="space-y-6 py-6">
@@ -1682,6 +1807,124 @@ export default function Settings() {
             </SettingsCard>
           </section>
 
+          {/* ── CARD ARTWORK ── */}
+          <section className="space-y-1">
+            <SectionHeader title={t('settings.sectionArtwork')} />
+            <SettingsCard>
+              <div className="px-4 py-3.5" style={{ borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                {artworkStatusError ? (
+                  <p className="text-xs" style={{ color: '#ef4444' }}>{t('settings.artworkStatusError')}</p>
+                ) : (
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
+                    <div
+                      className="rounded-xl px-3 py-2.5"
+                      style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.05)' }}
+                    >
+                      <p className="text-[10px] font-black uppercase tracking-[0.14em] text-text-muted">
+                        {t('settings.artworkCardsMissing')}
+                      </p>
+                      <p className="text-xl font-black text-text-primary mt-1 tabular-nums">
+                        {artworkStatusLoading ? '—' : (artworkStatus?.imagelessCards ?? '—')}
+                      </p>
+                      <p className="text-[11px] text-text-muted mt-0.5">
+                        {artworkStatus?.imagelessSets != null
+                          ? `${artworkStatus.imagelessSets} ${t('settings.artworkSetsAffected')}`
+                          : '\u00a0'}
+                      </p>
+                    </div>
+                    <div
+                      className="rounded-xl px-3 py-2.5"
+                      style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.05)' }}
+                    >
+                      <p className="text-[10px] font-black uppercase tracking-[0.14em] text-text-muted">
+                        {t('settings.artworkSetsPending')}
+                      </p>
+                      <p className="text-xl font-black text-text-primary mt-1 tabular-nums">
+                        {artworkStatusLoading ? '—' : (artworkStatus?.pendingSets ?? '—')}
+                      </p>
+                      <p className="text-[11px] text-text-muted mt-0.5">
+                        {artworkStatus?.dueSets != null
+                          ? `${artworkStatus.dueSets} ${t('settings.artworkSetsDue')}`
+                          : '\u00a0'}
+                      </p>
+                    </div>
+                    <div
+                      className="col-span-2 sm:col-span-1 rounded-xl px-3 py-2.5"
+                      style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.05)' }}
+                    >
+                      <p className="text-[10px] font-black uppercase tracking-[0.14em] text-text-muted">
+                        {t('settings.artworkLastCheck')}
+                      </p>
+                      <p className="text-base font-bold text-text-primary mt-1.5" title={lastArtworkSweepTitle}>
+                        {artworkStatusLoading ? '—' : lastArtworkSweepText}
+                      </p>
+                    </div>
+                  </div>
+                )}
+                <p className="text-[11px] text-text-muted mt-3 leading-relaxed">
+                  {t('settings.artworkWhyMissing')}
+                </p>
+              </div>
+
+              <SettingsRow label={t('settings.artworkRefresh')} description={t('settings.artworkRefreshDesc')}>
+                <button
+                  onClick={handleArtworkRecheck}
+                  disabled={artworkBusy}
+                  aria-busy={artworkBusy}
+                  className="flex items-center justify-center gap-1.5 w-full sm:w-auto text-xs font-semibold px-3 py-1.5 rounded-lg transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
+                  style={{ background: 'rgba(227,0,11,0.15)', color: '#e3000b', border: '1px solid rgba(227,0,11,0.3)' }}
+                >
+                  <RefreshCw size={13} className={artworkBusy ? 'animate-spin' : ''} />
+                  {artworkBusy ? t('settings.artworkRefreshBusy') : t('settings.artworkRefresh')}
+                </button>
+              </SettingsRow>
+
+              {(artworkBusy || sweepError || sweepResult) && (
+                <div className="-mt-1 px-4 pb-3.5 text-[11px] leading-relaxed" aria-live="polite">
+                  {sweepError && <p style={{ color: '#ef4444' }}>{sweepError}</p>}
+                  {artworkBusy && (
+                    <p className="flex items-center gap-1.5 text-text-muted">
+                      <RefreshCw size={11} className="animate-spin" />
+                      {t('settings.artworkSweepRunning')}
+                    </p>
+                  )}
+                  {!artworkBusy && sweepResult && (
+                    <p className="text-text-muted">
+                      {sweepResult.cardsFixed == null
+                        ? t('settings.artworkSweepFinished')
+                        : sweepResult.cardsFixed > 0
+                          ? `${sweepResult.cardsFixed} ${sweepResult.cardsFixed === 1 ? t('settings.artworkCardSingular') : t('settings.artworkCardPlural')} ${t('settings.artworkSweepGained')}.`
+                          : t('settings.artworkSweepNoNew')}
+                      {sweepResult.imagelessCards != null && (
+                        <> {`${sweepResult.imagelessCards} ${sweepResult.imagelessCards === 1 ? t('settings.artworkCardSingular') : t('settings.artworkCardPlural')} ${t('settings.artworkStillMissing')}`}</>
+                      )}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              <SettingsRow label={t('settings.clearImageCache')} description={t('settings.clearImageCacheDesc')} last>
+                <div className="flex flex-col items-stretch sm:items-end gap-1.5">
+                  <button
+                    onClick={handleClearImageCache}
+                    disabled={cacheClearing}
+                    className="flex items-center justify-center gap-1.5 w-full sm:w-auto text-xs font-semibold px-3 py-1.5 rounded-lg transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
+                    style={{ background: 'rgba(239,68,68,0.12)', color: '#ef4444', border: '1px solid rgba(239,68,68,0.25)' }}
+                  >
+                    <Trash2 size={13} />
+                    {cacheClearing ? t('settings.clearImageCacheClearing') : t('settings.clearImageCache')}
+                  </button>
+                  {cacheClearResult && (
+                    <p className="text-[11px] text-text-muted text-left sm:text-right">
+                      {t('settings.clearImageCacheRemoved')} {cacheClearResult.deleted} {t('settings.clearImageCacheImages')}
+                      {cacheClearResult.bytes != null ? ` · ${formatBytes(cacheClearResult.bytes)} ${t('settings.clearImageCacheFreed')}` : ''}
+                    </p>
+                  )}
+                </div>
+              </SettingsRow>
+            </SettingsCard>
+          </section>
+
           {/* ── 5. DATEN ── */}
           <section className="space-y-1">
             <SectionHeader title={t('settings.sectionData')} />
@@ -1700,29 +1943,6 @@ export default function Settings() {
                   </div>
                 </SettingsRow>
               )}
-              <SettingsRow label={t('settings.clearImageCache')} description={t('settings.clearImageCacheDesc')}>
-                <button
-                  onClick={async () => {
-                    const confirmed = await confirmDialog({
-                      title: t('settings.clearImageCache'),
-                      message: t('settings.clearImageCacheConfirm'),
-                      confirmLabel: t('common.clear'),
-                      destructive: true,
-                    })
-                    if (!confirmed) return
-                    try {
-                      await api.post('/backup/clear-image-cache')
-                      toast.success(t('settings.clearImageCacheSuccess'))
-                    } catch {
-                      toast.error(t('settings.clearImageCacheFailed'))
-                    }
-                  }}
-                  className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-lg transition-opacity"
-                  style={{ background: 'rgba(239,68,68,0.12)', color: '#ef4444', border: '1px solid rgba(239,68,68,0.25)' }}
-                >
-                  🗑️ {t('settings.clearImageCache')}
-                </button>
-              </SettingsRow>
               <SettingsRow label={t('settings.csvExport')} description={t('settings.csvExportDesc')}>
                 <button
                   onClick={handleCsvExport}

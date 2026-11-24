@@ -243,3 +243,50 @@ def get_sync_status(
         "last_jp_price_sync": _sync_log_payload(last_jp_price_sync),
         "history": history,
     }
+
+
+@router.get("/artwork-status")
+def get_artwork_status(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Artwork sweep status: artwork gaps, due sets and last run. Admin only."""
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    from services.artwork_backfill import artwork_status
+
+    return artwork_status(db)
+
+
+@router.post("/artwork-recheck")
+def trigger_artwork_recheck(
+    background_tasks: BackgroundTasks,
+    body: dict | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Recheck set artwork now. Body: {"setIds": [...], "limit": 40}. Admin only."""
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    from services.artwork_backfill import is_sweep_running, run_artwork_sweep
+
+    if is_sweep_running():
+        return {"started": False, "reason": "Artwork sweep already running"}
+
+    body = body or {}
+    set_ids = [str(sid) for sid in (body.get("setIds") or []) if sid] or None
+    limit = body.get("limit")
+    if limit is not None:
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="limit must be an integer")
+
+    def run_sweep():
+        try:
+            run_artwork_sweep(limit=limit, set_ids=set_ids, force=True)
+        except Exception:
+            logger.exception("Background artwork sweep failed")
+
+    background_tasks.add_task(run_sweep)
+    return {"started": True, "status": "started"}

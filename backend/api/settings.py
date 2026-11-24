@@ -161,12 +161,16 @@ ADMIN_ONLY_KEYS = {
     "cross_language_price_fallback", "cross_language_image_fallback",
     DIGITAL_SETS_SETTING_KEY,
     PUBLIC_PROFILES_SETTING_KEY,
+    # Read directly by services/scheduler.py and services/artwork_backfill.py.
+    "artwork_sweep_interval_hours", "artwork_sweep_batch_size",
 }
 
 DEFAULT_SETTINGS = {
     "trainer_name": "TRAINER",
     "full_sync_interval_days": "5",
     "price_sync_interval_minutes": "30",
+    "artwork_sweep_interval_hours": "6",
+    "artwork_sweep_batch_size": "40",
     "telegram_enabled": "false",
     "telegram_chat_id": "",
     "price_alerts_enabled": "false",
@@ -210,6 +214,14 @@ def _coerce_setting_value(key: str, value) -> str:
         SCANNER_GEMINI_FALLBACK_SETTING_KEY, SCANNER_THINKING_FALLBACK_SETTING_KEY,
     }:
         return "true" if str(value).lower() in {"true", "1", "yes", "on"} else "false"
+    if key in ("artwork_sweep_interval_hours", "artwork_sweep_batch_size"):
+        try:
+            parsed = int(str(value).strip())
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail=f"{key} must be a positive integer")
+        if parsed < 1:
+            raise HTTPException(status_code=422, detail=f"{key} must be a positive integer")
+        return str(parsed)
     if key == "portfolio_display_mode":
         normalized = str(value).strip().lower()
         if normalized not in {"portfolio_value", "capital_invested"}:

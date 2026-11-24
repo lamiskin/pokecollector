@@ -389,6 +389,8 @@ export const triggerSync = () => api.post('/sync/')
 export const triggerPriceSync = () => api.post('/sync/prices')
 export const triggerAllPriceSync = () => api.post('/sync/prices/all')
 export const getSyncStatus = () => api.get('/sync/status')
+export const getArtworkStatus = () => api.get('/sync/artwork-status').then(r => r.data)
+export const startArtworkRecheck = (params = {}) => api.post('/sync/artwork-recheck', params).then(r => r.data)
 export const rescheduleFullSync = (intervalDays) => api.post('/sync/reschedule-full', { interval_days: intervalDays })
 export const reschedulePriceSync = (intervalMinutes) => api.post('/sync/reschedule-prices', { interval_minutes: intervalMinutes })
 
@@ -471,6 +473,7 @@ export const downloadBackup = (include = 'full') => {
     window.URL.revokeObjectURL(url)
   })
 }
+export const clearImageCache = () => api.post('/backup/clear-image-cache').then(r => r.data)
 export const restoreBackup = (file) => {
   const formData = new FormData()
   formData.append('file', file)

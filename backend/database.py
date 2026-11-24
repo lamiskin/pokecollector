@@ -697,6 +697,12 @@ def _run_migrations(conn):
         "ALTER TABLE cards ADD COLUMN IF NOT EXISTS price_jpy_updated_at TIMESTAMP",
         "ALTER TABLE cards ADD COLUMN IF NOT EXISTS price_jpy_eur_equivalent DOUBLE PRECISION",
         "ALTER TABLE cards ADD COLUMN IF NOT EXISTS manual_value_override DOUBLE PRECISION",
+        # v64: Set-level artwork sweep bookkeeping. Card art TCGdex publishes
+        # after a card was synced is picked up by services/artwork_backfill.py,
+        # which records when each set was last checked and how many consecutive
+        # checks found nothing (backoff).
+        "ALTER TABLE sets ADD COLUMN IF NOT EXISTS artwork_checked_at TIMESTAMP",
+        "ALTER TABLE sets ADD COLUMN IF NOT EXISTS artwork_check_attempts INTEGER DEFAULT 0",
     ]
     for stmt in migrations:
         try:
