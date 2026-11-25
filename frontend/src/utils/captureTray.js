@@ -90,30 +90,50 @@ export const CAPTURE_GEOMETRY_SPACE = 'crop-normalized'
 
 const clampUnit = value => Math.min(1, Math.max(0, value))
 
-// Frame-normalized quad -> crop-relative quad, using the same integer rect the
-// capture encoded. Points are clamped to the crop so the contract's 0..1 range
-// holds even for a corner the video frame itself cut off.
-export function cropQuadFromFrame(quad, rect) {
+// Unit contract, deliberately explicit because these two spaces are easy to
+// confuse when the caller holds both:
+//   quad  — frame-normalised, 0..1 across the whole video frame (what the
+//           tracker and detector produce).
+//   rect  — native frame pixels, as acquireVideoFrame returns it.
+//   frame — native frame pixels ({ width, height }), required: without it there
+//           is no way to turn normalised corners into pixels, so a mixed-unit
+//           call fails closed instead of sending a collapsed quad.
+// The result is crop-relative, 0..1 across `rect`. Points are clamped to the
+// crop so the contract's 0..1 range holds even for a corner the video frame
+// itself cut off; a quad with no overlap at all is a different capture, not a
+// clamped one, and returns null.
+export function cropQuadFromFrame(quad, rect, frame) {
   if (!Array.isArray(quad) || quad.length !== 4) return null
-  if (!rect) return null
+  if (!rect || !frame) return null
   const { x, y, width, height } = rect
   if (![x, y, width, height].every(Number.isFinite)) return null
   if (!(width > 0) || !(height > 0)) return null
-  const points = []
+  const frameWidth = frame.width
+  const frameHeight = frame.height
+  if (!(frameWidth > 0) || !(frameHeight > 0)) return null
+  const pixels = []
   for (const point of quad) {
     if (!Array.isArray(point) || point.length !== 2) return null
-    const [px, py] = point
-    if (!Number.isFinite(px) || !Number.isFinite(py)) return null
-    points.push([
-      clampUnit((px - x) / width),
-      clampUnit((py - y) / height),
-    ])
+    const [u, v] = point
+    if (!Number.isFinite(u) || !Number.isFinite(v)) return null
+    pixels.push([u * frameWidth, v * frameHeight])
   }
-  return points
+  const xs = pixels.map(([px]) => px)
+  const ys = pixels.map(([, py]) => py)
+  const overlaps = Math.max(...xs) > x
+    && Math.min(...xs) < x + width
+    && Math.max(...ys) > y
+    && Math.min(...ys) < y + height
+  if (!overlaps) return null
+  return pixels.map(([px, py]) => [
+    clampUnit((px - x) / width),
+    clampUnit((py - y) / height),
+  ])
 }
 
-// Inverse of cropQuadFromFrame, in the crop rect's own pixel space. Exported so
-// the provenance check can prove the mapping round-trips.
+// Inverse of cropQuadFromFrame: crop-relative quad -> frame pixels. Takes no
+// frame size because the rect already carries pixels. Exported so the
+// provenance check can prove the mapping round-trips.
 export function frameQuadFromCrop(cropQuad, rect) {
   if (!Array.isArray(cropQuad) || cropQuad.length !== 4) return null
   if (!rect) return null
@@ -124,9 +144,12 @@ export function frameQuadFromCrop(cropQuad, rect) {
 
 // Evidence comes from the same decision and the same acquisition that produced
 // the capture; a caller must not fill these from the live overlay afterwards.
+// `quad` is frame-normalised and `frame` is the native pixel size of the frame
+// it was normalised against; both are required, so mixed units fail closed.
 export function buildCaptureGeometry({
   quad,
   cropRect,
+  frame,
   encodedWidth,
   encodedHeight,
   source,
@@ -138,7 +161,9 @@ export function buildCaptureGeometry({
   quadAspect = null,
   paddingClipped = false,
 } = {}) {
-  const cropQuad = cropQuadFromFrame(quad, cropRect)
+  // `quad` is frame-normalised and `frame` is the native pixel size of the
+  // frame it was normalised against; see cropQuadFromFrame.
+  const cropQuad = cropQuadFromFrame(quad, cropRect, frame)
   if (!cropQuad) return null
   const width = Math.round(Number(encodedWidth))
   const height = Math.round(Number(encodedHeight))

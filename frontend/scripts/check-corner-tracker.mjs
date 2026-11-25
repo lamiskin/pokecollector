@@ -398,13 +398,21 @@ assert.equal(isPatchMatchAcceptable(676, 300), false)
 }
 
 // Candidate containment and card aspect.
+//
+// A card has no required up direction: the collector may hold it portrait or
+// landscape. The gate compares min(r, 1/r), so 63:88 and 88:63 are the same
+// card while a 2:1 or 3:1 region is still refused.
 {
   const portrait = [[0.3, 0.3], [0.57, 0.3], [0.57, 0.7], [0.3, 0.7]]
   assert.equal(isContainableQuad(portrait).ok, true)
   const touching = [[0.3, 0.3], [0.6, 0.3], [0.6, 1], [0.3, 1]]
   assert.equal(isContainableQuad(touching).ok, false)
-  const wide = [[0.2, 0.3], [0.62, 0.3], [0.62, 0.6], [0.2, 0.6]]
-  assert.equal(isContainableQuad(wide).ok, false)
+  // A 2:1 region is not a card in either orientation.
+  const flat = [[0.2, 0.3], [0.8, 0.3], [0.8, 0.6], [0.2, 0.6]]
+  const flatResult = isContainableQuad(flat)
+  assert.equal(flatResult.ok, false)
+  assert.equal(flatResult.check, 'aspect')
+  assert.ok(Math.abs(flatResult.orientationRatio - 0.5) < 1e-9)
 
   // The same normalised geometry means different real aspects per frame; a
   // 63:88 card must pass on both a portrait phone and a landscape webcam.
@@ -415,14 +423,37 @@ assert.equal(isPatchMatchAcceptable(676, 300), false)
     [left / frameWidth, (top + height) / frameHeight],
   ]
   const portraitCard = cardOn(1080, 1920, 100, 200, 300, 419)
-  const landscapeCard = cardOn(1920, 1080, 500, 100, 300, 419)
+  const landscapeFrameCard = cardOn(1920, 1080, 500, 100, 300, 419)
   assert.equal(isContainableQuad(portraitCard, { frame: { width: 1080, height: 1920 } }).ok, true)
-  assert.equal(isContainableQuad(landscapeCard, { frame: { width: 1920, height: 1080 } }).ok, true)
+  assert.equal(isContainableQuad(landscapeFrameCard, { frame: { width: 1920, height: 1080 } }).ok, true)
   assert.ok(Math.abs(quadAspect(portraitCard) - 1.273) < 0.001)
-  assert.equal(isContainableQuad(portraitCard).ok, false)
 
+  // Landing on the confusing pairs from the capture session rather than on
+  // round numbers: a quarter-turned card measures ~1.4 and must pass, because
+  // the gate normalises the orientation before comparing the band.
+  const sidewaysCard = cardOn(1920, 1080, 500, 200, 419, 300)
+  const sideways = isContainableQuad(sidewaysCard, { frame: { width: 1920, height: 1080 } })
+  assert.equal(sideways.ok, true)
+  assert.ok(Math.abs(sideways.quadAspect - (419 / 300)) < 0.01)
+  assert.ok(Math.abs(sideways.orientationRatio - (300 / 419)) < 0.01)
+  assert.equal(sideways.check, null)
+
+  // 2:1 still fails on a real frame, in either orientation.
+  const flatOnFrame = cardOn(1080, 1920, 100, 600, 600, 300)
+  const flatFrameResult = isContainableQuad(flatOnFrame, { frame: { width: 1080, height: 1920 } })
+  assert.equal(flatFrameResult.ok, false)
+  assert.equal(flatFrameResult.check, 'aspect')
+  assert.ok(Math.abs(flatFrameResult.orientationRatio - 0.5) < 1e-9)
   const wideRegion = cardOn(1080, 1920, 100, 500, 864, 768)
   assert.equal(isContainableQuad(wideRegion, { frame: { width: 1080, height: 1920 } }).ok, false)
+
+  // Normalised-only judgement is not a substitute for the frame: the same card
+  // that passes on its landscape frame falls outside the band without it.
+  assert.equal(
+    isContainableQuad(landscapeFrameCard, { frame: { width: 1920, height: 1080 } }).ok,
+    true,
+  )
+  assert.equal(isContainableQuad(landscapeFrameCard).ok, false)
 }
 
 // Automatic capture requires recent detector corroboration of the geometry.

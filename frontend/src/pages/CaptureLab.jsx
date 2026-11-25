@@ -498,11 +498,15 @@ export default function CaptureLab() {
     }
   })
   const [autoDisarmed, setAutoDisarmed] = useState(false)
-  const [holdHint, setHoldHint] = useState('')
   const [autoHoldStartTs, setAutoHoldStartTs] = useState(null)
   const [quadSource, setQuadSource] = useState(null)
   const [captureBeatAt, setCaptureBeatAt] = useState(null)
   const [captureNote, setCaptureNote] = useState('')
+  // Pill copy the ring cannot explain on its own: the cause of the last
+  // automatic refusal, and whether a fresh detection is being requested. The
+  // overlay owns the 900 ms persistence; the page only owns these states.
+  const [captureRefusal, setCaptureRefusal] = useState(null)
+  const [captureRechecking, setCaptureRechecking] = useState(false)
   const [soundOn, setSoundOn] = useState(isCaptureSoundEnabled)
   const [receiptCorners, setReceiptCorners] = useState(null)
   const [dockAnnouncement, setDockAnnouncement] = useState('')
@@ -562,7 +566,6 @@ export default function CaptureLab() {
     state.lastCorners = null
     state.lastQualifyingTs = null
     setAutoHoldStartTs(null)
-    setHoldHint('')
     if (autoFireTimerRef.current != null) {
       window.clearInterval(autoFireTimerRef.current)
       autoFireTimerRef.current = null
@@ -669,7 +672,6 @@ export default function CaptureLab() {
       liveInFlightRef.current = false
       autoStateRef.current = newAutoState()
       setAutoHoldStartTs(null)
-      setHoldHint('')
       liveScheduleRef.current?.(0)
     }
     document.addEventListener('visibilitychange', onVisibility)
@@ -708,6 +710,15 @@ export default function CaptureLab() {
       screen: { width: window.screen?.width ?? null, height: window.screen?.height ?? null },
       detector_runtime: detectorRuntimeActive || detectorRuntime,
       min_card_area: MIN_CARD_AREA,
+      // The automatic-capture gate as it was applied, including that its aspect
+      // band is compared against min(r, 1/r). Without this a refusal log cannot
+      // be read back against the rule that produced it.
+      capture_gate: {
+        edge_min: CAPTURE_EDGE_MIN,
+        aspect_min: CAPTURE_ASPECT_MIN,
+        aspect_max: CAPTURE_ASPECT_MAX,
+        aspect_orientation_normalised: true,
+      },
       // Hold-window thresholds, so a recording can be read against the rule that
       // produced its hold-reset events.
       auto_hold: {
@@ -1005,7 +1016,6 @@ export default function CaptureLab() {
     setConfirmPulseUntil(0)
     setCaptureBeatAt(null)
     setCaptureNote('')
-    setHoldHint('')
     pendingCaptureRetryRef.current?.(false)
     lastConfirmTsRef.current = null
     lastConfirmCornersRef.current = null
@@ -1485,6 +1495,10 @@ export default function CaptureLab() {
         encodedWidth: width,
         encodedHeight: height,
         paddingClipped,
+        // The frame the corners were normalised against, in native pixels. The
+        // geometry mapping needs it to turn 0..1 corners into frame pixels.
+        frameWidth: videoWidth,
+        frameHeight: videoHeight,
         sourceRect: { x: minX, y: minY, width: sourceWidth, height: sourceHeight },
       })
     }
@@ -1506,7 +1520,7 @@ export default function CaptureLab() {
     lastRearmFrameTimeRef.current = null
     rearmChangedStreakRef.current = 0
     setAutoHoldStartTs(null)
-    setHoldHint('')
+    setCaptureRefusal(null)
     liveScheduleRef.current?.(0)
   }
 
@@ -1519,8 +1533,7 @@ export default function CaptureLab() {
     state.lastQualifyingTs = null
     setAutoDisarmed(true)
     setAutoHoldStartTs(null)
-    setHoldHint('')
-    setCaptureNote('Captured — move on, or tap Capture to take it again.')
+    setCaptureRefusal(null)
   }
 
   const waitForModelResult = deadline => new Promise(resolve => {
@@ -1565,6 +1578,7 @@ export default function CaptureLab() {
         const attempt = {
           edgeContainment: null,
           quadAspect: null,
+          orientationRatio: null,
           edgeVariance: null,
           sinceDisagreementMs,
           sinceAgreementMs,
@@ -1607,9 +1621,10 @@ export default function CaptureLab() {
             ...attemptFields(),
           })
           if (!retry && liveDetectionRef.current) {
-            setCaptureNote('Getting a fresh look at the card…')
+            setCaptureRechecking(true)
             const retryStarted = performance.now()
             const landed = await waitForModelResult(performance.now() + CAPTURE_RETRY_MS)
+            setCaptureRechecking(false)
             if (landed) continue
             recordDiagEvent('capture-attempt', {
               ok: false,
@@ -1626,7 +1641,6 @@ export default function CaptureLab() {
               ...attemptFields(),
             })
           }
-          setCaptureNote('Waiting for a fresh look at the card; nothing captured.')
           if (auto) rearmAutoCapture()
           return false
         }
@@ -1634,7 +1648,6 @@ export default function CaptureLab() {
           ? trackedQuadRef.current
           : liveResultRef.current?.corners
         if (!corners) {
-          setCaptureNote('Waiting for a fresh look at the card; nothing captured.')
           recordDiagEvent('capture-attempt', {
             ok: false,
             retry,
@@ -1675,9 +1688,18 @@ export default function CaptureLab() {
           })
           attempt.edgeContainment = Number(contain.edgeContainment.toFixed(4))
           attempt.quadAspect = Number(contain.quadAspect.toFixed(4))
+          attempt.orientationRatio = Number(contain.orientationRatio.toFixed(4))
           lastAttemptFieldsRef.current = attemptFields()
+          if (auto) {
+            // The pill names this cause for as long as the gate keeps refusing;
+            // the next passing attempt or a different phase clears it.
+            setCaptureRefusal(contain.ok ? null : (contain.check ?? 'aspect'))
+          }
           if (auto && !contain.ok) {
-            const check = contain.edgeContainment < CAPTURE_EDGE_MIN ? 'edge' : 'aspect'
+            // The gate names the comparison that failed; the aspect band is
+            // applied to the orientation-normalised ratio, so a sideways card
+            // passes and its log describes the same number the gate compared.
+            const check = contain.check ?? 'aspect'
             recordDiagEvent('capture-attempt', {
               ok: false,
               retry,
@@ -1694,7 +1716,6 @@ export default function CaptureLab() {
               ...attemptFields(),
             })
             liveScheduleRef.current?.(0)
-            if (check === 'aspect') setCaptureNote('Show the whole card')
             return false
           }
 
@@ -1739,9 +1760,10 @@ export default function CaptureLab() {
             ...attemptFields(),
           })
           if (!retry && liveDetectionRef.current) {
-            setCaptureNote('Checking the card with the detector…')
+            setCaptureRechecking(true)
             const retryStarted = performance.now()
             const landed = await waitForModelResult(performance.now() + CAPTURE_RETRY_MS)
+            setCaptureRechecking(false)
             if (landed) continue
             recordDiagEvent('capture-attempt', {
               ok: false,
@@ -1758,7 +1780,6 @@ export default function CaptureLab() {
               ...attemptFields(),
             })
           }
-          setCaptureNote('Waiting for the detector to confirm the card; nothing captured.')
           // This block only runs for auto-capture, which only starts after a
           // completed hold, so the refusal cue is never a positioning nudge.
           rearmAutoCapture()
@@ -1878,6 +1899,9 @@ export default function CaptureLab() {
         const geometry = buildCaptureGeometry({
           quad: corners,
           cropRect: acquisition.sourceRect,
+          // Corners are frame-normalised; this is the frame they were
+          // normalised against, from the same acquisition that cropped them.
+          frame: { width: acquisition.frameWidth, height: acquisition.frameHeight },
           encodedWidth: acquisition.encodedWidth,
           encodedHeight: acquisition.encodedHeight,
           source: decision.source === 'tracked' ? 'same-frame-track' : 'same-frame-model',
@@ -1965,7 +1989,6 @@ export default function CaptureLab() {
         // Start hunting for the next card while the user is still panning.
           liveScheduleRef.current?.(CAPTURE_HUNT_DELAY_MS)
         if (auto) disarmAutoCapture()
-        else setCaptureNote('Captured a rectified card crop.')
         return true
       }
       return false
@@ -2068,7 +2091,6 @@ export default function CaptureLab() {
       lastSource: state.lastSource || 'tracked',
     })
     if (decision.action === 'start') {
-      setHoldHint('')
       startAutoWindow(corners, now, source)
       return
     }
@@ -2084,15 +2106,13 @@ export default function CaptureLab() {
           total: decision.total == null ? null : Number(decision.total.toFixed(4)),
         })
       }
-      // Only sustained motion earns the hint; gap resets are a stalled loop.
+      // Only sustained motion restarts the window; gap resets are a stalled loop.
       startAutoWindow(corners, now, source)
-      setHoldHint(decision.reason === 'gap' ? '' : 'Hold still')
       return
     }
     state.lastCorners = corners
     state.lastQualifyingTs = now
     state.lastSource = source
-    setHoldHint('')
     // The clock-driven fire check owns closing; observations only judge motion.
   }
 
@@ -2169,7 +2189,6 @@ export default function CaptureLab() {
       state.lastSource = 'tracked'
       stopAutoFireTimer()
       setAutoHoldStartTs(null)
-      setHoldHint('')
     }
 
     if (!qualifies) {
@@ -2185,7 +2204,6 @@ export default function CaptureLab() {
           lastRearmFrameTimeRef.current = null
           setAutoDisarmed(false)
           setCaptureNote('')
-          setHoldHint('')
           recordDiagEvent('auto-rearm', { reason: 'absent' })
           liveScheduleRef.current?.(0)
         }
@@ -2755,7 +2773,6 @@ export default function CaptureLab() {
     setLiveDetection(true)
     setDetectorError('')
     setCaptureNote('')
-    setHoldHint('')
     setAutoHoldStartTs(null)
     autoStateRef.current = newAutoState()
     motionLastGrayRef.current = null
@@ -2784,7 +2801,6 @@ export default function CaptureLab() {
     if (!enabled) {
       setAutoDisarmed(false)
       setCaptureNote('')
-      setHoldHint('')
     } else {
       // Hunting starts now; never leave auto mode parked.
       liveParkedRef.current = false
@@ -3164,6 +3180,14 @@ export default function CaptureLab() {
     recordDiagEvent('phase', { phase: overlayPhase || 'none', reason: phaseReason })
   }, [phaseReason, overlayPhase])
 
+  // A refusal cause only means something while the gate is still judging a
+  // card. Once the overlay moves to a state with its own copy (nothing seen,
+  // lost, too small, captured) the old cause must not win the pill.
+  useEffect(() => {
+    if (overlayPhase === 'tracking' || overlayPhase === 'locked' || overlayPhase === 'holding') return
+    setCaptureRefusal(null)
+  }, [overlayPhase])
+
   return (
     <div className="mx-auto max-w-6xl space-y-6 px-4 py-6">
       <div>
@@ -3277,9 +3301,7 @@ export default function CaptureLab() {
             Auto-capture when ready
           </label>
           {liveDetection ? (
-            <span className="text-text-muted">
-              {autoDisarmed ? 'captured — waiting for the card to move' : 'detector running'}
-            </span>
+            <span className="text-text-muted">detector running</span>
           ) : null}
         </div>
 
@@ -3303,8 +3325,11 @@ export default function CaptureLab() {
                 tooSmall={overlayTooSmall}
                 cardArea={overlayCardArea}
                 pendingCount={pending.length}
+                trayFull={trayUnsentCount() >= TRAY_CAPACITY}
                 softFocus={softFocus}
                 reason={phaseReason}
+                refusal={captureRefusal}
+                rechecking={captureRechecking}
                 receiptCorners={receiptCorners}
               />
             ) : null}
@@ -3432,7 +3457,6 @@ export default function CaptureLab() {
                 ) : null}
               </>
             ) : null}
-            {holdHint ? <p className="mt-1 text-xs text-yellow">{holdHint}</p> : null}
             {captureNote ? <p className="mt-1 text-text-muted">{captureNote}</p> : null}
           </div>
         ) : null}

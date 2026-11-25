@@ -229,7 +229,19 @@ export function quadAspect(corners, frame = null) {
   return height > 0 ? width / height : 0
 }
 
-// True when the geometry looks like a fully-in-frame card region.
+// A card has no inherent up direction here: the collector may present it
+// portrait or landscape. Collapsing r and 1/r makes 63:88 and 88:63 the same
+// card, while a genuinely non-card region (2:1, 3:1) stays outside the band.
+// This is the value the aspect gate compares; `quadAspect` stays the raw
+// width/height so provenance still records what was measured.
+export function orientationRatio(aspect) {
+  if (!Number.isFinite(aspect) || !(aspect > 0)) return 0
+  return aspect > 1 ? 1 / aspect : aspect
+}
+
+// True when the geometry looks like a fully-in-frame card region. `check` names
+// the comparison that failed (null when it passed), computed from the same two
+// booleans as `ok`, so a log cannot mislabel a refusal.
 export function isContainableQuad(corners, {
   frame = null,
   minEdge = 0.015,
@@ -238,10 +250,15 @@ export function isContainableQuad(corners, {
 } = {}) {
   const margin = minEdgeMargin(corners)
   const aspect = quadAspect(corners, frame)
+  const ratio = orientationRatio(aspect)
+  const edgeOk = margin >= minEdge
+  const aspectOk = ratio >= minAspect && ratio <= maxAspect
   return {
-    ok: margin >= minEdge && aspect >= minAspect && aspect <= maxAspect,
+    ok: edgeOk && aspectOk,
     edgeContainment: margin,
     quadAspect: aspect,
+    orientationRatio: ratio,
+    check: edgeOk ? (aspectOk ? null : 'aspect') : 'edge',
   }
 }
 

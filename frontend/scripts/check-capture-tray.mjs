@@ -158,17 +158,24 @@ const equal = (name, actual, expected) => {
 // The crop-relative quad must survive the frozen submission in file order, and
 // the payload rule must stay exactly as conservative as rotations: null entries
 // align, and an all-null batch sends no field at all.
+//
+// Units here match a real capture: corners are frame-normalised 0..1, the crop
+// rect and the frame are native pixels.
 {
+  const frame = { width: 1080, height: 1920 }
+  const toUnit = quad => quad.map(([x, y]) => [x / frame.width, y / frame.height])
   const trackedRect = { x: 150, y: 250, width: 600, height: 700 }
-  const trackedQuad = [
+  const trackedQuadPixels = [
     [200.4, 300.7],
     [700.2, 310.1],
     [690.9, 900.3],
     [210.6, 890.8],
   ]
+  const trackedQuad = toUnit(trackedQuadPixels)
   const trackedGeometry = buildCaptureGeometry({
     quad: trackedQuad,
     cropRect: trackedRect,
+    frame,
     encodedWidth: 600,
     encodedHeight: 700,
     source: 'same-frame-track',
@@ -213,23 +220,26 @@ const equal = (name, actual, expected) => {
   // The crop rect is integer and clamped to the frame exactly as acquireVideoFrame
   // returns it, including an edge-clamped box.
   const clampedRect = { x: 0, y: 0, width: 502, height: 705 }
-  const clampedQuad = [[2, 3], [500, 5], [498, 700], [4, 690]]
-  const clampedCrop = cropQuadFromFrame(clampedQuad, clampedRect)
+  const clampedQuadPixels = [[2, 3], [500, 5], [498, 700], [4, 690]]
+  const clampedQuad = toUnit(clampedQuadPixels)
+  const clampedCrop = cropQuadFromFrame(clampedQuad, clampedRect, frame)
   check('a frame-clamped rect still yields crop coords in 0..1', clampedCrop.every(
     ([u, v]) => u >= 0 && u <= 1 && v >= 0 && v <= 1,
   ))
 
   // Mapping the crop quad back into frame pixels must reproduce the exact quad
   // the capture used (within 1e-6), for both an interior and an edge-clamped rect.
-  const roundTrip = (quad, rect) => {
-    const crop = cropQuadFromFrame(quad, rect)
+  const roundTrip = (unitQuad, rect, frameSize) => {
+    const crop = cropQuadFromFrame(unitQuad, rect, frameSize)
+    if (!crop) return false
     const back = frameQuadFromCrop(crop, rect)
     return back.every(([x, y], index) => (
-      Math.abs(x - quad[index][0]) <= 1e-6 && Math.abs(y - quad[index][1]) <= 1e-6
+      Math.abs(x - unitQuad[index][0] * frameSize.width) <= 1e-6
+      && Math.abs(y - unitQuad[index][1] * frameSize.height) <= 1e-6
     ))
   }
-  check('crop-relative mapping round-trips an interior quad', roundTrip(trackedQuad, trackedRect))
-  check('crop-relative mapping round-trips an edge-clamped quad', roundTrip(clampedQuad, clampedRect))
+  check('crop-relative mapping round-trips an interior quad', roundTrip(trackedQuad, trackedRect, frame))
+  check('crop-relative mapping round-trips an edge-clamped quad', roundTrip(clampedQuad, clampedRect, frame))
 
   const submission = buildTraySubmission([
     { id: 'c', sequence: 3, rotationCW: 90, geometry: null, file: { name: 'c.jpg' } },
@@ -247,6 +257,65 @@ const equal = (name, actual, expected) => {
   ])
   equal('an unset or null geometry stages as null', noGeometry.geometries, [null, null])
   check('a batch with no frozen crop reports no geometry', noGeometry.hasGeometry === false)
+
+  // A mixed-unit call must fail closed: normalised corners need the frame that
+  // they are normalised against, or the geometry is omitted entirely rather
+  // than sent as a collapsed zero quad.
+  equal('geometry without its frame is refused', buildCaptureGeometry({
+    quad: trackedQuad,
+    cropRect: trackedRect,
+    encodedWidth: 600,
+    encodedHeight: 700,
+    source: 'same-frame-track',
+  }), null)
+}
+
+// ── Regression: normalised corners mapped onto a pixel crop rect ────────────
+// Twelve real captures were rejected (five bad_quad, seven short_side) because
+// the mapping treated frame-normalised corners as if they were pixels: every
+// point landed outside the rect, clampUnit pinned it to 0 and the quad
+// collapsed to sides of ~0.0-0.6 px.
+{
+  const frame = { width: 1080, height: 1920 }
+  const unitQuad = [[0.3, 0.3], [0.6, 0.3], [0.6, 0.7], [0.3, 0.7]]
+  const pixelQuad = unitQuad.map(([u, v]) => [u * frame.width, v * frame.height])
+  // The same 12% padded, integer, frame-clamped box acquireVideoFrame builds.
+  const box = { minX: 324, maxX: 648, minY: 576, maxY: 1344 }
+  const padX = 39
+  const padY = 92
+  const rect = {
+    x: box.minX - padX,
+    y: box.minY - padY,
+    width: box.maxX - box.minX + 2 * padX,
+    height: box.maxY - box.minY + 2 * padY,
+  }
+
+  const crop = cropQuadFromFrame(unitQuad, rect, frame)
+  check('a normalised quad on a pixel crop rect maps to four points', Array.isArray(crop) && crop.length === 4)
+  check('every crop-relative coordinate is strictly inside 0..1', Boolean(crop)
+    && crop.flat().every(value => value > 0 && value < 1))
+  const side = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1])
+  const sides = crop ? crop.map((point, index) => side(point, crop[(index + 1) % 4])) : []
+  check('the crop-relative quad keeps non-zero sides', sides.length === 4
+    && sides.every(value => value > 0.5), JSON.stringify(sides))
+
+  const back = crop ? frameQuadFromCrop(crop, rect) : null
+  check('the crop quad round-trips to the original frame pixels', Boolean(back)
+    && back.every(([x, y], index) => (
+      Math.abs(x - pixelQuad[index][0]) <= 1e-6
+      && Math.abs(y - pixelQuad[index][1]) <= 1e-6
+    )))
+
+  // Mixed units must be rejected rather than silently interpreted.
+  equal('normalised corners without a frame are refused', cropQuadFromFrame(unitQuad, rect), null)
+  equal('a zero-sized frame is refused', cropQuadFromFrame(unitQuad, rect, { width: 0, height: 1920 }), null)
+
+  // A quad that belongs to a different capture is not a clamped quad.
+  equal('a quad wholly outside the crop rect is refused', cropQuadFromFrame(
+    [[0.7, 0.2], [0.9, 0.2], [0.9, 0.4], [0.7, 0.4]],
+    { x: 0, y: 0, width: 100, height: 100 },
+    frame,
+  ), null)
 }
 
 // ── Capture geometry multipart field rules ────────────────

@@ -48,10 +48,39 @@ function supportsBlurHole() {
   return Boolean(blur && hole)
 }
 
+// One pill message per state, cause first. Priority matters: a finished capture
+// outranks a stale refusal, and an active refusal outranks the state it
+// interrupted. Every key maps to exactly one string; null means the ring alone
+// speaks (or the green capture beat, which already reads 'Captured').
 const HINTS = {
-  size: 'Move closer',
-  soft: "Can't confirm yet",
   nothing: 'Point the camera at a card',
+  steady: 'Hold the card steady',
+  holding: 'Hold steady',
+  size: 'Move closer',
+  soft: "Can't confirm the card yet — hold it flat",
+  aspect: 'Show the whole card',
+  edge: 'Move the card away from the edge',
+  rechecking: 'Checking the card…',
+  waitingForCard: 'Captured — move the next card in',
+}
+
+function resolveHintKey({ visual, reason, tracked, refusal, rechecking, trayFull }) {
+  if (visual === 'captured') return null
+  // 'disarmed' is the capture that just landed, except when the tray ran out of
+  // room and the card was never taken; that state keeps the tray note instead.
+  if (reason === 'disarmed') return trayFull ? null : 'waitingForCard'
+  if (refusal === 'aspect' || refusal === 'edge') return refusal
+  if (rechecking) return 'rechecking'
+  if (visual === 'tooSmall') return 'size'
+  if (visual === 'lost') return 'steady'
+  if (visual === 'holding') return 'holding'
+  // A tracked card the detector has not confirmed yet is a hold problem, not a
+  // not-a-card problem; a confirmed one keeps the plain 'Card detected' pill.
+  if (visual === 'tracking' && tracked) return 'steady'
+  if (visual === 'none') {
+    return reason === 'too-soft' || reason === 'model-unusable' ? 'soft' : 'nothing'
+  }
+  return null
 }
 
 const easeOutCubic = t => 1 - (1 - t) ** 3
@@ -81,8 +110,11 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
   tooSmall = false,
   cardArea,
   pendingCount = 0,
+  trayFull = false,
   softFocus = true,
   reason = null,
+  refusal = null,
+  rechecking = false,
   receiptCorners = null,
 }, ref) {
   const quadRef = useRef(quad)
@@ -179,25 +211,25 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
     else visual = confirmed ? 'locked' : 'tracking'
   }
 
+  const hintKey = resolveHintKey({ visual, reason, tracked, refusal, rechecking, trayFull })
+
   useEffect(() => {
     animRef.current.phase = visual
     if (visual === 'captured') animRef.current.beatStart = performance.now()
   }, [visual])
 
-  // Hint copy appears only after the same problem has persisted 900 ms.
+  // Hint copy appears only after the same problem has persisted 900 ms, so
+  // ordinary churn between states never flickers text. The key, not the
+  // rendered string, is what has to persist.
   useEffect(() => {
-    let key = null
-    if (visual === 'tooSmall') key = 'size'
-    else if (visual === 'none') key = reason === 'too-soft' ? 'soft' : 'nothing'
-    else if (visual === 'lost') key = 'nothing'
-    if (!key) {
+    if (!hintKey) {
       setHint('')
       return undefined
     }
     setHint('')
-    const timer = window.setTimeout(() => setHint(HINTS[key]), HINT_DELAY_MS)
+    const timer = window.setTimeout(() => setHint(HINTS[hintKey]), HINT_DELAY_MS)
     return () => window.clearTimeout(timer)
-  }, [visual, reason])
+  }, [hintKey])
 
   // ── paint ───────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -453,13 +485,12 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
 
   const visible = visual !== 'none' || hasQuad
   const captured = visual === 'captured'
-  const problem = !captured && hint
   const tone = captured
     ? { color: GREEN, border: 'rgba(34,197,94,.45)', bg: 'rgba(5,20,10,.82)' }
     : { color: GOLD, border: 'rgba(245,200,66,.35)', bg: 'rgba(18,14,6,.82)' }
   const pillText = captured
     ? 'Captured'
-    : problem || (visible && !hint ? 'Card detected' : '')
+    : (hint || (visible ? 'Card detected' : ''))
 
   return (
     <div className="pointer-events-none absolute inset-0 select-none">
