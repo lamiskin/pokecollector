@@ -899,7 +899,7 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
           )}
 
           <span>{chromeVisual === 'none' && reason === 'too-soft'
-            ? 'Too soft to confirm — steady the phone'
+            ? "Can't confirm the card yet — steady the phone"
             : COPY[chromeVisual]}</span>
 
           <span

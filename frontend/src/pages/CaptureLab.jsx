@@ -55,6 +55,7 @@ import {
   maxCornerMovement,
 } from '../utils/autoHold'
 import { computeMotionScore, toGrayscale } from '../utils/webcamStability'
+import { edgeVariance, toGrayscale as toFocusGrayscale } from '../utils/focusScore'
 
 // Dev-only tool: lab-specific strings stay in English on purpose, while shared
 // actions reuse the existing translated keys. It is never shown in navigation.
@@ -95,8 +96,9 @@ const LIVE_SEQ_BASE = 1_000_000
 // used; a frozen feed must not be captured twice or reported as success.
 const CAPTURE_FRAME_WAIT_MS = 200
 // The crop is taken from the native frame around the card, not the whole frame.
-// Cap the source box for memory; normal card boxes are far smaller.
-const CAPTURE_SOURCE_MAX_EDGE = 2400
+// Match the server's MAX_IMAGE_EDGE (2048) so an upload is stored without a
+// second LANCZOS resize after it arrives.
+const CAPTURE_SOURCE_MAX_EDGE = 2048
 // One bounded retry after a stale geometry result: request a fresh detection
 // and try the capture again when it lands.
 const CAPTURE_RETRY_MS = 900
@@ -1568,6 +1570,29 @@ export default function CaptureLab() {
         }
 
         addFiles([new File([blob], `card-${Date.now()}.jpg`, { type: 'image/jpeg' })])
+        // Annotation only: a live focus proxy, not a gate. The backend's 500
+        // threshold is on sanitized 2048 px images, so this number is not directly
+        // comparable until it has itself been measured.
+        let focusVariance = null
+        try {
+          const focusScale = Math.min(
+            1,
+            512 / Math.max(acquisition.canvas.width, acquisition.canvas.height),
+          )
+          const focusWidth = Math.max(1, Math.round(acquisition.canvas.width * focusScale))
+          const focusHeight = Math.max(1, Math.round(acquisition.canvas.height * focusScale))
+          const focusCanvas = document.createElement('canvas')
+          focusCanvas.width = focusWidth
+          focusCanvas.height = focusHeight
+          const focusContext = focusCanvas.getContext('2d', { willReadFrequently: true })
+          focusContext.drawImage(acquisition.canvas, 0, 0, focusWidth, focusHeight)
+          const gray = toFocusGrayscale(
+            focusContext.getImageData(0, 0, focusWidth, focusHeight),
+          )
+          focusVariance = Math.round(edgeVariance(gray.data, gray.width, gray.height))
+        } catch {
+          focusVariance = null
+        }
         // A capture resets hunting to full speed for the next card.
         lastUsableAtRef.current = performance.now()
         // The success beat starts only once the File exists and is staged.
@@ -1582,6 +1607,7 @@ export default function CaptureLab() {
           cardLongEdge: acquisition.cardLongEdge,
           jpegBytes: blob.size,
           quadSource: decision.source,
+          edgeVariance: focusVariance,
         })
         recordDiagEvent('capture-attempt', {
           ok: true,
