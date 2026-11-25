@@ -20,10 +20,14 @@ vetoes: shaving a single side is already a wrong crop, and an edge found
 somewhere else in the profile does not prove the claimed line is right -- it is
 evidence the claim sits beside the real boundary.
 
-The destination orientation follows the measured quad: a quad whose sides
-measure wider than tall is straightened into an 88:63 landscape frame, rather
-than squeezed sideways into the 63:88 portrait frame a card has in its own
-hands.
+The destination is always the card's own 63:88 portrait frame. A quad measured
+wider than tall means the card was held sideways, not that the card is
+landscape, so the pairing is decided by side length: whichever pair of opposing
+sides is longer becomes the destination's vertical pair, rotating the corner
+order by one when the detected order put the shorter pair there. Length alone
+decides, with no content knowledge and no threshold, which leaves the
+orientation ambiguous by a half turn: the output can be upright or 180 degrees
+inverted, and the geometry cannot tell which. Resolving that needs the artwork.
 """
 
 from __future__ import annotations
@@ -81,6 +85,10 @@ def straighten_config_digest() -> str:
         "require_boundary": True,
         "competing_vetoes_any": True,
         "all_sides_required": True,
+        # The destination is always the portrait card frame, with the longer
+        # measured pair mapped to height; a derivative from the old
+        # orientation-follows-the-quad rule must not share this identity.
+        "portrait_pairing": True,
     }
     body = json.dumps(config, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
@@ -356,21 +364,6 @@ def transform_quad_for_storage(
     return points
 
 
-def destination_aspect(measured_w: float, measured_h: float) -> float:
-    """Width/height of the straight crop for a quad's measured side lengths.
-
-    The warp always maps quad side 0 onto the destination's top edge, so the
-    destination's shape has to follow the quad, not the card's nominal shape:
-    squeezing a landscape capture into 63:88 draws the card sideways and
-    stretches it. Landscape quads therefore get 88:63; everything else keeps
-    the portrait 63:88. Both stay capped by the measured pixels and
-    ``max_edge``, with no upscaling (see ``try_straighten``).
-    """
-    if measured_w > measured_h:
-        return 1.0 / CARD_ASPECT
-    return CARD_ASPECT
-
-
 def _homography(dst: Sequence[Point], src: Sequence[Point]) -> np.ndarray:
     """Solve the 3x3 destination->source projective transform."""
     rows = []
@@ -445,17 +438,29 @@ def try_straighten(
         return Abstained("bad_shape", f"opposing side ratio {max(opposing):.2f}")
 
     # In-plane tilt is reported, never vetoed: the projective warp levels any
-    # angle, and a card held sideways is legitimate because the destination
-    # orientation follows the measured quad.
+    # angle, and a card held sideways is fine because the pairing below turns
+    # it upright. Keep the tilt of the quad as detected, before that turn.
     tilt = _normalise_tilt(math.degrees(math.atan2(
         points[1][1] - points[0][1], points[1][0] - points[0][0],
     )))
 
+    # A Pokemon card is portrait in its own hands, so the destination is always
+    # 63:88 and its vertical pair must be the longer measured pair. The warp
+    # maps sides 0 and 2 onto the destination's horizontal edges, so when the
+    # corner order puts the shorter pair there (a landscape capture) one step
+    # of corner rotation swaps the pairing. Solely the measured lengths decide;
+    # no content is read, which is why the result may also be upside down.
+    horizontal_measure = (sides[0] + sides[2]) / 2.0
+    vertical_measure = (sides[1] + sides[3]) / 2.0
+    claimed = points
+    if vertical_measure < horizontal_measure:
+        points = points[1:] + points[:1]
+        sides = [sides[1], sides[2], sides[3], sides[0]]
+
     measured_w = min(sides[0], sides[2])
     measured_h = min(sides[1], sides[3])
-    aspect = destination_aspect(measured_w, measured_h)
-    inner_w = min(measured_w, measured_h * aspect)
-    inner_h = inner_w / aspect
+    inner_w = min(measured_w, measured_h * CARD_ASPECT)
+    inner_h = inner_w / CARD_ASPECT
     out_w = inner_w * (1.0 + 2.0 * margin)
     out_h = inner_h * (1.0 + 2.0 * margin)
 
@@ -469,9 +474,11 @@ def try_straighten(
 
     # Geometry is satisfied; ask the pixels whether the claim is really the
     # card's boundary before paying for the warp.
+    # The veto reads the caller's own corners, in their order, so the rule and
+    # its per-side evidence are exactly as supplied.
     support: EdgeSupport | None = None
     if require_boundary:
-        support = assess_edge_support(rgb, points)
+        support = assess_edge_support(rgb, claimed)
         if support.verdict != "ok":
             reason = (
                 "boundary_competing" if support.verdict == "competing"

@@ -117,7 +117,7 @@ def _cases() -> list[tuple[str, str, Image.Image, list]]:
         canvas, quad = _render_rotated(_card(), tilt)
         cases.append((f"tilt-{tilt}", "upright card, tilt", canvas, quad))
     canvas, quad = _render_rotated(_landscape_card(), 5)
-    cases.append(("landscape", "card captured wider than tall, expect 88:63",
+    cases.append(("landscape", "card captured wider than tall, expect portrait with rotated content",
                   canvas, quad))
     canvas, quad = _render_rotated(_card(nested=True), 5)
     cases.append(("loader-nested-border", "loader-like nested border", canvas, quad))

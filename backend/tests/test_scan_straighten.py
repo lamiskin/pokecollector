@@ -253,20 +253,52 @@ class StraightenTests(unittest.TestCase):
         self.assertGreater(abs(result.angle_degrees), 45.0)
 
     @unittest.skipUnless(DEPS_AVAILABLE, "Pillow/numpy unavailable")
-    def test_landscape_quad_straightens_into_a_landscape_frame(self):
-        """A wider-than-tall quad gets 88:63, not a sideways 63:88 squeeze."""
+    def test_landscape_capture_straightens_upright_into_portrait_with_rotated_content(self):
+        """A wider-than-tall quad means the card was held sideways.
+
+        The card is portrait in its own hands, so the longer measured pair must
+        become the destination's vertical pair: the output is 63:88 and the
+        bands that ran across the landscape capture now run across the tall
+        one, i.e. the content arrives rotated by a quarter turn.
+        """
         canvas, quad = render_rotated(make_landscape_card(), 5)
         result = try_straighten(canvas, quad)
         self.assertIsInstance(result, Straightened)
-        self.assertGreater(result.width, result.height)
-        self.assertAlmostEqual(result.width / result.height, 88 / 63,
-                               delta=0.02 * (88 / 63))
+        self.assertGreater(result.height, result.width)
+        self.assertAlmostEqual(result.width / result.height, 63 / 88,
+                               delta=0.02 * (63 / 88))
         top, bottom, left, right, centre = edge_means(result.image)
         for edge in (top, bottom, left, right):
             self.assertLess(edge, centre)
-        # Text bands run across the card, so rows vary more than columns.
+        # Bands across the landscape card become vertical strips once the
+        # capture is turned upright, so columns vary more than rows.
         gray = np.asarray(result.image.convert("L"), dtype=float)
-        self.assertGreater(np.var(gray.mean(axis=1)), np.var(gray.mean(axis=0)))
+        self.assertGreater(np.var(gray.mean(axis=0)), np.var(gray.mean(axis=1)))
+
+    @unittest.skipUnless(DEPS_AVAILABLE, "Pillow/numpy unavailable")
+    def test_wide_quad_and_its_quarter_turn_give_the_same_output(self):
+        """Pairing follows side length only, so a quad and its 90° turn agree.
+
+        The same card measured once with its long pair horizontal and once with
+        it vertical must land on one destination shape; otherwise the output
+        would depend on how the detector happened to order the corners.
+        """
+        def with_quad(quad):
+            canvas = Image.new("RGB", (600, 600), DARK)
+            ImageDraw.Draw(canvas).polygon(quad, fill=WHITE)
+            return canvas
+
+        wide = [(110.0, 210.0), (490.0, 210.0), (490.0, 390.0), (110.0, 390.0)]
+        tall = [(210.0, 110.0), (390.0, 110.0), (390.0, 490.0), (210.0, 490.0)]
+        wide_result = try_straighten(with_quad(wide), wide)
+        tall_result = try_straighten(with_quad(tall), tall)
+        for result in (wide_result, tall_result):
+            self.assertIsInstance(result, Straightened)
+            self.assertGreater(result.height, result.width)
+        self.assertEqual(
+            (wide_result.width, wide_result.height),
+            (tall_result.width, tall_result.height),
+        )
 
     @unittest.skipUnless(DEPS_AVAILABLE, "Pillow/numpy unavailable")
     def test_never_upscales_beyond_card(self):

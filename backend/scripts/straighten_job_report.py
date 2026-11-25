@@ -33,7 +33,6 @@ from services.scan_straighten import (
     Abstained,
     Straightened,
     assess_edge_support,
-    destination_aspect,
     transform_quad_for_storage,
     try_straighten,
 )
@@ -62,14 +61,16 @@ def _font(size: int):
 
 
 def _quad_metrics(quad: list[tuple[float, float]]) -> dict:
-    """Measured side lengths, destination aspect and in-plane tilt of a quad."""
+    """Measured side lengths and aspect, and in-plane tilt of a quad."""
     sides = [
         math.hypot(quad[(i + 1) % 4][0] - quad[i][0], quad[(i + 1) % 4][1] - quad[i][1])
         for i in range(4)
     ]
     measured_w = min(sides[0], sides[2])
     measured_h = min(sides[1], sides[3])
-    aspect = destination_aspect(measured_w, measured_h)
+    # As measured in the raster: a landscape capture is expected here even
+    # though the straight crop is always portrait.
+    aspect = measured_w / max(measured_h, 1e-9)
     tilt = (math.degrees(math.atan2(
         quad[1][1] - quad[0][1], quad[1][0] - quad[0][0],
     )) + 90.0) % 180.0 - 90.0
