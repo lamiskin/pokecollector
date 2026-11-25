@@ -52,7 +52,6 @@ import {
   AUTO_STEP_DT_MAX_MS,
   AUTO_STEP_SPEED,
   AUTO_TOTAL_MOVE,
-  maxCornerMovement,
 } from '../utils/autoHold'
 import { computeMotionScore, toGrayscale } from '../utils/webcamStability'
 import { edgeVariance, toGrayscale as toFocusGrayscale } from '../utils/focusScore'
@@ -128,20 +127,15 @@ const MIN_CARD_AREA = 0.12
 // on the target Android phone), so a frame count would mean very different waits
 // on different phones; this is wall-clock. The window must stay open for
 // AUTO_STABLE_MS, then auto-capture disarms until the quad has been absent for
-// AUTO_REARM_MS or has moved more than AUTO_REARM_MOVE. Whether the window stays
-// open is decided per observation in autoHold.js against a median of the last
-// 500 ms: tremor and single tracker corrections are normal, sustained movement
-// cancels.
+// AUTO_REARM_MS. Whether the window stays open is decided per observation in
+// autoHold.js against a median of the last 500 ms: tremor and single tracker
+// corrections are normal, sustained movement cancels.
 const AUTO_STABLE_MS = 800
 // The hold window is wall-clock, but the capture must not wait for the next
 // model result: detection is device-dependent (~1 s here), so that would add
 // up to a second of dead time after the user has already held long enough.
 const AUTO_FIRE_CHECK_MS = 100
-const AUTO_REARM_MOVE = 0.12
 const AUTO_REARM_MS = 800
-// A card held continuously in the same spot still deserves a retake: after this
-// long disarmed with a qualifying card in view, re-arm regardless of movement.
-const AUTO_REARM_FORCE_MS = 2500
 // Auto-capture stability may follow the tracker for up to this long between
 // model results. Separate from capture geometry freshness so changing capture
 // rules cannot silently change the hold rule.
@@ -207,9 +201,7 @@ function newAutoState() {
     lastCorners: null,
     lastQualifyingTs: null,
     lastSource: 'tracked',
-    presentSince: null,
     disarmed: false,
-    captureCorners: null,
     absentSince: null,
   }
 }
@@ -1323,33 +1315,29 @@ export default function CaptureLab() {
   const rearmAutoCapture = () => {
     const state = autoStateRef.current
     state.disarmed = false
-    state.captureCorners = null
     state.anchorCorners = null
     state.anchorTs = null
     state.lastCorners = null
     state.lastQualifyingTs = null
     state.absentSince = null
     state.lastSource = 'tracked'
-    state.presentSince = null
     setAutoDisarmed(false)
     setAutoHoldStartTs(null)
     setHoldHint('')
     liveScheduleRef.current?.(0)
   }
 
-  const disarmAutoCapture = corners => {
+  const disarmAutoCapture = () => {
     const state = autoStateRef.current
     state.disarmed = true
-    state.captureCorners = corners
     state.anchorCorners = null
     state.anchorTs = null
     state.lastCorners = null
     state.lastQualifyingTs = null
-    state.presentSince = null
     setAutoDisarmed(true)
     setAutoHoldStartTs(null)
     setHoldHint('')
-    setCaptureNote('Auto-captured the card. Waiting for the card to move.')
+    setCaptureNote('Captured — move on, or tap Capture to take it again.')
   }
 
   const waitForModelResult = deadline => new Promise(resolve => {
@@ -1623,7 +1611,7 @@ export default function CaptureLab() {
         })
         // Start hunting for the next card while the user is still panning.
         liveScheduleRef.current?.(CAPTURE_HUNT_DELAY_MS)
-        if (auto) disarmAutoCapture(corners)
+        if (auto) disarmAutoCapture()
         else setCaptureNote('Captured a rectified card crop.')
         return true
       }
@@ -1755,12 +1743,10 @@ export default function CaptureLab() {
 
     if (!qualifies) {
       resetWindow()
-      state.presentSince = null
       if (state.disarmed) {
         if (state.absentSince == null) state.absentSince = now
         if (now - state.absentSince >= AUTO_REARM_MS) {
           state.disarmed = false
-          state.captureCorners = null
           state.absentSince = null
           setAutoDisarmed(false)
           setCaptureNote('')
@@ -1773,20 +1759,8 @@ export default function CaptureLab() {
     }
     state.absentSince = null
     if (state.disarmed) {
-      // A qualifying card that stays in view is a retake, not a stuck UI.
-      if (state.presentSince == null) state.presentSince = now
-      const moved = state.captureCorners
-        && maxCornerMovement(state.captureCorners, result.corners) > AUTO_REARM_MOVE
-      const force = now - state.presentSince >= AUTO_REARM_FORCE_MS
-      if (moved || force) {
-        state.disarmed = false
-        state.captureCorners = null
-        state.presentSince = null
-        setAutoDisarmed(false)
-        setCaptureNote('')
-        recordDiagEvent('auto-rearm', { reason: moved ? 'move' : 'force' })
-        liveScheduleRef.current?.(0)
-      }
+      // A card still in view is the same presentation: one automatic capture.
+      // Retaking is deliberate, via the manual Capture button.
       return
     }
     if (!autoCaptureRef.current) {
