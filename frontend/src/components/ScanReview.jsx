@@ -1,3 +1,4 @@
+import WindowedCardGrid from './WindowedCardGrid'
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { AlertTriangle, Camera, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Loader2, Plus, RefreshCw, Search, Sparkles, Trash2, X } from 'lucide-react'
@@ -663,14 +664,12 @@ export function usePrefetchMatchImages(matches) {
 }
 
 // ─── The candidate grid — the "which of these DB candidates is it" picker ──
-export function CandidateGrid({ jobId, itemId, matches, onSelect, onZoom, nameEn, t }) {
-  usePrefetchMatchImages(matches)
+export function CandidateGrid({ matches, onSelect, onZoom, nameEn, t }) {  usePrefetchMatchImages(matches)
 
   if (!matches?.length) return null
 
   return (
-    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
-      {matches.map((match, matchIndex) => {
+    <WindowedCardGrid measureRows getKey={match => `${match.id}-${match.lang || match._lang || 'en'}`} className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4" items={matches} renderItem={(match, matchIndex) => {
         const language = match.lang || match._lang || 'en'
         const hdImage = match.image_hd || match.image?.replace('/low.webp', '/high.webp') || match.image
         return (
@@ -762,8 +761,7 @@ export function CandidateGrid({ jobId, itemId, matches, onSelect, onZoom, nameEn
             </div>
           </div>
         )
-      })}
-    </div>
+}} />
   )
 }
 
@@ -968,8 +966,6 @@ export function ScanItemPanel({ jobId, item, onAdd, onRetry, onDismiss, onReview
             {t('scanner.bestMatches')} ({item.matches.length})
           </p>
           <CandidateGrid
-            jobId={jobId}
-            itemId={item.id}
             matches={item.matches}
             nameEn={item.recognized?.name_en}
             onSelect={item.resolved ? undefined : match => onAdd(item, match)}

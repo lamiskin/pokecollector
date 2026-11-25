@@ -18,9 +18,17 @@ Routers are registered centrally in `backend/main.py` via
 - **One router per domain.** `auth`, `cards`, `collection`, `sets`, `wishlist`,
   `binders`, `decks`, `dashboard`, `analytics`, `sync`, `products`, `trades`,
   `export`, `backup`, `settings`, `images`, `social`, `pokedex`, `public`,
-  `profile`, `community`, plus `github` and `recognize`. Three routers share
-  the `/api/cards` prefix: `cards.router` (search/custom cards),
+  `profile`, `community`, `push`, plus `github` and `recognize`. Three routers
+  share the `/api/cards` prefix: `cards.router` (search/custom cards/valuation),
   `recognize.router` (live scan), `scan_jobs.router` (persistent scan queue).
+- **Replay-safe appends.** `collection.add_to_collection`, `wishlist.add_to_wishlist`
+  and `scan_jobs.enqueue_scan_job` honour an `Idempotency-Key` header through
+  `services/idempotency.py`: the request body (and, for scans, the upload
+  digests plus the fork's destination list id) is hashed as a fingerprint, a
+  completed result is replayed with `Idempotent-Replayed: true`, and reuse for a
+  different request is rejected. `X-Expected-User-Id` rejects a queued write
+  replayed under another account. When the header is absent the endpoints keep
+  their original commit/refresh path.
 - **Shared auth dependency.** `api/auth.py` exposes `get_current_user`
   (OAuth2 bearer via `oauth2_scheme`, `auto_error=False`) and
   `get_optional_user`. In single-user mode (`multi_user_enabled` false) a
@@ -37,7 +45,8 @@ Routers are registered centrally in `backend/main.py` via
 - **Schema layer.** `schemas.py` holds shared Pydantic request/response models
   (`CardBase`, `CollectionItemCreate/Response`, `ProfileUpdate`, …). Small
   module-local request models are defined inline where they are only used once
-  (`auth.py` user/`TokenResponse`, `scan_jobs.py` resolve requests).
+  (`auth.py` user/`TokenResponse`, `scan_jobs.py` resolve requests,
+  `push.py` subscribe/unsubscribe bodies).
 - **Services hold the logic.** Complex, reusable behavior lives in
   `services/` (`card_upsert`, `card_state`, `scan_queue`, `scan_storage`,
   `public_profile`, `pokemon_api`, `scheduler`, …). Routers import these and
@@ -55,6 +64,17 @@ Routers are registered centrally in `backend/main.py` via
   decks, and wishlists with no auth dependency, gated by
   `public_profiles_enabled(db)` and the owner's `is_profile_public`, using
   `Cache-Control: public, max-age=0, must-revalidate` and `no-store` on 404.
+- **Web Push.** `push.py` exposes `GET /api/push/vapid-public-key` plus
+  `POST`/`DELETE /api/push/subscribe` (upsert/remove one browser subscription)
+  and `POST /api/push/test`; every route is authenticated and delegates
+  endpoint/allow-list validation, VAPID key handling and delivery to
+  `services/push.py`.
+- **Offline preference.** `settings.py` stores the per-user
+  `offline_collection_enabled` flag and a server-side
+  `offline_collection_revision`; the revision is read-only and a stale
+  `x-offline-preference-revision` header is rejected so an older tab cannot
+  overwrite a newer save. The fork's artwork-sweep and scanner keys remain in
+  the same settings surface.
 
 ## Flow
 
@@ -69,10 +89,13 @@ Routers are registered centrally in `backend/main.py` via
    `models` ORM objects and/or calls `services.*` for domain logic.
 4. Read endpoints serialize ORM rows to dicts/Pydantic responses; write
    endpoints `db.add`/`db.commit` (with rollback on `IntegrityError`, mapped to
-   400/409). Scan endpoints (`recognize`, `scan_jobs`) dispatch provider work
+   400/409). A keyed append (`Idempotency-Key`) stages its response row in the
+   same transaction, so a crash cannot leave a write without its key. Scan
+   endpoints (`recognize`, `scan_jobs`) dispatch provider work
    (Gemini via `services/scan_providers`) and reconcile results through
    `services/scan_queue`/`scan_storage`, with collection adds delegated to
-   `collection.py` helpers.
+   `collection.py` helpers. `scan_jobs` validates its optional destination Card
+   List before reading any upload bytes and includes it in the replay payload.
 
 ## Integration
 
@@ -86,7 +109,9 @@ Routers are registered centrally in `backend/main.py` via
 - **`schemas.py`** — shared request/response Pydantic models.
 - **`services/`** — the bulk of business logic and external integrations
   (TCGdex via `pokemon_api`, Gemini scanning, queue/storage, auth hashing/JWT,
-  public-profile serialization, valuation, scheduler).
+  public-profile serialization, valuation, scheduler, idempotency replay,
+  Web Push delivery).
 - **External systems** — `github.py` calls the GitHub API/raw CSV; `recognize.py`
   and scan services call the Gemini API and TCGdex; `sync.py` drives scheduled
-  catalogue/price sync.
+  catalogue/price sync; `push.py` registers browser endpoints for the push
+  services allow-listed in `services/push.py`.

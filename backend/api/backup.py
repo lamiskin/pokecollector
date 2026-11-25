@@ -8,6 +8,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from api.auth import get_current_user
@@ -126,6 +127,23 @@ def download_backup(
         raise HTTPException(status_code=500, detail="pg_dump not found")
 
 
+def _clear_idempotency_keys() -> None:
+    """Best-effort: drop every stored Idempotency-Key result after a restore.
+
+    An older dump leaves newer keys whose business rows no longer exist, and
+    replaying one would silently drop the add. A visible duplicate is safer.
+    """
+    try:
+        from database import SessionLocal
+        from models import IdempotencyKey
+
+        with SessionLocal() as db:
+            db.query(IdempotencyKey).delete(synchronize_session=False)
+            db.commit()
+    except Exception:
+        logger.warning("Could not clear idempotency keys after restore", exc_info=True)
+
+
 @router.post("/restore")
 async def restore_backup(
     file: UploadFile = File(...),
@@ -182,6 +200,7 @@ async def restore_backup(
         if result.returncode != 0:
             raise HTTPException(status_code=500, detail=f"Restore failed: {result.stderr}")
 
+        _clear_idempotency_keys()
         return {"message": "Database restored successfully"}
 
     except subprocess.TimeoutExpired:
@@ -220,18 +239,24 @@ def clear_image_cache(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Clear the persisted image cache (admin only).
+    """Delete the shared server image cache, not uploads or device downloads.
 
     Cached card images live in the ``image_cache`` table, not on disk, so the
-    endpoint deletes those rows and reports how many were removed. Any files
-    left under the legacy ``/app/images`` directory are removed as well.
+    endpoint deletes those rows and reports how many were removed and, where
+    the backend can measure it, how much space they occupied. Any files left
+    under the legacy ``/app/images`` directory are removed as well.
     """
     if current_user.role != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
 
     bytes_freed = _image_cache_byte_size(db)
-    deleted = db.query(ImageCache).delete(synchronize_session=False)
-    db.commit()
+    try:
+        deleted_count = db.query(ImageCache).delete(synchronize_session=False)
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        logger.exception("Could not delete the server image cache")
+        raise HTTPException(status_code=500, detail="Could not delete server image cache") from None
 
     import shutil
     images_dir = "/app/images"
@@ -240,8 +265,15 @@ def clear_image_cache(
         os.makedirs(images_dir, exist_ok=True)
 
     if bytes_freed is None:
-        message = f"Cleared {deleted} cached image(s)"
+        message = f"Cleared {deleted_count} cached image(s)"
     else:
-        message = f"Cleared {deleted} cached image(s), freed {bytes_freed} bytes"
+        message = f"Cleared {deleted_count} cached image(s), freed {bytes_freed} bytes"
     logger.info(message)
-    return {"deleted": deleted, "bytes_freed": bytes_freed, "message": message}
+    # ``deleted`` is the fork's original key and ``deleted_count`` upstream's;
+    # both are returned so existing clients and tests keep working.
+    return {
+        "deleted": deleted_count,
+        "deleted_count": deleted_count,
+        "bytes_freed": bytes_freed,
+        "message": message,
+    }

@@ -1,3 +1,4 @@
+import WindowedCardGrid from '../WindowedCardGrid'
 import { useEffect, useId, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { ChevronUp, Eye, EyeOff, RotateCcw } from 'lucide-react'
@@ -150,8 +151,7 @@ export default function CardListPicker({
     setVisibleCount(PAGE_SIZE)
   }, [source, search, type, set, language, variant, condition, showUnavailable])
 
-  const orderedOwnedEntries = orderPickerEntries(ownedEntries, showUnavailable)
-  const displayedOwnedEntries = orderedOwnedEntries.slice(0, visibleCount)
+  const displayedOwnedEntries = orderPickerEntries(ownedEntries, showUnavailable)
   const catalogCards = catalogData?.data || []
   const catalogEntries = catalogCards.map(card => ({ card, blocked: existingIds.has(String(card.id)) }))
   const blockedCatalogCount = catalogEntries.filter(entry => entry.blocked).length
@@ -159,7 +159,7 @@ export default function CardListPicker({
   const totalCatalogCards = Number(catalogData?.total_count) || catalogCards.length
   const hasMore = source === 'catalog'
     ? catalogCards.length < totalCatalogCards
-    : displayedOwnedEntries.length < orderedOwnedEntries.length
+    : false
   const hasFilters = Boolean(search || type || set || language || variant || condition)
 
   const clearSelection = () => setSelectedItems({})
@@ -297,19 +297,18 @@ export default function CardListPicker({
           )}
 
           <div className="max-h-[38rem] overflow-y-auto pr-1">
-            <div className="grid grid-cols-3 items-start gap-2 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8" data-testid="card-list-picker-grid">
-              {source === 'owned' && displayedOwnedEntries.map(renderOwnedCard)}
-              {source === 'catalog' && displayedCatalogEntries.map(({ card, blocked }) => {
+            <WindowedCardGrid className="grid grid-cols-3 items-start gap-2 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8" data-testid="card-list-picker-grid" items={source === 'owned' ? displayedOwnedEntries : displayedCatalogEntries} getKey={entry => entry.normalized ? String(entry.normalized.id) : String(entry.card?.id ?? entry.id)} renderItem={(entry, index) => {
+                if (source === 'owned') return renderOwnedCard(entry, index)
+                const { card, blocked } = entry
                 const selected = selectedIds.has(String(card.id))
                 return <CardDisplay key={card.id} card={card} image={resolveCardImageUrl(card)} selected={selected} unavailableReason={blocked ? t('binderTypes.alreadyUsed') : ''} actionLabel={label?.('cardListPicker.selectCardAction', { name: card.name })} onClick={() => toggleSelection(card)} />
-              })}
+              }} />
               {catalogLoading && <p className="col-span-full py-8 text-center text-xs text-text-muted">{t('common.loading')}</p>}
               {!catalogLoading && source === 'catalog' && debouncedSearch.length < 2 && <p className="col-span-full py-8 text-center text-xs text-text-muted">{t('cardListPicker.searchAllHint')}</p>}
               {!catalogLoading && source === 'catalog' && debouncedSearch.length >= 2 && catalogCards.length === 0 && <p className="col-span-full py-8 text-center text-xs text-text-muted">{t('cardListPicker.noCatalogCards')}</p>}
               {!catalogLoading && source === 'catalog' && debouncedSearch.length >= 2 && catalogEntries.length > 0 && displayedCatalogEntries.length === 0 && <p className="col-span-full py-8 text-center text-xs text-text-muted">{t('cardListPicker.allUnavailable')}</p>}
               {source === 'owned' && filteredOwnedItems.length === 0 && <p className="col-span-full py-8 text-center text-xs text-text-muted">{t('cardListPicker.noOwnedCards')}</p>}
               {source === 'owned' && filteredOwnedItems.length > 0 && displayedOwnedEntries.length === 0 && <p className="col-span-full py-8 text-center text-xs text-text-muted">{t('cardListPicker.allUnavailable')}</p>}
-            </div>
             {hasMore && <div className="flex justify-center py-4"><button type="button" className="btn-secondary" onClick={() => setVisibleCount(current => current + PAGE_SIZE)}>{t('common.more')}</button></div>}
           </div>
 

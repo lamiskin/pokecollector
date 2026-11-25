@@ -20,9 +20,9 @@ Be kind. Be clear. Assume good intent. Keep feedback constructive.
 - 👤 **Creator:** [Gilles Romer](https://romerg.de/)
 - ✉️ **Contact:** [info@romerg.de](mailto:info@romerg.de)
 
-![Version](https://img.shields.io/badge/version-v1.57.9-e3000b?style=flat-square) ![Dark Theme](https://img.shields.io/badge/theme-dark-1a1a2e?style=flat-square) ![TCGdex](https://img.shields.io/badge/card%20data-TCGdex-e3000b?style=flat-square) ![Docker](https://img.shields.io/badge/deploy-Docker-2496ed?style=flat-square) ![FastAPI](https://img.shields.io/badge/backend-FastAPI-009688?style=flat-square) ![React](https://img.shields.io/badge/frontend-React%2018-61dafb?style=flat-square) [![Support animal rescue](https://img.shields.io/badge/support-animal%20rescue-e3000b?style=flat-square)](https://pokecollector.romerg.de/#support)
+![Version](https://img.shields.io/badge/version-v1.58.4-e3000b?style=flat-square) ![Dark Theme](https://img.shields.io/badge/theme-dark-1a1a2e?style=flat-square) ![TCGdex](https://img.shields.io/badge/card%20data-TCGdex-e3000b?style=flat-square) ![Docker](https://img.shields.io/badge/deploy-Docker-2496ed?style=flat-square) ![FastAPI](https://img.shields.io/badge/backend-FastAPI-009688?style=flat-square) ![React](https://img.shields.io/badge/frontend-React%2018-61dafb?style=flat-square) [![Support animal rescue](https://img.shields.io/badge/support-animal%20rescue-e3000b?style=flat-square)](https://pokecollector.romerg.de/#support)
 
-**Current version:** `v1.57.9` · Releases are tracked on the [GitHub Releases page](https://github.com/Git-Romer/pokecollector/releases).
+**Current version:** `v1.58.4` · Releases are tracked on the [GitHub Releases page](https://github.com/Git-Romer/pokecollector/releases).
 
 ![WebApp Preview](preview-homescreen.png)
 
@@ -52,6 +52,7 @@ Be kind. Be clear. Assume good intent. Keep feedback constructive.
 ## ✨ Features
 
 ### 📦 Collection Management
+- Installable on iPhone and Android: add it to the Home Screen for a full-screen app with its own icon (optional offline start and offline scan queue with `PWA_ENABLED=true` / `OFFLINE_QUEUE_ENABLED=true`, see [`docs/PWA.md`](docs/PWA.md))
 - Add cards with quantity, condition, variant, and purchase price
 - Variants are now limited to `Normal`, `Holo`, `Reverse Holo`, and `First Edition`
 - Add reusable, owner-scoped printing-detail tags such as signed, stamped, misprint, or altered; tags follow the physical copy through products and trades
@@ -86,7 +87,7 @@ Be kind. Be clear. Assume good intent. Keep feedback constructive.
 - Persistent Deck Builder for 20-, 40-, and 60-card lists, with editable targets, ownership totals, shortage warnings, validation, analytics, and probabilities
 - Explicit actions send missing Planned Binder or Deck copies to the global Wishlist
 - Convert between Planned and physical Binders, import/export Binder CSV files, and populate a physical Binder from an owned set
-- Wishlist with Telegram price alerts and profile-wide Private, Trade matches, or Public visibility
+- Wishlist with Telegram (and optional web push) price alerts and profile-wide Private, Trade matches, or Public visibility
 
 ### 📈 Prices, Portfolio & Analytics
 - Cardmarket EUR pricing and TCGPlayer USD pricing via TCGdex
@@ -373,6 +374,9 @@ registration, rollout, account linking/unlinking, recovery, and security details
 | `OIDC_REDIRECT_URI` | Exact registered callback URI, e.g. `https://cards.example.test/api/auth/oidc/callback`. Production requires HTTPS; the callback path is fixed. | *(empty)* |
 | `OIDC_DISPLAY_NAME` | Friendly provider label shown in the login and account settings UI. | `Single sign-on` |
 | `PUBLIC_MODE` | Enable SEO meta tags, Open Graph, and allow search engine indexing. Default blocks all crawlers. Recreate the frontend container after changing it. | `false` |
+| `PWA_ENABLED` | Let the frontend save its own files on the device for offline start (needs HTTPS). Off by default. `false` is also the kill switch: it removes an installed service worker. Recreate the frontend container after changing it. See [docs/PWA.md](docs/PWA.md). | `false` |
+| `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` | Optional web push (price alerts). Both are optional and are not passed through by the stock `docker-compose.yml`: the signing key is created in `./data/auth` on first use. See [docs/PWA.md](docs/PWA.md). | *(unset)* |
+| `OFFLINE_QUEUE_ENABLED` | Offline scan queue, cached sign-in, sync center and iOS photo-upload hardening. Off by default; setting it back to `false` stops the queue and keeps waiting items on the device. | `false` |
 | `POKECOLLECTOR_VERSION` | Optional frontend and backend image-tag override for controlled deployments and rollbacks. Leave unset to use the exact release bundled with `docker-compose.yml`; `latest` is available only when deliberately requested. | Bundled release version |
 | `CORS_ORIGINS` | Comma-separated list of allowed origins for CORS. If empty, allows all origins. Set to your domain for production (e.g. `https://pokecollector.romerg.de`). | *(all)* |
 | `PRE_UPGRADE_BACKUP_ENABLED` | Create an automatic SQL backup before startup migrations when an existing install starts on a new app version | `true` |
@@ -522,6 +526,7 @@ require the runbook's explicit migration before using it operationally.
 | [`docs/CARD_SYSTEM.md`](docs/CARD_SYSTEM.md) | Public card components, variants, gallery, and extension workflow |
 | [`docs/CARD_LISTS.md`](docs/CARD_LISTS.md) | Binders, planned lists, Decks, owned-copy allocation, conversions, and CSV workflows |
 | [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) | GHCR images, Compose installation, updates, rollback, and release automation |
+| [`docs/PWA.md`](docs/PWA.md) | Installing on iPhone, offline start, HTTPS, flags, kill switch |
 | [`docs/POKEDEX.md`](docs/POKEDEX.md) | National Pokédex completion, metadata, images, routes, and Cardmarket links |
 | [`docs/REVERSE_PROXY_AUTH.md`](docs/REVERSE_PROXY_AUTH.md) | Forward-auth exceptions for public profiles and binders |
 | [`docs/OIDC_AUTHENTICATION.md`](docs/OIDC_AUTHENTICATION.md) | Native OIDC setup, rollout, account linking, recovery, and security notes |

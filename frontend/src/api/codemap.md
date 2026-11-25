@@ -16,6 +16,12 @@ directly — they import typed helper functions from here instead. It encapsulat
   handed back raw or converted to object URLs, since `<img src>` and anchor
   downloads cannot carry an `Authorization` header.
 - **Multipart uploads** — card recognition, collection photos, CSV imports, backups.
+  With the PWA flags on, uploads are re-wrapped in memory (`utils/memoryBlob`)
+  to work around WebKit's empty-File-body bug; photos are downscaled first
+  (`utils/photoCompression`).
+- **Offline awareness** — a request that fails without any response (network
+  error or timeout) reports to `offline/networkFailure`, which the outbox's
+  reachability monitor consumes. The client never treats that as a sign-out.
 
 ## Design
 
@@ -61,7 +67,9 @@ directly — they import typed helper functions from here instead. It encapsulat
 - **Scanner timeouts are decoupled.** `scannerRecognitionRequestTimeoutMs` and
   `scannerTestRequestTimeoutMs` (from `utils/scannerTimeout`) are applied per-request
   (`recognizeCard`, `testScannerConfiguration`) to cover the backend's multi-attempt
-  recognition flow, overriding the instance's 30s default.
+  recognition flow, overriding the instance's 30s default. `enqueueScanJob` gets
+  its own 30-minute upload timeout because a downscaled phone batch is still tens
+  of megabytes; it reports prepare/upload progress through `onProgress`.
 
 ## Flow
 
@@ -73,7 +81,8 @@ directly — they import typed helper functions from here instead. It encapsulat
    response, e.g. `searchCards`, so callers can read headers). Blob endpoints return
    a `Blob` or an object URL.
 4. On failure the response interceptor handles `401` (session teardown + redirect) and
-   re-rejects; callers format the message via `getApiErrorMessage`.
+   re-rejects; a response-less failure also notifies the offline monitor. Callers
+   format the message via `getApiErrorMessage`.
 5. On bootstrap, `AuthContext` calls `getAuthMode()` then `getMe()` (both
    `preserveSessionOnUnauthorized`) through `authBootstrap`'s `loadAuthState` to
    reconcile the stored session against the server before marking the app `ready`.
@@ -86,10 +95,12 @@ directly — they import typed helper functions from here instead. It encapsulat
   user CRUD, password/avatar/username changes.
 - **Profile** `/profile/` — owner's public profile get/update.
 - **Cards** `/cards/*` — search, detail, per-language, price history, custom cards and
-  migration, Gemini recognition (`/cards/recognize`), and the persistent scan-job
-  queue (`/cards/recognize/jobs`).
-- **Collection** `/collection/*` — list/search/add/bulk/import-CSV, per-item update,
-  photos (owner-only, blob), printing-detail tags, stats.
+  migration, Gemini recognition (`/cards/recognize`), the persistent scan-job
+  queue (`/cards/recognize/jobs`), and scan-job helpers (resolve, resolve-and-add,
+  create-custom, retry, item/candidate image blobs).
+- **Collection** `/collection/*` — list/search/add/bulk/import-CSV, the offline
+  manifest (`/collection/offline-manifest`), per-item update, photos (owner-only,
+  blob), printing-detail tags, stats, bulk delete and assignment release.
 - **Decks** `/decks/*` — CRUD, duplicate, convert planned↔real, entries, compare,
   probability.
 - **Sets** `/sets/*` — list, detail, checklist, new-sets, mark-seen.
@@ -101,7 +112,8 @@ directly — they import typed helper functions from here instead. It encapsulat
   `/export/csv` + `/export/pdf`; **Backup** `/backup/download` + `/backup/restore`;
   **Settings** `/settings/*` (CRUD, scanner config/test, telegram status, scan
   diagnostics, debug log); **GitHub/Community** `/github/*`, `/community/supporters`;
-  **Social** `/social/*` (leaderboard, compare, achievements).
+  **Social** `/social/*` (leaderboard, compare, achievements); **Push** `/push/*`
+  (VAPID key, subscribe/unsubscribe, test notification).
 
 `publicClient.js` exposes anonymous read helpers under `/api/public`:
 

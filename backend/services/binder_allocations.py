@@ -99,6 +99,12 @@ def collection_item_available_quantity(
     collection_item: CollectionItem,
     exclude_binder_card_id: int | None = None,
 ) -> int:
+    """Unallocated copies of one collection item.
+
+    Kept for the fork's scan-to-list flow (backend/api/scan_jobs.py); upstream
+    removed it as dead code in #470 because nothing on the upstream scan path
+    files scanned cards into a Card List.
+    """
     allocated = collection_item_allocated_quantity(
         db,
         user_id,

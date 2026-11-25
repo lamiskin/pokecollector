@@ -25,7 +25,8 @@ class CardHoloIdentityTests(unittest.TestCase):
         exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), 'exec'), namespace)
         values: dict[str, Any] = {name: None for name in CardBase.model_fields}
         values.update(id='swsh9-132_de', name='Test card', tcg_card_id='swsh9-132',
-                      lang='de', is_custom=False, is_digital=False)
+                      lang='de', is_custom=False, is_digital=False,
+                      tcgplayer_fallback_allowed=False)
         result = CardBase.model_validate(namespace['_card_to_dict'](SimpleNamespace(**values))).model_dump()
         self.assertEqual(result['tcg_card_id'], 'swsh9-132')
         self.assertEqual(result.get('lang'), 'de')

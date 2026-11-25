@@ -15,7 +15,6 @@ import { getArtistChecklist } from '../api/client'
 import { useSettings } from '../contexts/SettingsContext'
 import { resolveCardImageUrl } from '../utils/imageUrl'
 import { normalizeTcgdexLanguage } from '../utils/tcgdexLanguages'
-import { useScrollToTopOnPush } from '../hooks/useListScrollRestoration'
 import { CardDisplay } from '../components/card-system'
 import { CardModal } from '../components/CardItem'
 import TcgdexLanguageSelect from '../components/TcgdexLanguageSelect'
@@ -98,7 +97,6 @@ export default function ArtistChecklist() {
   const { artistName } = useParams()
   const [searchParams, setSearchParams] = useSearchParams()
   const { t, formatPrice } = useSettings()
-  useScrollToTopOnPush()
 
   const artistQuery = decodeArtistParam(artistName)
   const { lang, ownership, sortBy, sortOrder, page } = useMemo(

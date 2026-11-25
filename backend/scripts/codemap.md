@@ -6,49 +6,60 @@ This folder holds the **standalone CLI / admin utilities** for PokéCollector �
 operational entrypoints a host operator runs from a shell rather than through the
 HTTP API. None of these modules are part of the FastAPI application; they are thin,
 self-contained commands that open their own resources and exit with a process
-status. Five scripts live here:
+status. Seven scripts live here:
 
 1. **`analyse_scan_traces.py`** — read-only, offline summary of consented scanner
    diagnostics. It never touches the database or the network; it aggregates JSON
    trace files already written to disk.
 2. **`backfill_pokedex_metadata.py`** — host-triggered backfill of TCGdex Pokédex
    and Cardmarket metadata onto already-synced (non-custom) card rows.
-3. **`cache_pokedex_images.py`** — populate the persistent National Pokédex image
+3. **`build_artwork_index.py`** — offline build of the artwork-similarity index
+   (DINOv2 embeddings + ONNX model) that `services/artwork_index.py` loads as an
+   optional scanner candidate source. Needs torch/timm; not a runtime dependency.
+4. **`cache_pokedex_images.py`** — populate the persistent National Pokédex image
    cache (sprites + official artwork) from PokéAPI's hosted sprite repository.
-4. **`set_admin_password.py`** — reset (and optionally promote) an account's
+5. **`oidc_identity_repair.py`** — host-only, dry-run-by-default inspection and
+   repair of one exact OIDC issuer+subject linkage; never changes roles,
+   passwords, JWTs or collection data.
+6. **`set_admin_password.py`** — reset (and optionally promote) an account's
    password from the host, for recovering a lost/locked admin account.
-5. **`warm_collection_artwork.py`** — pre-fill the shared `image_cache` table
+7. **`warm_collection_artwork.py`** — pre-fill the shared `image_cache` table
    with each collection card's catalogue artwork, so the first open of a card is
    a local cache read instead of a multi-second TCGdex transfer. Re-runnable and
    safe: it skips cached keys, custom cards and cards without a source URL.
 
 They are operational glue, not domain logic: every script except
-`analyse_scan_traces` delegates the real work to `services/` and the persistence
-layer.
+`analyse_scan_traces` and `build_artwork_index` delegates the real work to
+`services/` and the persistence layer.
 
 ## Design
 
 - **Plain `argparse` CLIs with explicit exit codes.** Each script parses its own
   arguments and returns via `raise SystemExit(main())`: `0` success, `1` failure
-  (a failed enrich/cache result, unknown user), `2` for input errors (empty/
-  mismatched password). `set_admin_password` additionally uses `getpass` for an
-  interactive double-prompt so the password stays out of shell history.
+  (a failed enrich/cache result, unknown user, refused identity repair), `2` for
+  input errors (empty/mismatched password). `set_admin_password` additionally
+  uses `getpass` for an interactive double-prompt so the password stays out of
+  shell history; `build_artwork_index` exits `2` via `_die` when a dependency or
+  input is missing.
 - **Session-injected, self-managed DB access.** DB-backed scripts import
   `database.SessionLocal` and open/close their own session in a `try/finally`,
   mirroring the service layer's convention rather than sharing the web app's
-  `get_db` dependency. `analyse_scan_traces` imports no `database` or `models` at
-  all — it is pure filesystem/JSON analysis.
+  `get_db` dependency. `analyse_scan_traces` and `build_artwork_index` import no
+  `database` or `models` at all — they are pure filesystem/JSON/model work.
 - **Thin wrappers over services.** `backfill_pokedex_metadata` selects rows with
   `services.pokedex_backfill.pokedex_backfill_query` and hands them to
   `services.card_metadata.enrich_cards_metadata`; `cache_pokedex_images` calls
   `services.pokedex_images.populate_image_ids`/`populate_cache`; the password
-  script uses `services.auth.hash_password`. No business rules are re-implemented
-  in this folder.
-- **`__init__.py` makes `scripts` a package**, so the three DB-backed scripts run
+  script uses `services.auth.hash_password`; `oidc_identity_repair` uses
+  `services.auth_policy`, `services.oidc_identity` and
+  `services.oidc_transactions`. No business rules are re-implemented in this
+  folder.
+- **`__init__.py` makes `scripts` a package**, so the DB-backed scripts run
   as `python -m scripts.<module>` from the backend working directory (resolving
   sibling `database`/`models`/`services` imports). `analyse_scan_traces.py` is
   invoked by direct path (`python scripts/analyse_scan_traces.py`) and has no
-  intra-app imports.
+  intra-app imports; `build_artwork_index.py` also runs as
+  `python -m scripts.build_artwork_index` in a scratch environment.
 - **Result reporting is machine-readable.** The backfill, cache and artwork-warm
   scripts print a JSON result dict
   (`attempted`/`updated`/`missing`/`failed`/`deferred`, `cached`/`downloaded`/
@@ -77,6 +88,14 @@ commit_every=25)` (the generic missing-metadata predicate is bypassed because
 Cardmarket IDs can be absent on otherwise complete rows) → print JSON result →
 exit `1` if `result["failed"]` else `0`.
 
+**`build_artwork_index.py`** — `argparse` (`--out` required; `--images DIR` of
+`<tcg_card_id>.webp`, or `--urls TSV` to download into `<out>/images`; `--limit`,
+`--batch-size` default 16) → load torch/timm/numpy/Pillow, embed each image with
+a DINOv2 ViT-S/14 model → write L2-normalised float32 `embeddings.npy`,
+`ids.json` (index-aligned `tcg_card_id` list) and, once, the exported
+`dinov2_vits14.onnx`; unreadable images are skipped, and the service degrades to
+`is_available() == False` when the index or `onnxruntime` is absent.
+
 **`cache_pokedex_images.py`** — parse `--min`/`--max` (dex-id range), `--refresh`,
 `--missing-only` (no-op compatibility flag), `--delay` (default 0.05 s) → with no
 range, build `image_ids` as `range(1, MAX_DEX_ID+1)` plus every form
@@ -86,13 +105,15 @@ print JSON result → exit `1` if `result["failed"]` else `0`. The service
 deduplicates IDs, skips already-cached files (unless `--refresh`), fetches both
 `sprites` and `artwork` per ID, and throttles with `--delay`.
 
-**`warm_collection_artwork.py`** — parse `--limit` (0 = all), `--concurrency`
-(default 4), `--size large|small|both` (default large), `--dry-run` → open
-`SessionLocal` → list distinct `CollectionItem.card_id` and their catalogue cards
-→ chunked lookup of the matching `image_cache` keys → group the missing keys per
-card → with `--dry-run`, report `would_warm` and exit → otherwise fetch and store
-each card's missing slots in a `ThreadPoolExecutor`, one session per task → print
-the JSON summary and exit `1` if any fetch failed.
+**`oidc_identity_repair.py`** — `argparse` (`--user-id`, `--issuer`, `--subject`
+required, `--confirm` to write) → require and validate `OIDC_ISSUER_URL`, an
+exact issuer match, positive user id and bounded subject length → open
+`SessionLocal` → refuse when the issuer+subject is linked to another account or
+the target already owns a different identity for that issuer → print a preview
+and stop without `--confirm` → otherwise invalidate the target's pending link
+transactions and any login handoff for that exact identity, insert the
+`OidcIdentity` and commit (a concurrent change rolls back). `AUTH_MODE` and the
+`OIDC_*` settings stay environment-owned; the command never edits them.
 
 **`set_admin_password.py`** — parse `--username` (default `admin`), `--password`
 (optional; otherwise interactive), `--make-admin` → open `SessionLocal` → look up
@@ -101,6 +122,14 @@ new password (non-empty; interactive path confirms twice) → set
 `hashed_password = hash_password(password)` and clear `must_change_password`;
 with `--make-admin` also set `role="admin"`, `is_active=True` → `db.commit()` →
 print confirmation, exit `0`.
+
+**`warm_collection_artwork.py`** — parse `--limit` (0 = all), `--concurrency`
+(default 4), `--size large|small|both` (default large), `--dry-run` → open
+`SessionLocal` → list distinct `CollectionItem.card_id` and their catalogue cards
+→ chunked lookup of the matching `image_cache` keys → group the missing keys per
+card → with `--dry-run`, report `would_warm` and exit → otherwise fetch and store
+each card's missing slots in a `ThreadPoolExecutor`, one session per task → print
+the JSON summary and exit `1` if any fetch failed.
 
 ## Integration
 
@@ -113,6 +142,8 @@ print confirmation, exit `0`.
   still cold, `... python -m scripts.warm_collection_artwork --concurrency 4`
   fills it in place; a one-off `podman run` against an instance network must pass
   the instance's LAN resolvers (`--dns`) or every upstream fetch fails.
+  `... python -m scripts.oidc_identity_repair --user-id N --issuer … --subject …`
+  previews a linkage repair and only writes with `--confirm`.
 - **Persistence layer:** `database.SessionLocal` (SQLAlchemy session factory) and
   `models.Card` / `models.User` — the same engine/models the web app uses, so the
   scripts operate on the live database.
@@ -126,11 +157,17 @@ print confirmation, exit `0`.
     10000-range form image IDs).
   - `set_admin_password` → `services.auth.hash_password` (bcrypt), matching
     `services.auth.verify_password` at login.
+  - `oidc_identity_repair` → `services.auth_policy` (issuer URL validation),
+    `services.oidc_identity.find_identity`/`find_user_identity`, and
+    `services.oidc_transactions.invalidate_*_transactions`.
 - **Scanner pipeline (producer, read side):** `analyse_scan_traces.py` consumes
   the JSON files written by `services.scan_trace.py` (`ScanTrace.save` →
   `<stem>.json` under `SCAN_TRACE_DIR/user-<id>/<YYYY-MM-DD>/`; `record_ground_truth`
   later labels each with `ground_truth`, `correct`, `ground_truth_rank`). It is
   the offline counterpart to the runtime consent-controlled tracing feature.
+  `build_artwork_index.py` is the offline producer for `services.artwork_index`
+  (`ARTWORK_INDEX_DIR`, default `/app/data/artwork-index`); the backend runtime
+  only reads the resulting index plus `onnxruntime`.
 - **Tests:** `tests/test_set_admin_password.py` and `tests/test_pokedex_feature.py`
   import these modules directly and patch `SessionLocal`/service functions to
   exercise `main()` without a live DB or network.
