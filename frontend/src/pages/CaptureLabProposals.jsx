@@ -9,7 +9,7 @@ async function fetchProposal(item) {
   const urls = {}
   let unavailable = false
   let phoneUnavailable = false
-  for (const key of ['original', 'crop', 'turned', ...(item.cvUrl ? ['cv'] : []), ...(item.phoneUrl ? ['phone'] : [])]) {
+  for (const key of ['original', 'crop', 'rotated', ...(item.cvUrl ? ['cv'] : []), ...(item.phoneUrl ? ['phone'] : [])]) {
     const path = (key === 'cv' ? item.cvUrl : key === 'phone' ? item.phoneUrl : item[`${key}Url`])?.replace(/^\/api(?=\/)/, '')
     if (!path) continue
     try {
@@ -87,7 +87,7 @@ export default function CaptureLabProposals() {
   const verdict = (choice) => setVotes(prev => ({ ...prev, [current.stem]: choice }))
   const tally = Object.values(votes).reduce((acc, value) => ({ ...acc, [value]: acc[value] + 1 }), { crop: 0, original: 0 })
   const asset = current && assets[current.stem]
-  const src = asset?.urls?.[{ Original: 'original', Crop: 'crop', Turned: 'turned', CollectorVision: 'cv', Phone: 'phone' }[view]]
+  const src = asset?.urls?.[{ Original: 'original', Crop: 'crop', Turned: 'rotated', CollectorVision: 'cv', Phone: 'phone' }[view]]
   const noProposal = asset?.unavailable || !current?.cropUrl
   const onTouchStart = event => { touchStart.current = [event.touches[0].clientX, event.touches[0].clientY] }
   const onTouchEnd = event => {

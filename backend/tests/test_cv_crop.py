@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 try:
     import numpy as np
-    from PIL import Image
+    from PIL import Image, ImageDraw
 
     from services import cv_crop
 
@@ -18,6 +18,7 @@ except ModuleNotFoundError:
 
 RED = (255, 0, 0)
 BLUE = (0, 0, 255)
+GREEN = (0, 255, 0)
 
 
 def _square(top, bottom, size=(448, 448)):
@@ -27,10 +28,16 @@ def _square(top, bottom, size=(448, 448)):
 
 
 class _Detection:
-    def __init__(self, crop, *, present=True):
+    def __init__(self, crop, *, present=True, corners=None):
         self.crop = crop
         self.card_present = present
-        self.corners = None if not present else np.zeros((4, 2), dtype=np.float32)
+        if not present:
+            self.corners = None
+        elif corners is None:
+            # Zeros are a degenerate quad: the embedder fallback.
+            self.corners = np.zeros((4, 2), dtype=np.float32)
+        else:
+            self.corners = np.asarray(corners, dtype=np.float32)
         self.dewarped_with = None
 
     def dewarp(self, frame):
@@ -93,6 +100,30 @@ def _engine(results=None, *, top=BLUE, bottom=RED, embedder=None, catalog=None):
     ), detector, detection
 
 
+def _quad(width, height, box):
+    """Normalised TL, TR, BR, BL corners for an axis-aligned card ``box``."""
+    left, top, right, bottom = box
+    return np.asarray(
+        [
+            [left / width, top / height],
+            [right / width, top / height],
+            [right / width, bottom / height],
+            [left / width, bottom / height],
+        ],
+        dtype=np.float32,
+    )
+
+
+def _card_image(width=1200, height=1600, box=(200, 250, 1000, 1450)):
+    """A light card on a dark scene with a green marker in its top-left."""
+    image = Image.new("RGB", (width, height), (20, 20, 20))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle(box, fill=(200, 200, 200))
+    left, top, _right, _bottom = box
+    draw.rectangle((left, top, left + 60, top + 60), fill=GREEN)
+    return image
+
+
 @unittest.skipUnless(DEPS_AVAILABLE, "Proposal dependencies are not installed")
 class CvCropTests(unittest.TestCase):
     def setUp(self):
@@ -104,15 +135,15 @@ class CvCropTests(unittest.TestCase):
         cv_crop.reset_state()
         self.env.stop()
 
-    def _propose(self, engine):
+    def _propose(self, engine, image=None):
+        if image is None:
+            image = Image.new("RGB", (300, 400), (10, 10, 10))
         with patch.object(cv_crop, "_load_engine", return_value=engine), patch.object(
-            cv_crop, "_to_bgr", side_effect=lambda image: image
+            cv_crop, "_to_bgr", side_effect=lambda frame: frame
         ), patch.object(
             cv_crop, "_pad_border", side_effect=lambda frame: ("padded", frame)
         ):
-            return cv_crop.propose_with_collectorvision(
-                Image.new("RGB", (300, 400), (10, 10, 10))
-            )
+            return cv_crop.propose_with_collectorvision(image)
 
     def test_default_crop_source_is_phone(self):
         self.assertEqual(cv_crop.crop_source(), "phone")
@@ -141,6 +172,105 @@ class CvCropTests(unittest.TestCase):
         self.assertAlmostEqual(
             proposal.width / proposal.height, 63 / 88, places=3
         )
+
+    def test_native_warp_uses_the_original_pixels_and_measured_size(self):
+        image = _card_image()
+        corners = _quad(1200, 1600, (200, 250, 1000, 1450))
+        engine, _detector, _detection = _engine([_Detection(_square(BLUE, RED), corners=corners)])
+        proposal = self._propose(engine, image)
+
+        self.assertIsNotNone(proposal)
+        self.assertEqual(proposal.crop_raster, cv_crop.CROP_RASTER_NATIVE)
+        # The measured card is 800x1200 px; 63:88 fitted inside it is 800x1117.
+        self.assertGreater(proposal.width, 448)
+        self.assertGreater(proposal.height, 626)
+        self.assertLessEqual(proposal.width, 800)
+        self.assertLessEqual(proposal.height, 1200)
+        self.assertEqual((proposal.width, proposal.height), proposal.image.size)
+        self.assertAlmostEqual(
+            proposal.width / proposal.height, 63 / 88, places=2
+        )
+        # The green top-left marker survives the warp at the top-left.
+        red, green, blue = proposal.image.getpixel((30, 30))
+        self.assertGreater(green, red)
+        self.assertGreater(green, blue)
+
+    def test_native_half_turn_rotates_the_warped_output(self):
+        image = _card_image()
+        corners = _quad(1200, 1600, (200, 250, 1000, 1450))
+        # Red on top loses to the half turn, so the crop must be rotated.
+        engine, _detector, _detection = _engine(
+            [_Detection(_square(RED, BLUE), corners=corners)]
+        )
+        proposal = self._propose(engine, image)
+
+        self.assertIsNotNone(proposal)
+        self.assertEqual(proposal.crop_raster, cv_crop.CROP_RASTER_NATIVE)
+        self.assertEqual(proposal.turned_cw, 180)
+        # The marker moved from the top-left to the bottom-right.
+        red, green, blue = proposal.image.getpixel(
+            (proposal.width - 30, proposal.height - 30)
+        )
+        self.assertGreater(green, red)
+        self.assertGreater(green, blue)
+        red, green, blue = proposal.image.getpixel((30, 30))
+        # Card body is grey; the marker has no red.
+        self.assertGreater(red, 100)
+
+    def test_unusable_corners_fall_back_to_the_embedder_raster(self):
+        engine, _detector, _detection = _engine(
+            [_Detection(_square(BLUE, RED), corners=np.zeros((4, 2)))]
+        )
+        proposal = self._propose(engine)
+
+        self.assertIsNotNone(proposal)
+        self.assertEqual(proposal.crop_raster, cv_crop.CROP_RASTER_EMBEDDER)
+        self.assertEqual((proposal.width, proposal.height), (448, 626))
+
+    def test_non_finite_corners_fall_back_to_the_embedder_raster(self):
+        corners = np.asarray(
+            [[np.nan, 0], [1, 0], [1, 1], [0, 1]], dtype=np.float32
+        )
+        engine, _detector, _detection = _engine(
+            [_Detection(_square(BLUE, RED), corners=corners)]
+        )
+        proposal = self._propose(engine)
+
+        self.assertIsNotNone(proposal)
+        self.assertEqual(proposal.crop_raster, cv_crop.CROP_RASTER_EMBEDDER)
+
+    def test_margin_is_skipped_at_a_raster_edge_without_failing(self):
+        image = _card_image(box=(0, 0, 1200, 1600))
+        corners = _quad(1200, 1600, (0, 0, 1200, 1600))
+        engine, _detector, _detection = _engine([_Detection(_square(BLUE, RED), corners=corners)])
+        proposal = self._propose(engine, image)
+
+        self.assertIsNotNone(proposal)
+        self.assertEqual(proposal.crop_raster, cv_crop.CROP_RASTER_NATIVE)
+        self.assertGreater(proposal.width, 448)
+        self.assertLessEqual(proposal.width, 1200)
+        self.assertLessEqual(proposal.height, 1600)
+
+    def test_native_crop_never_upscales_beyond_the_measured_card(self):
+        image = _card_image(box=(500, 700, 560, 800))
+        corners = _quad(1200, 1600, (500, 700, 560, 800))
+        engine, _detector, _detection = _engine([_Detection(_square(BLUE, RED), corners=corners)])
+        proposal = self._propose(engine, image)
+
+        self.assertIsNotNone(proposal)
+        self.assertEqual(proposal.crop_raster, cv_crop.CROP_RASTER_NATIVE)
+        self.assertLessEqual(proposal.width, 60)
+        self.assertLessEqual(proposal.height, 100)
+
+    def test_native_crop_is_capped_at_max_edge(self):
+        width, height = cv_crop._target_size(10000, 14000)
+        self.assertLessEqual(max(width, height), cv_crop.MAX_EDGE)
+        self.assertGreater(height, 2000)
+        self.assertAlmostEqual(width / height, 63 / 88, places=2)
+
+        width, height = cv_crop._target_size(60, 100)
+        self.assertLessEqual(width, 60)
+        self.assertLessEqual(height, 100)
 
     def test_upright_choice_keeps_the_pixels_unmoved(self):
         # Blue on top scores 2 upright; the half turn would score 1.

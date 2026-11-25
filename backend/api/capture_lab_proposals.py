@@ -70,6 +70,10 @@ class _Proposal:
     source: str = "phone"
     identification: dict | None = None
     turned_cw: int = 0
+    # Which pixels produced a CollectorVision proposal: ``native`` (original
+    # raster warped with the detected corners) or ``embedder`` (its dewarp
+    # raster). ``None`` on the phone path.
+    crop_raster: str | None = None
     # CollectorVision's artefact identity and its digest. Both are None on the
     # phone path, which has its own ``STRAIGHTEN_VERSION``/config digest.
     cv_identity: dict | None = None
@@ -326,6 +330,7 @@ def _build_proposal(
                     else None
                 ),
                 turned_cw=int(proposal.turned_cw or 0),
+                crop_raster=proposal.crop_raster,
                 cv_identity=identity,
                 config_digest=cv_crop.cv_identity_digest(identity),
             )
@@ -482,6 +487,7 @@ def list_proposals(user: User = Depends(get_current_user)):
                 "source": proposal.source,
                 "identification": proposal.identification,
                 "turnedCw": proposal.turned_cw,
+                "cropRaster": proposal.crop_raster,
                 "cvIdentity": proposal.cv_identity,
                 "configDigest": proposal.config_digest,
                 "cv": _cv_entry(stem, cv_index),

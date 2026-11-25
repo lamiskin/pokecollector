@@ -465,6 +465,9 @@ def derive_straight_image(
         # when that path did. ``None`` when no proposal was produced.
         "source": None,
         "identification": None,
+        # "native" when the crop came from warping the original pixels with the
+        # detected corners, "embedder" when it was the library's dewarp raster.
+        "cropRaster": None,
         # The CollectorVision artefact identity and its digest when that path
         # produced the proposal; both stay null on the phone path.
         "cvIdentity": None,
@@ -491,6 +494,7 @@ def derive_straight_image(
                 proposal = cv_crop.propose_with_collectorvision(sanitized.rgb)
             if proposal is not None:
                 manifest["source"] = "collectorvision"
+                manifest["cropRaster"] = proposal.crop_raster
                 # A successful crop with a failed identification is still a
                 # proposal: the crop is the artefact, the identity is optional.
                 manifest["identification"] = (
