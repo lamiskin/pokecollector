@@ -43,9 +43,9 @@ const CAPTURE_BEAT_MS = 1100
 const DRAIN_MS = 380
 // How long the ring takes to settle onto a confirmed card, and to relax off it
 // again. Rising is quicker than relaxing so a detection reads as a decision and
-// a missed confirmation reads as a release, not a snap.
-const LOCK_RISE_MS = 340
-const LOCK_RELAX_MS = 700
+// a missed confirmation reads as a release, not a snap. Both are eased tweens.
+const LOCK_RISE_MS = 200
+const LOCK_RELAX_MS = 450
 // The ring is pushed this far outside the detected edge so it never paints over
 // the card's own artwork or text, which the user is still judging.
 const OUTSET = 3.4
@@ -56,13 +56,13 @@ const MIN_CARD_AREA = 0.12
 // means "I have your card" and holds for as long as that is true. The layer is
 // a backdrop filter over the video, masked and clipped by the inverse of the quad.
 const BLUR_PX = 7
-// Long enough to read as a deliberate change of focus, short enough that it has
-// landed by the time the ring has finished settling.
-const BLUR_FADE_IN_MS = 430
-const BLUR_FADE_OUT_MS = 520
+// Quick but eased: the blur should come up while the ring is still settling,
+// and release more slowly so it reads as a relaxation rather than a cut.
+const BLUR_FADE_IN_MS = 240
+const BLUR_FADE_OUT_MS = 420
 // A lost/none phase must persist this long before the blur releases, so a
 // one-frame blip cannot toggle it. captured/tooSmall release immediately.
-const BLUR_RELEASE_HOLD_MS = 350
+const BLUR_RELEASE_HOLD_MS = 240
 // Kept sharp outside the detected edge so the card's own border is not eaten by
 // the blur boundary. The ring sits at OUTSET, inside this margin.
 const BLUR_HOLE_MARGIN = 9
