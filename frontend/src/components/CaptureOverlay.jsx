@@ -10,7 +10,7 @@ import { createQuadSmoother, QUAD_GLIDE_MS } from '../utils/quadSmoothing'
  *  - a 200 ms ticker samples that clock and may only correct it *forward*, so a
  *    coarse sample never becomes a visible step and a jittery one never pulls
  *    the ring backwards;
- *  - capture is a 380 ms beat inside the component; the caller just drops the
+ *  - capture is a 1100 ms beat inside the component; the caller just drops the
  *    phase afterwards.
  *
  * Geometry arrives through the imperative `setQuad` handle because the tracker
@@ -38,6 +38,8 @@ const TRACK = '#a0a0b8'
 
 const TICK_MS = 200
 const CONFIRM_MS = 520
+// The capture beat is a settle, not a flash: longer than the confirmation pulse.
+const CAPTURE_BEAT_MS = 1100
 const DRAIN_MS = 380
 // How long the ring takes to settle onto a confirmed card, and to relax off it
 // again. Rising is quicker than relaxing so a detection reads as a decision and
@@ -690,7 +692,7 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
 
       // the moment of capture
       if (current === 'captured') {
-        const beat = clamp01((now - anim.beatStart) / CONFIRM_MS)
+        const beat = clamp01((now - anim.beatStart) / CAPTURE_BEAT_MS)
         for (const node of [progRef.current, glowRef.current, baseRef.current]) {
           node?.setAttribute('stroke', GREEN)
         }
@@ -704,13 +706,13 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
           ringRef.current?.setAttribute('transform', '')
           ringRef.current?.setAttribute('opacity', '1')
         } else {
-          const scale = 1 + 0.05 * beat
+          const scale = 1 + 0.05 * easeOutCubic(beat)
           ringRef.current?.setAttribute(
             'transform',
             `translate(${cx.toFixed(2)} ${cy.toFixed(2)}) scale(${scale.toFixed(3)}) `
               + `translate(${(-cx).toFixed(2)} ${(-cy).toFixed(2)})`,
           )
-          ringRef.current?.setAttribute('opacity', (1 - 0.92 * beat).toFixed(3))
+          ringRef.current?.setAttribute('opacity', (1 - beat).toFixed(3))
         }
       } else {
         for (const node of [progRef.current, glowRef.current, baseRef.current]) {

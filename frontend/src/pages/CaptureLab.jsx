@@ -21,6 +21,7 @@ import {
   setCaptureSoundEnabled,
 } from '../utils/captureSound'
 import { quadAreaFraction } from '../utils/perspectiveWarp'
+import { signatureDistance, signatureOf } from '../utils/patchSignature'
 import {
   cornerAgreement,
   createTracker,
@@ -106,6 +107,10 @@ const CAPTURE_RETRY_MS = 900
 // into one eased lock strength for the ring, so this only has to be long enough
 // for consecutive detections to overlap, not a visible state of its own.
 const CONFIRM_PULSE_MS = 300
+// A new presentation changes the picture inside the tracked quad even while the
+// geometry barely moves. Two consecutive checks above this difference re-arm.
+const REARM_SIGNATURE_DIFF = 0.12
+const REARM_CHECK_INTERVAL_MS = 250
 // A tracker whose last success is older than this is treated as gone when a
 // usable model result arrives, so it cannot block the model capture path.
 const TRACK_STALE_RESET_MS = 2000
@@ -146,7 +151,7 @@ const AUTO_REARM_MS = 800
 const AUTO_TRACK_OBS_MAX_AGE_MS = 1500
 // How long the overlay's success beat stays on screen; the overlay itself fades
 // the ring inside this window, so it only needs to outlive that animation.
-const CAPTURE_BEAT_MS = 420
+const CAPTURE_BEAT_MS = 1100
 
 function formatBytes(bytes) {
   if (!bytes && bytes !== 0) return 'unknown size'
@@ -467,6 +472,9 @@ export default function CaptureLab() {
   const [captureBeatAt, setCaptureBeatAt] = useState(null)
   const [captureNote, setCaptureNote] = useState('')
   const [soundOn, setSoundOn] = useState(isCaptureSoundEnabled)
+  const capturedSignatureRef = useRef(null)
+  const lastRearmCheckAtRef = useRef(0)
+  const rearmChangedStreakRef = useRef(0)
   const [softFocus, setSoftFocus] = useState(() => {
     try {
       const stored = window.localStorage.getItem('capture-lab-soft-focus')
@@ -1234,7 +1242,7 @@ export default function CaptureLab() {
     canvas.toBlob(blob => {
       if (!blob) return
       addFiles([new File([blob], `capture-${Date.now()}.jpg`, { type: 'image/jpeg' })])
-      playCaptureSuccess()
+      if (soundOn) playCaptureSuccess()
       recordDiagEvent('capture', { mode, rectified: false, corners: null })
     }, 'image/jpeg', 0.92)
   }
@@ -1326,6 +1334,9 @@ export default function CaptureLab() {
     state.absentSince = null
     state.lastSource = 'tracked'
     setAutoDisarmed(false)
+    capturedSignatureRef.current = null
+    lastRearmCheckAtRef.current = 0
+    rearmChangedStreakRef.current = 0
     setAutoHoldStartTs(null)
     setHoldHint('')
     liveScheduleRef.current?.(0)
@@ -1423,7 +1434,7 @@ export default function CaptureLab() {
             })
           }
           setCaptureNote('Waiting for a fresh look at the card; nothing captured.')
-          if (auto) playCaptureRefusal()
+          if (auto && soundOn) playCaptureRefusal()
           if (auto) rearmAutoCapture()
           return false
         }
@@ -1446,7 +1457,7 @@ export default function CaptureLab() {
             corroboration: 'none',
           })
           // The held quad disappeared before the frame could be cropped.
-          if (auto) playCaptureRefusal()
+          if (auto && soundOn) playCaptureRefusal()
           if (auto) rearmAutoCapture()
           return false
         }
@@ -1517,7 +1528,7 @@ export default function CaptureLab() {
           setCaptureNote('Waiting for the detector to confirm the card; nothing captured.')
           // This block only runs for auto-capture, which only starts after a
           // completed hold, so the refusal cue is never a positioning nudge.
-          playCaptureRefusal()
+          if (soundOn) playCaptureRefusal()
           rearmAutoCapture()
           return false
         }
@@ -1547,7 +1558,7 @@ export default function CaptureLab() {
           })
           // A completed hold ended with nothing captured: the camera never
           // produced a fresh frame, which the user cannot see.
-          if (auto) playCaptureRefusal()
+          if (auto && soundOn) playCaptureRefusal()
           if (auto) rearmAutoCapture()
           return false
         }
@@ -1604,9 +1615,23 @@ export default function CaptureLab() {
         }
         // A capture resets hunting to full speed for the next card.
         lastUsableAtRef.current = performance.now()
+        // Remember the captured look so a new card in the same quad can re-arm.
+        try {
+          capturedSignatureRef.current = signatureOf(
+            acquisition.canvas,
+            0,
+            0,
+            acquisition.canvas.width,
+            acquisition.canvas.height,
+          )
+        } catch {
+          capturedSignatureRef.current = null
+        }
+        rearmChangedStreakRef.current = 0
+        lastRearmCheckAtRef.current = 0
         // The success beat starts only once the File exists and is staged.
         setCaptureBeatAt(performance.now())
-        playCaptureSuccess()
+        if (soundOn) playCaptureSuccess()
         recordDiagEvent('capture', {
           mode,
           rectified: false,
@@ -1746,6 +1771,49 @@ export default function CaptureLab() {
     // The clock-driven fire check owns closing; observations only judge motion.
   }
 
+  // Content check for a new presentation: the tracked quad may never leave, so
+  // compare the current look inside it with the captured one.
+  const checkSignatureRearm = (corners, now) => {
+    const captured = capturedSignatureRef.current
+    if (!captured) return
+    if (now - lastRearmCheckAtRef.current < REARM_CHECK_INTERVAL_MS) return
+    lastRearmCheckAtRef.current = now
+    try {
+      const video = videoRef.current
+      if (!video || !video.videoWidth || !video.videoHeight) return
+      const quad = trackedQuadRef.current || corners
+      if (!quad || quad.length !== 4) return
+      const xs = quad.map(([x]) => x * video.videoWidth)
+      const ys = quad.map(([, y]) => y * video.videoHeight)
+      const minX = Math.max(0, Math.floor(Math.min(...xs)))
+      const maxX = Math.min(video.videoWidth, Math.ceil(Math.max(...xs)))
+      const minY = Math.max(0, Math.floor(Math.min(...ys)))
+      const maxY = Math.min(video.videoHeight, Math.ceil(Math.max(...ys)))
+      const width = maxX - minX
+      const height = maxY - minY
+      if (!(width > 1) || !(height > 1)) return
+      const distance = signatureDistance(
+        captured,
+        signatureOf(video, minX, minY, width, height),
+      )
+      recordDiagEvent('rearm-check', {
+        distance: Number.isFinite(distance) ? Number(distance.toFixed(4)) : null,
+        trackHits: trackerStatsRef.current.hits,
+      })
+      if (!Number.isFinite(distance)) return
+      rearmChangedStreakRef.current = distance > REARM_SIGNATURE_DIFF
+        ? rearmChangedStreakRef.current + 1
+        : 0
+      if (rearmChangedStreakRef.current >= 2) {
+        recordDiagEvent('auto-rearm', { reason: 'changed' })
+        rearmAutoCapture()
+      }
+    } catch {
+      // A failed read must never re-arm or break the loop.
+      rearmChangedStreakRef.current = 0
+    }
+  }
+
   // Deliberate physical-presentation heuristic, not card identity: two identical
   // copies in a row still require the card to be removed and replaced.
   const evaluateAutoCapture = result => {
@@ -1771,6 +1839,9 @@ export default function CaptureLab() {
         if (now - state.absentSince >= AUTO_REARM_MS) {
           state.disarmed = false
           state.absentSince = null
+          capturedSignatureRef.current = null
+          rearmChangedStreakRef.current = 0
+          lastRearmCheckAtRef.current = 0
           setAutoDisarmed(false)
           setCaptureNote('')
           setHoldHint('')
@@ -1783,7 +1854,9 @@ export default function CaptureLab() {
     state.absentSince = null
     if (state.disarmed) {
       // A card still in view is the same presentation: one automatic capture.
-      // Retaking is deliberate, via the manual Capture button.
+      // Retaking is deliberate, via the manual Capture button. A changed look
+      // inside the same quad is a new card, so let content re-arm it.
+      checkSignatureRearm(result.corners, now)
       return
     }
     if (!autoCaptureRef.current) {
