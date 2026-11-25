@@ -49,10 +49,10 @@ export const QUAD_AREA_JUMP_RATIO = 1.6
 // How long the drawn outline takes to close most of the gap to the filtered
 // target: the per-frame follower's time constant. 200 ms is deliberately slow:
 // delay is acceptable, visible stepping is not.
-export const QUAD_FOLLOW_TAU_MS = 200
+export const QUAD_FOLLOW_TAU_MS = 90
 // How long a discontinuity takes to travel to the new quad. 560 ms with an
 // ease-in-out leaves and lands gently rather than snapping.
-export const QUAD_GLIDE_MS = 560
+export const QUAD_GLIDE_MS = 0
 
 // Sampling gaps outside this range are either a clock hiccup or an idle pause;
 // clamping keeps alpha meaningful without a special case for either.
@@ -143,6 +143,7 @@ export function createQuadSmoother(options = {}) {
   let glideStart = 0
   let glideDuration = QUAD_GLIDE_MS
   let gliding = false
+  let jumpCount = 0
   // A caller that passes no timestamp still needs a monotonic clock for the
   // glide, so the sample intervals stand in for one.
   let clock = 0
@@ -269,6 +270,7 @@ export function createQuadSmoother(options = {}) {
     const nextArea = areaOf(quad)
     const areaRatio = previousArea > 0 && nextArea > 0 ? nextArea / previousArea : 1
     if (jump > diagonal * jumpFraction || areaRatio > areaJumpRatio || areaRatio < 1 / areaJumpRatio) {
+      jumpCount += 1
       if (glideMs > 0) startGlide(quad, now)
       else seed(quad, now)
       advanceShown(dt, now)
@@ -347,6 +349,9 @@ export function createQuadSmoother(options = {}) {
     },
     get gliding() {
       return gliding
+    },
+    get jumpCount() {
+      return jumpCount
     },
   }
 }
