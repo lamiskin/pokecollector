@@ -77,7 +77,10 @@ def _geometry_field(*entries):
 class ScanJobsApiTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.env = patch.dict(os.environ, {"SCAN_UPLOAD_DIR": self.temp_dir.name})
+        self.env = patch.dict(
+            os.environ,
+            {"SCAN_UPLOAD_DIR": self.temp_dir.name, "SCAN_STRAIGHTEN": "off"},
+        )
         self.env.start()
         self.engine = create_engine(
             "sqlite://",

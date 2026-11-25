@@ -1,4 +1,5 @@
 import datetime
+import hashlib
 import io
 import json
 import os
@@ -8,7 +9,7 @@ from unittest.mock import patch
 
 try:
     from fastapi import UploadFile
-    from PIL import Image
+    from PIL import Image, ImageDraw
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
     from sqlalchemy.pool import StaticPool
@@ -80,6 +81,50 @@ def _geometry(**overrides):
     return geometry
 
 
+CARD_BACKGROUND = (26, 28, 34)
+CARD_STOCK = (246, 246, 242)
+CARD_RECT = (20, 20, 399, 579)
+CARD_CANVAS = (420, 600)
+
+
+def _card_canvas_bytes(size=CARD_CANVAS, rect=CARD_RECT):
+    """A bright card on a dark background: every claimed side has a real edge."""
+    canvas = Image.new("RGB", size, CARD_BACKGROUND)
+    draw = ImageDraw.Draw(canvas)
+    draw.rectangle(rect, fill=CARD_STOCK, outline=(4, 4, 4), width=6)
+    output = io.BytesIO()
+    canvas.save(output, format="JPEG", quality=95)
+    return output.getvalue()
+
+
+def _card_geometry(size=CARD_CANVAS, rect=CARD_RECT):
+    width, height = size
+    left, top, right, bottom = rect
+    return _geometry(
+        width=width,
+        height=height,
+        quad=[
+            [left / width, top / height],
+            [right / width, top / height],
+            [right / width, bottom / height],
+            [left / width, bottom / height],
+        ],
+    )
+
+
+def _shrink_geometry(geometry, fraction=0.6):
+    quad = geometry["quad"]
+    cx = sum(point[0] for point in quad) / 4.0
+    cy = sum(point[1] for point in quad) / 4.0
+    return {
+        **geometry,
+        "quad": [
+            [cx + (u - cx) * fraction, cy + (v - cy) * fraction]
+            for u, v in quad
+        ],
+    }
+
+
 def _is_red(pixel):
     return pixel[0] > 150 and pixel[0] > pixel[2]
 
@@ -122,6 +167,16 @@ class ScanSanitizationTests(unittest.TestCase):
         sanitized = sanitize_image_bytes(raw)
         with Image.open(io.BytesIO(sanitized.data)) as result:
             self.assertEqual(result.format, "JPEG")
+
+    def test_sanitized_result_exposes_the_pre_encode_rgb(self):
+        sanitized = sanitize_image_bytes(_marker_image_bytes((90, 130)))
+
+        self.assertIsNotNone(sanitized.rgb)
+        self.assertEqual(sanitized.rgb.mode, "RGB")
+        self.assertEqual(sanitized.rgb.size, (90, 130))
+        # The bytes are encoded from the same raster, not a decode of them.
+        with Image.open(io.BytesIO(sanitized.data)) as stored:
+            self.assertEqual(stored.size, sanitized.rgb.size)
 
     def test_rotation_90_is_a_clockwise_quarter_turn_of_the_stored_pixels(self):
         sanitized = sanitize_image_bytes(_marker_image_bytes((90, 130)), rotation_cw=90)
@@ -171,7 +226,10 @@ class ScanSanitizationTests(unittest.TestCase):
 class ScanJobStorageTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.env = patch.dict(os.environ, {"SCAN_UPLOAD_DIR": self.temp_dir.name})
+        self.env = patch.dict(
+            os.environ,
+            {"SCAN_UPLOAD_DIR": self.temp_dir.name, "SCAN_STRAIGHTEN": "off"},
+        )
         self.env.start()
         self.engine = create_engine(
             "sqlite://",
@@ -359,6 +417,182 @@ class ScanJobStorageTests(unittest.IsolatedAsyncioTestCase):
                     [_upload(small), _upload(small)],
                 )
         self.assertEqual(list(scan_storage.scan_upload_root().iterdir()), [])
+
+    async def _shadow_job(self, geometry):
+        with patch.dict(os.environ, {"SCAN_STRAIGHTEN": "shadow"}):
+            job = await create_scan_job(
+                self.db,
+                self.user.id,
+                [_upload(_card_canvas_bytes())],
+                capture_geometry=[geometry],
+            )
+        item = self.db.query(ScanJobItem).filter(ScanJobItem.job_id == job.id).one()
+        image_path = scan_storage.resolve_scan_path(item.image_path)
+        return item, image_path
+
+    async def test_straighten_off_writes_no_artifact_or_manifest(self):
+        job = await create_scan_job(
+            self.db,
+            self.user.id,
+            [_upload(_card_canvas_bytes())],
+            capture_geometry=[_card_geometry()],
+        )
+        item = self.db.query(ScanJobItem).filter(ScanJobItem.job_id == job.id).one()
+        image_path = scan_storage.resolve_scan_path(item.image_path)
+
+        self.assertFalse(scan_storage.straighten_manifest_path(image_path).exists())
+        self.assertEqual(scan_storage.straighten_artifact_paths(image_path), [])
+
+    async def test_shadow_mode_writes_artifact_and_manifest(self):
+        raw = _card_canvas_bytes()
+        geometry = _card_geometry()
+        with patch.dict(os.environ, {"SCAN_STRAIGHTEN": "shadow"}), self.assertLogs(
+            "services.scan_storage", level="INFO"
+        ) as logs:
+            job = await create_scan_job(
+                self.db,
+                self.user.id,
+                [_upload(raw)],
+                capture_geometry=[geometry],
+            )
+        item = self.db.query(ScanJobItem).filter(ScanJobItem.job_id == job.id).one()
+        image_path = scan_storage.resolve_scan_path(item.image_path)
+        manifest_path = scan_storage.straighten_manifest_path(image_path)
+
+        self.assertEqual(
+            manifest_path.name, f"{image_path.stem}.straighten.json"
+        )
+        payload = json.loads(manifest_path.read_text())
+        self.assertEqual(payload["state"], "ready", payload)
+        self.assertIsNone(payload["reason"])
+        self.assertEqual(payload["helperVersion"], "v1")
+        self.assertEqual(
+            payload["sourceSha256"],
+            hashlib.sha256(image_path.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(payload["geometry"], geometry)
+        self.assertEqual(payload["rotationCw"], 0)
+        self.assertIsInstance(payload["createdAt"], str)
+
+        artifacts = scan_storage.straighten_artifact_paths(image_path)
+        self.assertEqual(len(artifacts), 1)
+        artifact = artifacts[0]
+        self.assertEqual(
+            artifact.name,
+            payload["artifact"],
+        )
+        self.assertTrue(
+            artifact.name.startswith(f"{image_path.stem}.straight-v1-")
+        )
+        self.assertTrue(artifact.is_file())
+        self.assertEqual(artifact.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(manifest_path.stat().st_mode & 0o777, 0o600)
+        with Image.open(artifact) as output:
+            self.assertEqual(
+                (payload["outputWidth"], payload["outputHeight"]), output.size
+            )
+        self.assertEqual(payload["outputBytes"], artifact.stat().st_size)
+        self.assertIn("straighten mode=shadow state=ready", "\n".join(logs.output))
+
+    async def test_shadow_geometry_follows_the_collector_rotation(self):
+        geometry = _card_geometry()
+        with patch.dict(os.environ, {"SCAN_STRAIGHTEN": "shadow"}):
+            job = await create_scan_job(
+                self.db,
+                self.user.id,
+                [_upload(_card_canvas_bytes())],
+                rotations=[90],
+                capture_geometry=[geometry],
+            )
+        item = self.db.query(ScanJobItem).filter(ScanJobItem.job_id == job.id).one()
+        image_path = scan_storage.resolve_scan_path(item.image_path)
+        payload = json.loads(
+            scan_storage.straighten_manifest_path(image_path).read_text()
+        )
+
+        with Image.open(image_path) as stored:
+            self.assertEqual(stored.size, (600, 420))
+        self.assertEqual(payload["state"], "ready", payload)
+        self.assertEqual(payload["rotationCw"], 90)
+        artifact = image_path.with_name(payload["artifact"])
+        with Image.open(artifact) as output:
+            self.assertEqual(
+                (payload["outputWidth"], payload["outputHeight"]), output.size
+            )
+
+    async def test_shadow_abstention_writes_manifest_without_artifact(self):
+        geometry = _shrink_geometry(_card_geometry())
+        _, image_path = await self._shadow_job(geometry)
+        manifest_path = scan_storage.straighten_manifest_path(image_path)
+
+        payload = json.loads(manifest_path.read_text())
+        self.assertEqual(payload["state"], "abstained", payload)
+        self.assertIn(payload["reason"], {"boundary_unsupported", "boundary_competing"})
+        self.assertIsNone(payload["artifact"])
+        self.assertIsNone(payload["outputWidth"])
+        self.assertEqual(scan_storage.straighten_artifact_paths(image_path), [])
+
+    async def test_shadow_helper_failure_is_logged_and_the_scan_succeeds(self):
+        with patch.dict(os.environ, {"SCAN_STRAIGHTEN": "shadow"}), patch(
+            "services.scan_straighten.try_straighten",
+            side_effect=RuntimeError("boom"),
+        ), self.assertLogs("services.scan_storage", level="WARNING") as logs:
+            job = await create_scan_job(
+                self.db,
+                self.user.id,
+                [_upload(_card_canvas_bytes())],
+                capture_geometry=[_card_geometry()],
+            )
+
+        item = self.db.query(ScanJobItem).filter(ScanJobItem.job_id == job.id).one()
+        image_path = scan_storage.resolve_scan_path(item.image_path)
+        payload = json.loads(
+            scan_storage.straighten_manifest_path(image_path).read_text()
+        )
+
+        self.assertTrue(image_path.is_file())
+        self.assertEqual(item.status, "pending")
+        self.assertEqual(payload["state"], "error", payload)
+        self.assertIn("RuntimeError", payload["reason"])
+        self.assertEqual(scan_storage.straighten_artifact_paths(image_path), [])
+        self.assertIn("scan straighten failed", "\n".join(logs.output))
+
+    async def test_deleting_the_image_removes_straight_files(self):
+        _, image_path = await self._shadow_job(_card_geometry())
+        manifest_path = scan_storage.straighten_manifest_path(image_path)
+        artifacts = scan_storage.straighten_artifact_paths(image_path)
+        self.assertEqual(len(artifacts), 1)
+        self.assertTrue(manifest_path.is_file())
+
+        scan_storage.delete_scan_image(
+            self.db.query(ScanJobItem).one().image_path
+        )
+
+        self.assertFalse(image_path.exists())
+        self.assertFalse(manifest_path.exists())
+        for artifact in artifacts:
+            self.assertFalse(artifact.exists())
+        self.assertFalse(image_path.parent.exists())
+
+    async def test_on_mode_warns_once_and_runs_as_shadow(self):
+        scan_storage._straighten_on_warned = False
+        with patch.dict(os.environ, {"SCAN_STRAIGHTEN": "on"}), self.assertLogs(
+            "services.scan_storage", level="WARNING"
+        ) as logs:
+            job = await create_scan_job(
+                self.db,
+                self.user.id,
+                [_upload(_card_canvas_bytes())],
+                capture_geometry=[_card_geometry()],
+            )
+        item = self.db.query(ScanJobItem).filter(ScanJobItem.job_id == job.id).one()
+        image_path = scan_storage.resolve_scan_path(item.image_path)
+        payload = json.loads(
+            scan_storage.straighten_manifest_path(image_path).read_text()
+        )
+
+        self.assertEqual(payload["state"], "ready", payload)
+        self.assertIn("not implemented yet", "\n".join(logs.output))
 
 
 if __name__ == "__main__":

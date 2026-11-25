@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import datetime
+import hashlib
 import io
 import json
 import logging
+import math
 import os
 import shutil
 import uuid
@@ -38,6 +40,11 @@ MAX_IMAGE_PIXELS = 50_000_000
 MAX_IMAGE_EDGE = 2048
 JPEG_QUALITY = 90
 GEOMETRY_SIDECAR_SUFFIX = ".geometry.json"
+STRAIGHTEN_JPEG_QUALITY = 92
+STRAIGHTEN_MANIFEST_SUFFIX = ".straighten.json"
+STRAIGHTEN_ARTIFACT_PREFIX = ".straight-v1-"
+STRAIGHTEN_MODES = ("off", "shadow", "on")
+STRAIGHTEN_DEFAULT_MODE = "off"
 SCAN_RETENTION_DAYS = 14
 ALLOWED_IMAGE_FORMATS = frozenset({"JPEG", "PNG", "WEBP", "HEIF", "HEIC"})
 # Pillow's ROTATE_* constants are counter-clockwise, so a clockwise quarter
@@ -63,6 +70,44 @@ class SanitizedScanImage:
     # later consumer can map client coordinates onto the stored pixels.
     width: int | None = None
     height: int | None = None
+    # The pre-encode RGB raster. A shadow derivative is encoded from these
+    # pixels directly instead of decoding the stored JPEG again; callers that
+    # only need the bytes can ignore it.
+    rgb: Image.Image | None = None
+
+
+_straighten_on_warned = False
+_straighten_unknown_warned: set[str] = set()
+
+
+def straighten_mode() -> str:
+    """Resolve ``SCAN_STRAIGHTEN`` to ``off``, ``shadow`` or ``on``.
+
+    ``on`` is accepted by the contract but not implemented in this change: it
+    would rewrite the stored image, which would ripple into recognition and
+    review. It therefore runs as ``shadow`` (non-destructive and still
+    observable) and warns once, so an operator who selected it is not silently
+    left with no diagnostics. Unknown values fall back to ``off``.
+    """
+    global _straighten_on_warned
+    raw = os.environ.get("SCAN_STRAIGHTEN", "").strip().lower()
+    if not raw:
+        return STRAIGHTEN_DEFAULT_MODE
+    if raw in ("off", "shadow"):
+        return raw
+    if raw == "on":
+        if not _straighten_on_warned:
+            _straighten_on_warned = True
+            logger.warning(
+                "SCAN_STRAIGHTEN=on is not implemented yet; running as shadow"
+            )
+        return "shadow"
+    if raw not in _straighten_unknown_warned:
+        _straighten_unknown_warned.add(raw)
+        logger.warning(
+            "SCAN_STRAIGHTEN=%s is not a known mode; straightening stays off", raw
+        )
+    return "off"
 
 
 def scan_upload_root() -> Path:
@@ -159,6 +204,7 @@ def sanitize_image_bytes(raw: bytes, rotation_cw: int | None = None) -> Sanitize
         rotation_cw=rotation,
         width=stored_width,
         height=stored_height,
+        rgb=oriented,
     )
 
 
@@ -232,6 +278,167 @@ def write_geometry_sidecar(
         )
 
 
+def straighten_manifest_path(image_path: Path) -> Path:
+    """The straighten manifest stored next to a sanitized scan image."""
+    return image_path.with_name(f"{image_path.stem}{STRAIGHTEN_MANIFEST_SUFFIX}")
+
+
+def straighten_artifact_paths(image_path: Path) -> list[Path]:
+    """Every derived straight crop written for one sanitized scan image."""
+    return sorted(
+        image_path.parent.glob(f"{image_path.stem}{STRAIGHTEN_ARTIFACT_PREFIX}*.jpg")
+    )
+
+
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    temporary_path = path.with_name(f".{path.name}.tmp")
+    try:
+        with temporary_path.open("wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+        path.chmod(0o600)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def _straighten_quad_pixels(
+    geometry: dict | None,
+    rotation_cw: int,
+    width: int,
+    height: int,
+) -> list[tuple[float, float]] | None:
+    """Turn the client's normalized quad into sanitized-raster pixels."""
+    if not isinstance(geometry, dict):
+        return None
+    raw_quad = geometry.get("quad")
+    if not isinstance(raw_quad, (list, tuple)) or len(raw_quad) != 4:
+        return None
+    try:
+        points = [(float(point[0]), float(point[1])) for point in raw_quad]
+    except (TypeError, ValueError, IndexError):
+        return None
+    if not all(math.isfinite(u) and math.isfinite(v) for u, v in points):
+        return None
+    if not all(0.0 <= u <= 1.0 and 0.0 <= v <= 1.0 for u, v in points):
+        return None
+    from services.scan_straighten import transform_quad_for_storage
+
+    return transform_quad_for_storage(points, rotation_cw, width, height)
+
+
+def _write_straighten_manifest(image_path: Path, payload: dict) -> None:
+    """Write the manifest atomically; a failure here must not fail the scan."""
+    try:
+        body = json.dumps(payload, separators=(",", ":")) + "\n"
+        _atomic_write_bytes(straighten_manifest_path(image_path), body.encode("utf-8"))
+    except Exception:  # noqa: BLE001 - diagnostics must never fail a scan
+        logger.warning(
+            "scan straighten manifest not written path=%s", image_path, exc_info=True
+        )
+
+
+def derive_straight_image(
+    relative_path: str,
+    geometry: dict | None,
+    sanitized: SanitizedScanImage,
+) -> None:
+    """Shadow-only straight derivative; never raises and never touches the scan.
+
+    Called after the stored JPEG is written. In ``shadow`` mode a valid client
+    quad is transformed into the stored raster's pixels and handed to
+    ``try_straighten``; the result is written beside the original together with
+    a manifest describing what happened. Recognition, the API payload and the
+    stored image are unchanged.
+    """
+    if straighten_mode() == "off":
+        return
+    try:
+        image_path = resolve_scan_path(relative_path)
+    except ScanUploadError:
+        return
+    if sanitized.rgb is None or not sanitized.width or not sanitized.height:
+        return
+    try:
+        quad = _straighten_quad_pixels(
+            geometry, sanitized.rotation_cw, sanitized.width, sanitized.height
+        )
+    except Exception:  # noqa: BLE001 - a missing helper dependency must not fail a scan
+        logger.warning(
+            "scan straighten quad transform failed path=%s", relative_path, exc_info=True
+        )
+        return
+    if quad is None:
+        return
+
+    manifest: dict = {
+        "state": "error",
+        "reason": None,
+        "helperVersion": None,
+        "sourceSha256": hashlib.sha256(sanitized.data).hexdigest(),
+        "geometry": geometry,
+        "rotationCw": int(sanitized.rotation_cw or 0),
+        "outputWidth": None,
+        "outputHeight": None,
+        "outputBytes": None,
+        "artifact": None,
+        "createdAt": datetime.datetime.utcnow().isoformat() + "Z",
+    }
+    out_width = out_height = 0
+    try:
+        from services import scan_straighten
+
+        manifest["helperVersion"] = scan_straighten.HELPER_VERSION
+        result = scan_straighten.try_straighten(sanitized.rgb, quad)
+        if isinstance(result, scan_straighten.Straightened):
+            output = io.BytesIO()
+            result.image.save(
+                output,
+                format="JPEG",
+                quality=STRAIGHTEN_JPEG_QUALITY,
+                optimize=True,
+                progressive=True,
+            )
+            data = output.getvalue()
+            digest = hashlib.sha256(data).hexdigest()
+            artifact_path = image_path.with_name(
+                f"{image_path.stem}{STRAIGHTEN_ARTIFACT_PREFIX}{digest[:8]}.jpg"
+            )
+            _atomic_write_bytes(artifact_path, data)
+            manifest.update(
+                state="ready",
+                reason=None,
+                artifact=artifact_path.name,
+                outputWidth=result.width,
+                outputHeight=result.height,
+                outputBytes=len(data),
+            )
+            out_width, out_height = result.width, result.height
+        else:
+            manifest.update(
+                state="abstained",
+                reason=str(getattr(result, "reason", "abstained")),
+            )
+    except Exception as exc:  # noqa: BLE001 - shadow work must never fail a scan
+        logger.warning(
+            "scan straighten failed path=%s", relative_path, exc_info=True
+        )
+        manifest.update(
+            state="error",
+            reason=f"{type(exc).__name__}: {exc}"[:300],
+        )
+    finally:
+        _write_straighten_manifest(image_path, manifest)
+        logger.info(
+            "straighten mode=shadow state=%s reason=%s out=%sx%s",
+            manifest["state"],
+            manifest.get("reason") or "-",
+            out_width,
+            out_height,
+        )
+
+
 def resolve_scan_path(relative_path: str) -> Path:
     root = scan_upload_root()
     candidate = (root / str(relative_path or "")).resolve()
@@ -252,6 +459,12 @@ def delete_scan_image(relative_path: str | None) -> None:
         geometry_sidecar_path(path).unlink(missing_ok=True)
     except OSError:
         logger.warning("scan geometry sidecar not deleted path=%s", relative_path)
+    try:
+        straighten_manifest_path(path).unlink(missing_ok=True)
+        for artifact_path in straighten_artifact_paths(path):
+            artifact_path.unlink(missing_ok=True)
+    except OSError:
+        logger.warning("scan straighten files not deleted path=%s", relative_path)
     try:
         path.parent.rmdir()
     except OSError:
@@ -358,6 +571,12 @@ async def create_scan_job(
                 stored_width=sanitized.width,
                 stored_height=sanitized.height,
                 rotation_cw=sanitized.rotation_cw,
+            )
+            # Shadow-only derivative: nothing downstream reads it in this step.
+            derive_straight_image(
+                relative_path,
+                capture_geometry[position] if capture_geometry is not None else None,
+                sanitized,
             )
             db.add(
                 ScanJobItem(

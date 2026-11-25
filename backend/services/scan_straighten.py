@@ -11,9 +11,9 @@ edges on perspective photographs.
 
 Geometry alone cannot tell whether the supplied quad is the card's boundary.
 ``assess_edge_support`` reads a 1-D gradient profile normal to each claimed
-side and vetoes the warp when the claim has no edge of its own (a card cut by
-the frame) or when a stronger parallel edge sits off the claim (a quad locked
-onto a loader lip, a printed inner frame or inner artwork).
+side and vetoes the warp when any of the four claims has no edge of its own
+(a card cut by the frame) or when a stronger parallel edge sits off the claim
+(a quad locked onto a loader lip, a printed inner frame or inner artwork).
 """
 
 from __future__ import annotations
@@ -24,6 +24,8 @@ from typing import Sequence, Tuple
 
 import numpy as np
 from PIL import Image
+
+HELPER_VERSION = "v1"
 
 CARD_ASPECT = 63.0 / 88.0
 MIN_SIDE_PX = 8.0
@@ -130,23 +132,28 @@ def assess_edge_support(
     * Average the per-position profiles and take the absolute central
       difference; that is the response profile.
 
-    Per side the numbers that matter are the response at the claimed line
-    (offset 0), the median response inside the card, the strongest response
-    anywhere else in the profile, and the step contrast across the claimed
-    line (mean of three pixels either side).
+    Per side the numbers that matter are the step contrast across the claimed
+    line (the largest band-mean difference over band widths 1..``band_px``
+    either side), the median response inside the card, and the strongest
+    parallel response anywhere else in the profile. The reported per-side
+    support ratio is the first divided by the second.
 
-    A side is **supported** when all three hold: the step contrast is at least
-    ``MIN_STEP`` grey levels (a genuinely flat profile is not an edge), the
-    claimed response is a local maximum within +-2 px, and it is at least
-    ``SUPPORT_RATIO`` times the median inward response.
+    A side is **supported** when the step contrast is at least ``MIN_STEP``
+    grey levels (a genuinely flat profile is not an edge) and the support ratio
+    is at least ``SUPPORT_RATIO``. Widest-band comparison gives the claim a
+    +-``band_px`` tolerance, which a rotated or antialiased edge needs.
 
     A side is **competing** when the step contrast is below ``MIN_STEP`` (no
     edge of its own) and a parallel response elsewhere in the profile exceeds
-    ``COMPETE_RATIO`` times the claimed response: the claim is inside the card
-    and a real edge lies off it.
+    ``COMPETE_RATIO`` times the step (floored at ``MIN_STEP``, so a flat claim
+    needs a parallel response above 12 grey levels): the claim is inside the
+    card and a real edge lies off it.
 
     Verdict: ``competing`` if any side is competing, else ``unsupported`` if
-    fewer than three sides are supported, else ``ok``.
+    any of the four sides is unsupported, else ``ok``. Requiring all four is
+deliberate: a card cut along one whole side looks exactly like a valid
+three-sided claim, and straightening a shaved card loses card content, while
+abstaining only leaves the padded photo in place.
 
     Limitation: a quad sitting on a top-loader's *outer* silhouette is
     pixel-identical to a card with a thick dark border, so this method passes
@@ -209,28 +216,35 @@ def assess_edge_support(
 
         response = np.abs(np.gradient(profile, 1.0))
         zero = reach
-        claimed = float(response[zero])
         inward = np.abs(response[zero + 1:])
-        outward = np.abs(response[:zero])
         median_in = float(np.median(inward)) if inward.size else 0.0
-        peak_in = float(np.max(inward)) if inward.size else 0.0
-        peak_out = float(np.max(outward)) if outward.size else 0.0
 
-        window = max(1, min(step_count, 3, reach))
-        before = profile[max(0, zero - window):zero]
-        after = profile[zero + 1:zero + 1 + window]
-        claim_step = (
-            abs(float(before.mean()) - float(after.mean()))
-            if before.size and after.size else 0.0
-        )
-        local = response[max(0, zero - 2):zero + 3]
-        local_max = bool(local.size) and claimed >= 0.9 * float(local.max())
-        ratio = claimed / max(median_in, _RATIO_EPS)
-        supported = claim_step >= MIN_STEP and local_max and ratio >= SUPPORT_RATIO
-        parallel_peak = max(peak_in, peak_out)
+        # The step contrast is the largest band-mean difference either side of
+        # the claim, over band widths 1..band_px. Taking the largest lets a
+        # thin printed border (where a wide window reaches the card body) and
+        # a thick one (where only a wide window spans the rim) both register.
+        window = max(1, min(step_count, reach))
+        claim_step = 0.0
+        for size in range(1, window + 1):
+            before = profile[max(0, zero - size):zero]
+            after = profile[zero + 1:zero + 1 + size]
+            if before.size and after.size:
+                claim_step = max(
+                    claim_step, abs(float(before.mean()) - float(after.mean()))
+                )
+
+        ratio = claim_step / max(median_in, _RATIO_EPS)
+        supported = claim_step >= MIN_STEP and ratio >= SUPPORT_RATIO
+
+        # A competing edge must be a separate parallel edge, not the near side
+        # of the claimed transition itself, so the +-2 px claim window is
+        # excluded.
+        parallel = np.abs(np.concatenate((response[:max(0, zero - 2)],
+                                          response[zero + 3:])))
+        parallel_peak = float(parallel.max()) if parallel.size else 0.0
         is_competing = (
             claim_step < MIN_STEP
-            and parallel_peak > COMPETE_RATIO * max(claimed, MIN_STEP)
+            and parallel_peak > COMPETE_RATIO * max(claim_step, MIN_STEP)
         )
 
         if supported:
@@ -244,7 +258,7 @@ def assess_edge_support(
 
     if any(competing):
         verdict = "competing"
-    elif supported_count < 3:
+    elif supported_count < 4:
         verdict = "unsupported"
     else:
         verdict = "ok"
@@ -256,6 +270,40 @@ def assess_edge_support(
         + "; ".join(notes)
     )
     return EdgeSupport(verdict, tuple(ratios), tuple(competing), detail)
+
+
+def transform_quad_for_storage(
+    quad: Sequence[Tuple[float, float]],
+    rotation_cw: int,
+    width: int,
+    height: int,
+) -> list[Point]:
+    """Map a normalized upload-space quad onto the stored raster's pixels.
+
+    ``quad`` is in 0..1 of the uploaded JPEG as the client sees it. The
+    sanitizer applies EXIF orientation (already reflected in the browser's
+    displayed upload) and then the collector's clockwise quarter turn, before
+    resizing. This rotates the normalized points by that same quarter turn and
+    scales them to the sanitized raster, which is what ``try_straighten``
+    expects.
+    """
+    rotation = int(rotation_cw or 0)
+    if rotation not in (0, 90, 180, 270):
+        raise ValueError(f"unsupported rotation {rotation_cw!r}")
+    stored_width = float(width)
+    stored_height = float(height)
+    points: list[Point] = []
+    for raw_u, raw_v in quad:
+        u = float(raw_u)
+        v = float(raw_v)
+        if rotation == 90:
+            u, v = 1.0 - v, u
+        elif rotation == 180:
+            u, v = 1.0 - u, 1.0 - v
+        elif rotation == 270:
+            u, v = v, 1.0 - u
+        points.append((u * stored_width, v * stored_height))
+    return points
 
 
 def _homography(dst: Sequence[Point], src: Sequence[Point]) -> np.ndarray:
@@ -344,15 +392,6 @@ def try_straighten(
     if abs(tilt) > max_tilt_degrees:
         return Abstained("tilt_exceeded", f"tilt {tilt:.1f} degrees")
 
-    if require_boundary:
-        support = assess_edge_support(rgb, points)
-        if support.verdict != "ok":
-            reason = (
-                "boundary_competing" if support.verdict == "competing"
-                else "boundary_unsupported"
-            )
-            return Abstained(reason, support.detail)
-
     measured_w = min(sides[0], sides[2])
     measured_h = min(sides[1], sides[3])
     inner_h = min(measured_h, measured_w / CARD_ASPECT)
@@ -367,6 +406,17 @@ def try_straighten(
     out_h = int(round(out_h * scale))
     if out_w < MIN_OUTPUT_PX or out_h < MIN_OUTPUT_PX:
         return Abstained("too_small", f"output {out_w}x{out_h} below {MIN_OUTPUT_PX}px")
+
+    # Geometry is satisfied; ask the pixels whether the claim is really the
+    # card's boundary before paying for the warp.
+    if require_boundary:
+        support = assess_edge_support(rgb, points)
+        if support.verdict != "ok":
+            reason = (
+                "boundary_competing" if support.verdict == "competing"
+                else "boundary_unsupported"
+            )
+            return Abstained(reason, support.detail)
 
     inset_x = out_w * margin
     inset_y = out_h * margin

@@ -2,8 +2,10 @@
 
 Reads a JSON manifest of ``{"image": path, "quad": [[x, y], ...]}`` entries and
 writes the original and straightened panels side by side, with a sibling JSON of
-outcomes. ``--synth N`` generates deterministic fixtures and a manifest first so
-the tool can be exercised without a phone.
+outcomes. Each panel also prints the boundary-support verdict and the four
+per-side support ratios, so a veto can be read against the pixels that caused
+it. ``--synth N`` generates deterministic fixtures and a manifest first so the
+tool can be exercised without a phone.
 """
 
 from __future__ import annotations
@@ -16,7 +18,12 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
-from services.scan_straighten import Abstained, Straightened, try_straighten
+from services.scan_straighten import (
+    Abstained,
+    Straightened,
+    assess_edge_support,
+    try_straighten,
+)
 
 DARK = (26, 28, 34)
 WHITE = (246, 246, 242)
@@ -24,9 +31,11 @@ GREY = (150, 152, 158)
 PANEL_MAX = 900
 
 
-def _card(width=215, height=300, nested=False, inner_art=False):
+def _card(width=215, height=300, nested=False, inner_art=False, plain=False):
     card = Image.new("RGB", (width, height), WHITE)
     draw = ImageDraw.Draw(card)
+    if plain:
+        return card
     draw.rectangle((0, 0, width - 1, height - 1), outline=(4, 4, 4), width=7)
     if nested:
         for inset in (14, 28, 42):
@@ -71,37 +80,68 @@ def _render_keystone(canvas_size=(440, 420)):
     return canvas, [list(point) for point in quad]
 
 
+def _shrink_quad(quad, fraction=0.8):
+    cx = sum(point[0] for point in quad) / 4.0
+    cy = sum(point[1] for point in quad) / 4.0
+    return [[cx + (x - cx) * fraction, cy + (y - cy) * fraction] for x, y in quad]
+
+
+def _render_corner_cut(card, canvas_size=(300, 360), offset=(100, 140)):
+    """Card stock pasted so its bottom-right corner runs off the canvas."""
+    canvas = Image.new("RGB", canvas_size, DARK)
+    canvas.paste(card, offset)
+    left = float(offset[0])
+    top = float(offset[1])
+    quad = [
+        (left, top),
+        (canvas_size[0] - 60.0, top),
+        (canvas_size[0] - 60.0, canvas_size[1] - 60.0),
+        (left, canvas_size[1] - 60.0),
+    ]
+    return canvas, [list(point) for point in quad]
+
+
+def _cases() -> list[tuple[str, str, Image.Image, list]]:
+    cases = []
+    for tilt in (0, 8, 16, 22):
+        canvas, quad = _render_rotated(_card(), tilt)
+        cases.append((f"tilt-{tilt}", "upright card, tilt", canvas, quad))
+    canvas, quad = _render_rotated(_card(nested=True), 5)
+    cases.append(("loader-nested-border", "loader-like nested border", canvas, quad))
+    canvas, quad = _render_rotated(_card(inner_art=True), 11)
+    cases.append(("inner-art-lock", "inner-art lock", canvas, quad))
+    canvas, quad = _render_keystone()
+    cases.append(("keystone", "keystone", canvas, quad))
+    canvas, quad = _render_rotated(_card(), 4)
+    quad[3][0] = -30
+    cases.append(("partly-cut", "quad point off the raster", canvas, quad))
+
+    # Boundary-support cases: what the geometry checks cannot see.
+    canvas, quad = _render_rotated(_card(), 6)
+    cases.append(("boundary-ok", "clear border, expect ok", canvas, quad))
+    canvas, quad = _render_rotated(_card(inner_art=True), 6)
+    cases.append(("inner-lock-80", "quad shrunk to 80 %, expect competing",
+                  canvas, _shrink_quad(quad, 0.8)))
+    canvas, _ = _render_rotated(_card(), 6)
+    cases.append(("boundary-background", "quad in the background, expect unsupported",
+                  canvas, [[20, 20], [110, 20], [110, 130], [20, 130]]))
+    canvas, quad = _render_corner_cut(_card(plain=True))
+    cases.append(("corner-cut", "card corner off frame, expect unsupported", canvas, quad))
+    return cases
+
+
 def generate_synth(count: int) -> tuple[Path, list[dict], Path]:
     base = Path(tempfile.mkdtemp(prefix="straighten-synth-", dir="/tmp/opencode"))
     entries = []
-    tilts = [0, 8, 16, 22]
+    cases = _cases()
     for index in range(max(0, count)):
-        if index < len(tilts):
-            name = f"tilt-{tilts[index]}"
-            canvas, quad = _render_rotated(_card(), tilts[index])
-            note = name
-        elif index == 4:
-            name = "loader-nested-border"
-            canvas, quad = _render_rotated(_card(nested=True), 5)
-            note = "loader-like nested border"
-        elif index == 5:
-            name = "inner-art-lock"
-            canvas, quad = _render_rotated(_card(inner_art=True), 11)
-            note = "inner-art lock"
-        elif index == 6:
-            name = "keystone"
-            canvas, quad = _render_keystone()
-            note = "keystone"
-        elif index == 7:
-            name = "partly-cut"
-            canvas, quad = _render_rotated(_card(), 4)
-            quad[3][0] = -30
-            note = "partly cut by the frame"
+        if index < len(cases):
+            name, note, canvas, quad = cases[index]
         else:
-            angle = [(0, "upright"), (9, "tilt-9"), (18, "tilt-18")][(index - 8) % 3]
-            name = f"extra-{index:02d}-{angle[1]}"
-            canvas, quad = _render_rotated(_card(), angle[0])
-            note = angle[1]
+            angle, tag = [(0, "upright"), (9, "tilt-9"), (18, "tilt-18")][(index - len(cases)) % 3]
+            name = f"extra-{index:02d}-{tag}"
+            note = tag
+            canvas, quad = _render_rotated(_card(), angle)
         path = base / f"{index:02d}-{name}.png"
         canvas.save(path)
         entries.append({"image": str(path), "quad": quad, "note": note})
@@ -119,12 +159,22 @@ def _fit(image: Image.Image, max_width: int, max_height: int) -> Image.Image:
     return image
 
 
-def build_sheet(entries: list[dict], out_path: Path) -> tuple[Path, list[dict]]:
+def _support_text(support) -> str:
+    text = f"{support.verdict} · sides " + " ".join(f"{v:.2f}" for v in support.sides)
+    flagged = [str(index + 1) for index, flag in enumerate(support.competing_sides) if flag]
+    if flagged:
+        text += " · competing " + ",".join(flagged)
+    return text
+
+
+def build_sheet(entries: list[dict], out_path: Path,
+                require_boundary: bool = True) -> tuple[Path, list[dict]]:
     rows = []
     outcomes = []
     for entry in entries:
         source = Image.open(entry["image"]).convert("RGB")
-        result = try_straighten(source, entry["quad"])
+        support = assess_edge_support(source, entry["quad"])
+        result = try_straighten(source, entry["quad"], require_boundary=require_boundary)
         if isinstance(result, Straightened):
             right = result.image
             outcome = {
@@ -147,22 +197,29 @@ def build_sheet(entries: list[dict], out_path: Path) -> tuple[Path, list[dict]]:
                 "detail": result.detail,
             }
             label = f"abstained: {result.reason}"
+        outcome["boundary"] = {
+            "verdict": support.verdict,
+            "sides": [round(value, 3) for value in support.sides],
+            "competing_sides": list(support.competing_sides),
+        }
         outcomes.append(outcome)
         left = _fit(source, PANEL_MAX, 520)
         right = _fit(right, PANEL_MAX, 520)
-        row_h = max(left.height, right.height) + 26
-        rows.append((left, right, label, entry.get("note", ""), row_h))
+        row_h = max(left.height, right.height) + 42
+        rows.append((left, right, label, entry.get("note", ""),
+                     _support_text(support), row_h))
 
     width = PANEL_MAX * 2 + 30
-    height = sum(row[4] for row in rows) + 20
+    height = sum(row[5] for row in rows) + 20
     sheet = Image.new("RGB", (width, height), (128, 128, 128))
     draw = ImageDraw.Draw(sheet)
     y = 10
-    for left, right, label, note, row_h in rows:
+    for left, right, label, note, support_line, row_h in rows:
         draw.text((10, y), f"original · {note}".strip(), fill=(20, 20, 20))
         draw.text((PANEL_MAX + 20, y), label, fill=(20, 20, 20))
-        sheet.paste(left, (10, y + 18))
-        sheet.paste(right, (PANEL_MAX + 20, y + 18))
+        draw.text((10, y + 13), f"boundary: {support_line}", fill=(40, 40, 60))
+        sheet.paste(left, (10, y + 30))
+        sheet.paste(right, (PANEL_MAX + 20, y + 30))
         y += row_h
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -181,6 +238,8 @@ def main() -> int:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--synth", type=int, default=0,
                         help="generate N synthetic fixtures and process them")
+    parser.add_argument("--no-boundary", action="store_true",
+                        help="disable the boundary veto (shadow comparison)")
     args = parser.parse_args()
 
     if args.synth:
@@ -193,12 +252,17 @@ def main() -> int:
         parser.error("provide --manifest or --synth")
         return 2
 
-    outcomes_path, outcomes = build_sheet(entries, args.out)
+    outcomes_path, outcomes = build_sheet(
+        entries, args.out, require_boundary=not args.no_boundary
+    )
     print(f"contact sheet: {args.out}")
     print(f"outcomes: {outcomes_path}")
     for outcome in outcomes:
+        boundary = outcome["boundary"]
+        ratios = " ".join(f"{value:.2f}" for value in boundary["sides"])
         print(f"- {Path(outcome['image']).name}: {outcome['outcome']}"
-              + (f" ({outcome['reason']})" if outcome.get("reason") else ""))
+              + (f" ({outcome['reason']})" if outcome.get("reason") else "")
+              + f" | boundary {boundary['verdict']} [{ratios}]")
     return 0
 
 

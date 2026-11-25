@@ -7,7 +7,14 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 try:
-    from services.scan_straighten import Abstained, Straightened, try_straighten
+    from services.scan_straighten import (
+        Abstained,
+        EdgeSupport,
+        Straightened,
+        assess_edge_support,
+        transform_quad_for_storage,
+        try_straighten,
+    )
     DEPS_AVAILABLE = True
 except ModuleNotFoundError:
     DEPS_AVAILABLE = False
@@ -32,6 +39,66 @@ def rotate_point(x, y, angle_degrees):
         x * math.cos(radians) + y * math.sin(radians),
         -x * math.sin(radians) + y * math.cos(radians),
     )
+
+
+def make_bordered_card(width=200, height=280):
+    """Card stock on a contrasting edge, with a printed border a little inside.
+
+    The outer silhouette is bright card stock, so the claimed edge has real
+    contrast; the printed border is parallel and strong, which is exactly the
+    structure that must not be mistaken for a competing edge.
+    """
+    card = Image.new("RGB", (width, height), WHITE)
+    draw = ImageDraw.Draw(card)
+    draw.rectangle((10, 10, width - 11, height - 11), outline=(4, 4, 4), width=4)
+    for top in (70, 132, 194):
+        draw.rectangle((24, top, width - 24, top + 26), fill=GREY)
+    return card
+
+
+def make_plain_card(width=200, height=280):
+    """Flat card stock: only the silhouette has structure."""
+    return Image.new("RGB", (width, height), WHITE)
+
+
+def shrink_quad(quad, fraction=0.8):
+    cx = sum(x for x, _ in quad) / 4.0
+    cy = sum(y for _, y in quad) / 4.0
+    return [(cx + (x - cx) * fraction, cy + (y - cy) * fraction) for x, y in quad]
+
+
+def render_corner_cut(card, canvas_size=(300, 360), offset=(140, 140)):
+    """Paste the card so its bottom-right corner runs off the canvas.
+
+    Returns the canvas and a quad that lies wholly inside the raster and
+    follows the card on the two visible sides only, which is the Inkay case.
+    """
+    canvas = Image.new("RGB", canvas_size, DARK)
+    canvas.paste(card, offset)
+    left = float(offset[0])
+    top = float(offset[1])
+    quad = [
+        (left, top),
+        (canvas_size[0] - 60.0, top),        # inside the card, well inside the raster
+        (canvas_size[0] - 60.0, canvas_size[1] - 60.0),
+        (left, canvas_size[1] - 60.0),
+    ]
+    return canvas, quad
+
+
+def render_one_side_cut(card, canvas_size=(300, 400), offset=(60, 160)):
+    """Paste the card so only its bottom edge runs off the canvas."""
+    canvas = Image.new("RGB", canvas_size, DARK)
+    canvas.paste(card, offset)
+    left = float(offset[0])
+    top = float(offset[1])
+    quad = [
+        (left, top),
+        (left + card.width - 1.0, top),
+        (left + card.width - 1.0, canvas_size[1] - 60.0),
+        (left, canvas_size[1] - 60.0),
+    ]
+    return canvas, quad
 
 
 def render_rotated(card, angle_degrees, canvas_size=(520, 620)):
@@ -154,6 +221,142 @@ class StraightenTests(unittest.TestCase):
         result = try_straighten(canvas, quad, margin=0.015, max_edge=2048)
         self.assertIsInstance(result, Straightened)
         self.assertLessEqual(max(result.width, result.height), 300 * (1 + 2 * 0.015) + 2)
+
+
+class TransformQuadTests(unittest.TestCase):
+    """Client upload-space quad -> sanitized raster pixels."""
+
+    UNIT = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
+
+    @unittest.skipUnless(DEPS_AVAILABLE, "Pillow/numpy unavailable")
+    def test_no_turn_only_scales(self):
+        self.assertEqual(
+            transform_quad_for_storage(self.UNIT, 0, 100, 200),
+            [(0.0, 0.0), (100.0, 0.0), (100.0, 200.0), (0.0, 200.0)],
+        )
+
+    @unittest.skipUnless(DEPS_AVAILABLE, "Pillow/numpy unavailable")
+    def test_clockwise_quarter_turn_moves_top_left_to_top_right(self):
+        self.assertEqual(
+            transform_quad_for_storage(self.UNIT, 90, 100, 200),
+            [(100.0, 0.0), (100.0, 200.0), (0.0, 200.0), (0.0, 0.0)],
+        )
+
+    @unittest.skipUnless(DEPS_AVAILABLE, "Pillow/numpy unavailable")
+    def test_half_turn_moves_every_corner_opposite(self):
+        self.assertEqual(
+            transform_quad_for_storage(self.UNIT, 180, 100, 200),
+            [(100.0, 200.0), (0.0, 200.0), (0.0, 0.0), (100.0, 0.0)],
+        )
+
+    @unittest.skipUnless(DEPS_AVAILABLE, "Pillow/numpy unavailable")
+    def test_three_quarter_turn_moves_top_left_to_bottom_left(self):
+        self.assertEqual(
+            transform_quad_for_storage(self.UNIT, 270, 100, 200),
+            [(0.0, 200.0), (0.0, 0.0), (100.0, 0.0), (100.0, 200.0)],
+        )
+
+
+class EdgeSupportTests(unittest.TestCase):
+    """Boundary veto: the claimed edge must be an edge the pixels show."""
+
+    def support(self, canvas, quad):
+        result = assess_edge_support(canvas, quad)
+        self.assertIsInstance(result, EdgeSupport)
+        self.assertEqual(len(result.sides), 4)
+        self.assertEqual(len(result.competing_sides), 4)
+        return result
+
+    @unittest.skipUnless(DEPS_AVAILABLE, "Pillow/numpy unavailable")
+    def test_clear_border_is_ok_and_straightens(self):
+        """Measured: sides [143.8, 101.4, 32.7, 117.4], 4/4 supported."""
+        canvas, quad = render_rotated(make_bordered_card(), 6)
+        support = self.support(canvas, quad)
+        self.assertEqual(support.verdict, "ok")
+        self.assertEqual(support.competing_sides, (False, False, False, False))
+        for ratio in support.sides:
+            self.assertGreaterEqual(ratio, 1.5)
+        # The printed border is parallel and strong, yet it is inside the card
+        # and must not be mistaken for a competing edge.
+        self.assertIsInstance(try_straighten(canvas, quad), Straightened)
+
+    @unittest.skipUnless(DEPS_AVAILABLE, "Pillow/numpy unavailable")
+    def test_inner_lock_is_competing_and_abstains(self):
+        """Measured: sides [0.0, 33.4, 0.0, 33.6], both short sides competing."""
+        canvas, quad = render_rotated(make_bordered_card(), 6)
+        support = self.support(canvas, quad)
+        locked = self.support(canvas, shrink_quad(quad, 0.8))
+        self.assertEqual(locked.verdict, "competing")
+        self.assertTrue(any(locked.competing_sides))
+        result = try_straighten(canvas, shrink_quad(quad, 0.8))
+        self.assertIsInstance(result, Abstained)
+        self.assertEqual(result.reason, "boundary_competing")
+        self.assertIn("sides=", result.detail)
+        # The veto is what stops it: the geometry itself is acceptable.
+        self.assertIsInstance(support, EdgeSupport)
+
+    @unittest.skipUnless(DEPS_AVAILABLE, "Pillow/numpy unavailable")
+    def test_quad_in_background_is_unsupported(self):
+        """Measured: sides [0.0, 0.0, 0.0, 0.0], 0/4 supported."""
+        canvas, _ = render_rotated(make_bordered_card(), 6)
+        background_quad = [(20, 20), (110, 20), (110, 130), (20, 130)]
+        support = self.support(canvas, background_quad)
+        self.assertEqual(support.verdict, "unsupported")
+        self.assertEqual(support.competing_sides, (False, False, False, False))
+        result = try_straighten(canvas, background_quad)
+        self.assertIsInstance(result, Abstained)
+        self.assertEqual(result.reason, "boundary_unsupported")
+
+    @unittest.skipUnless(DEPS_AVAILABLE, "Pillow/numpy unavailable")
+    def test_corner_cut_by_the_frame_is_abstained(self):
+        """Inkay case: two sides run off the canvas, the quad does not.
+
+        Measured (plain stock): sides [436.0, 0.0, 0.0, 436.0]; the two
+        visible sides support, the two cut sides have no edge at all.
+        """
+        canvas, quad = render_corner_cut(make_plain_card())
+        support = self.support(canvas, quad)
+        self.assertEqual(support.verdict, "unsupported")
+        self.assertLessEqual(support.sides[1], 1.5)
+        self.assertLessEqual(support.sides[2], 1.5)
+        result = try_straighten(canvas, quad)
+        self.assertIsInstance(result, Abstained)
+        self.assertEqual(result.reason, "boundary_unsupported")
+
+    @unittest.skipUnless(DEPS_AVAILABLE, "Pillow/numpy unavailable")
+    def test_single_side_cut_abstains_under_the_all_four_rule(self):
+        """A card cut along one whole side leaves 3 supported sides and abstains.
+
+        The all-four rule exists because this case is otherwise indistinguishable
+        from a valid three-sided claim: straightening it would shave the card,
+        while abstaining only keeps the padded photo, which is a fine capture.
+        """
+        canvas, quad = render_one_side_cut(make_plain_card())
+        support = self.support(canvas, quad)
+        supported = sum(1 for ratio in support.sides if ratio >= 1.5)
+        self.assertEqual(supported, 3)
+        self.assertEqual(support.verdict, "unsupported")
+        result = try_straighten(canvas, quad)
+        self.assertIsInstance(result, Abstained)
+        self.assertEqual(result.reason, "boundary_unsupported")
+
+    @unittest.skipUnless(DEPS_AVAILABLE, "Pillow/numpy unavailable")
+    def test_require_boundary_false_restores_the_old_behaviour(self):
+        canvas, quad = render_rotated(make_bordered_card(), 6)
+        locked = shrink_quad(quad, 0.8)
+        self.assertEqual(try_straighten(canvas, locked).reason, "boundary_competing")
+        self.assertIsInstance(
+            try_straighten(canvas, locked, require_boundary=False), Straightened
+        )
+
+    @unittest.skipUnless(DEPS_AVAILABLE, "Pillow/numpy unavailable")
+    def test_assess_is_pure_and_handles_a_bad_quad(self):
+        canvas, quad = render_rotated(make_bordered_card(), 6)
+        before = np.asarray(canvas, dtype=np.uint8).copy()
+        bad = assess_edge_support(canvas, [(0, 0), (1, 1)])
+        self.assertEqual(bad.verdict, "unsupported")
+        self.assertTrue(np.array_equal(np.asarray(canvas, dtype=np.uint8), before))
+        self.assertIsInstance(assess_edge_support(canvas, quad), EdgeSupport)
 
 
 if __name__ == "__main__":
