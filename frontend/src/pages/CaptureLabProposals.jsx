@@ -31,8 +31,26 @@ export default function CaptureLabProposals() {
   const [loading, setLoading] = useState(true)
   const [failure, setFailure] = useState(false)
   const touchStart = useRef(null)
+  const stageRef = useRef(null)
+  // The stage is a flex child with a definite height, but a percentage
+  // max-height on the image resolves against an auto-height wrapper and does
+  // nothing -- on a short phone viewport the image then overflowed the stage and
+  // was clipped. Measure the stage and give the wrapper that height instead, so
+  // the image fits and the boundary overlay stays glued to it.
+  const [photoHeight, setPhotoHeight] = useState(null)
   const objectUrls = useRef(new Set())
   const current = items[index]
+
+  useEffect(() => {
+    const node = stageRef.current
+    if (!node || typeof ResizeObserver === 'undefined') return undefined
+    const observer = new ResizeObserver(entries => {
+      const height = entries[0]?.contentRect?.height
+      if (height) setPhotoHeight(Math.max(160, Math.floor(height - 8)))
+    })
+    observer.observe(node)
+    return () => observer.disconnect()
+  }, [loading, failure, current?.stem])
 
   const loadList = useCallback(async () => {
     setLoading(true); setFailure(false)
@@ -80,8 +98,8 @@ export default function CaptureLabProposals() {
   return <main className="proposal-review" onTouchStart={onTouchStart} onTouchEnd={onTouchEnd}>
     <header className="proposal-topbar"><a href="/capture-lab" aria-label="Back to capture lab"><ChevronLeft /></a><span>Capture lab</span><span className="proposal-count">{loading ? '…' : `${items.length ? index + 1 : 0} / ${items.length}`}</span></header>
     {loading ? <section className="proposal-stage"><div className="proposal-skeleton" /></section> : failure ? <section className="proposal-message"><p>Could not load proposals.</p><button onClick={loadList}>Try again</button></section> : !current ? <section className="proposal-message"><p>No proposals yet.</p></section> : <>
-      <section className="proposal-stage">
-        {src ? <div className="proposal-photo"><img src={src} alt={view === 'Original' ? 'Original card photo' : view === 'CollectorVision' ? 'CollectorVision' : `${view} crop`} />{view === 'Original' && <svg className="proposal-boundary" viewBox="0 0 1 1" preserveAspectRatio="none" aria-label="Proposed crop boundary"><polygon points={current.quad.map(point => point.join(',')).join(' ')} /></svg>}</div> : <div className="proposal-skeleton" />}
+      <section className="proposal-stage" ref={stageRef}>
+        {src ? <div className="proposal-photo" style={photoHeight ? { height: `${photoHeight}px` } : undefined}><img src={src} alt={view === 'Original' ? 'Original card photo' : view === 'CollectorVision' ? 'CollectorVision' : `${view} crop`} />{view === 'Original' && <svg className="proposal-boundary" viewBox="0 0 1 1" preserveAspectRatio="none" aria-label="Proposed crop boundary"><polygon points={current.quad.map(point => point.join(',')).join(' ')} /></svg>}</div> : <div className="proposal-skeleton" />}
         {noProposal && <div className="proposal-notice">The proposal could not be produced.</div>}
       </section>
       <section className="proposal-details"><div><span className="proposal-label">Unverified crop</span><p>{current.outputWidth} × {current.outputHeight}</p></div><span className="proposal-tally">{tally.crop} crop · {tally.original} original</span></section>
