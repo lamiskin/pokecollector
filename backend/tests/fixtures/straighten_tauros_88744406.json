@@ -1,0 +1,271 @@
+{
+  "case": "Tauros 88744406 boundary failure",
+  "note": "Recorded from the Dev capture sidecar; the JPEG itself is not committed.",
+  "raster": {
+    "width": 635,
+    "height": 808
+  },
+  "geometry": {
+    "space": "crop-normalized",
+    "rotationCw": 0,
+    "quad": [
+      [
+        0.12131741741510826,
+        0.11113085605130338
+      ],
+      [
+        0.8318290169783464,
+        0.09717124523502765
+      ],
+      [
+        0.9028802826648622,
+        0.8823999083868348
+      ],
+      [
+        0.09763366218626969,
+        0.9033393482170483
+      ]
+    ]
+  },
+  "measured": {
+    "verdict": "loose",
+    "sideRatios": [
+      13.584,
+      33.429,
+      18.967,
+      11.816
+    ],
+    "sideVerdicts": [
+      "loose",
+      "tight",
+      "tight",
+      "loose"
+    ],
+    "sideOffsets": [
+      7.0,
+      5.0,
+      3.0,
+      35.0
+    ],
+    "sideEvidence": [
+      {
+        "ratio": 13.584,
+        "claimStep": 53.6,
+        "claimPeak": 40.5,
+        "outboardOffset": -3.0,
+        "outboardStrength": 3.6,
+        "inboardOffset": 7.0,
+        "inboardStrength": 48.3,
+        "verdict": "loose"
+      },
+      {
+        "ratio": 33.429,
+        "claimStep": 60.1,
+        "claimPeak": 23.9,
+        "outboardOffset": -3.0,
+        "outboardStrength": 13.5,
+        "inboardOffset": 5.0,
+        "inboardStrength": 23.9,
+        "verdict": "tight"
+      },
+      {
+        "ratio": 18.967,
+        "claimStep": 76.1,
+        "claimPeak": 80.2,
+        "outboardOffset": -11.0,
+        "outboardStrength": 41.0,
+        "inboardOffset": 3.0,
+        "inboardStrength": 80.2,
+        "verdict": "tight"
+      },
+      {
+        "ratio": 11.816,
+        "claimStep": 41.7,
+        "claimPeak": 11.2,
+        "outboardOffset": -25.0,
+        "outboardStrength": 5.8,
+        "inboardOffset": 35.0,
+        "inboardStrength": 12.8,
+        "verdict": "loose"
+      }
+    ],
+    "sideSamples": [
+      [
+        {
+          "offset": -12.0,
+          "strength": 10.1,
+          "inboardOffset": 42.0,
+          "inboardStrength": 34.9
+        },
+        {
+          "offset": -3.0,
+          "strength": 10.9,
+          "inboardOffset": 7.0,
+          "inboardStrength": 66.1
+        },
+        {
+          "offset": -44.0,
+          "strength": 12.2,
+          "inboardOffset": 7.0,
+          "inboardStrength": 78.1
+        },
+        {
+          "offset": -24.0,
+          "strength": 13.3,
+          "inboardOffset": 7.0,
+          "inboardStrength": 71.1
+        },
+        {
+          "offset": -4.0,
+          "strength": 16.2,
+          "inboardOffset": 6.0,
+          "inboardStrength": 55.2
+        },
+        {
+          "offset": -4.0,
+          "strength": 10.3,
+          "inboardOffset": 6.0,
+          "inboardStrength": 64.4
+        },
+        {
+          "offset": -14.0,
+          "strength": 10.2,
+          "inboardOffset": 44.0,
+          "inboardStrength": 64.2
+        }
+      ],
+      [
+        {
+          "offset": -3.0,
+          "strength": 20.6,
+          "inboardOffset": 6.0,
+          "inboardStrength": 58.3
+        },
+        {
+          "offset": -3.0,
+          "strength": 49.7,
+          "inboardOffset": 5.0,
+          "inboardStrength": 53.0
+        },
+        {
+          "offset": -3.0,
+          "strength": 54.8,
+          "inboardOffset": 5.0,
+          "inboardStrength": 65.4
+        },
+        {
+          "offset": -4.0,
+          "strength": 41.0,
+          "inboardOffset": 4.0,
+          "inboardStrength": 77.3
+        },
+        {
+          "offset": -5.0,
+          "strength": 44.1,
+          "inboardOffset": 3.0,
+          "inboardStrength": 73.0
+        },
+        {
+          "offset": -7.0,
+          "strength": 40.0,
+          "inboardOffset": 21.0,
+          "inboardStrength": 11.0
+        },
+        {
+          "offset": -9.0,
+          "strength": 32.6,
+          "inboardOffset": 64.0,
+          "inboardStrength": 67.2
+        }
+      ],
+      [
+        {
+          "offset": -11.0,
+          "strength": 22.0,
+          "inboardOffset": 3.0,
+          "inboardStrength": 56.5
+        },
+        {
+          "offset": -11.0,
+          "strength": 27.3,
+          "inboardOffset": 3.0,
+          "inboardStrength": 80.7
+        },
+        {
+          "offset": -11.0,
+          "strength": 39.8,
+          "inboardOffset": 3.0,
+          "inboardStrength": 98.2
+        },
+        {
+          "offset": -11.0,
+          "strength": 35.0,
+          "inboardOffset": 3.0,
+          "inboardStrength": 94.1
+        },
+        {
+          "offset": -10.0,
+          "strength": 38.2,
+          "inboardOffset": 3.0,
+          "inboardStrength": 90.2
+        },
+        {
+          "offset": -10.0,
+          "strength": 60.5,
+          "inboardOffset": 3.0,
+          "inboardStrength": 77.4
+        },
+        {
+          "offset": -10.0,
+          "strength": 84.5,
+          "inboardOffset": 31.0,
+          "inboardStrength": 68.2
+        }
+      ],
+      [
+        {
+          "offset": -25.0,
+          "strength": 21.0,
+          "inboardOffset": 14.0,
+          "inboardStrength": 66.9
+        },
+        {
+          "offset": -45.0,
+          "strength": 8.2,
+          "inboardOffset": 12.0,
+          "inboardStrength": 60.4
+        },
+        {
+          "offset": -3.0,
+          "strength": 7.1,
+          "inboardOffset": 9.0,
+          "inboardStrength": 72.3
+        },
+        {
+          "offset": -3.0,
+          "strength": 19.1,
+          "inboardOffset": 7.0,
+          "inboardStrength": 87.2
+        },
+        {
+          "offset": -4.0,
+          "strength": 47.4,
+          "inboardOffset": 5.0,
+          "inboardStrength": 81.8
+        },
+        {
+          "offset": -7.0,
+          "strength": 39.8,
+          "inboardOffset": 3.0,
+          "inboardStrength": 48.4
+        },
+        {
+          "offset": -9.0,
+          "strength": 52.1,
+          "inboardOffset": 35.0,
+          "inboardStrength": 51.2
+        }
+      ]
+    ]
+  }
+}

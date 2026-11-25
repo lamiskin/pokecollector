@@ -114,9 +114,21 @@ def collect_pairs(job_dir: Path) -> tuple[list[tuple[str, Path, Path]], list[Pat
 
 def _support_line(support) -> str:
     ratios = " ".join(f"{value:.2f}" for value in support.sides)
-    flagged = [str(index + 1) for index, flag in enumerate(support.competing_sides) if flag]
-    competing = f" · competing {','.join(flagged)}" if flagged else ""
-    return f"boundary {support.verdict} · sides {ratios}{competing}"
+    flagged = [str(index + 1) for index, v in enumerate(support.side_verdicts) if v == "loose"]
+    shaved = [str(index + 1) for index, v in enumerate(support.side_verdicts) if v == "shaved"]
+    outboard = [
+        f"{item.get('outboardOffset', 0.0):.0f}"
+        for item in getattr(support, "side_evidence", ())
+        if float(item.get("outboardOffset", 0.0)) < 0.0
+    ]
+    extra = ""
+    if flagged:
+        extra += f" · loose {','.join(flagged)}"
+    if shaved:
+        extra += f" · shaved {','.join(shaved)}"
+    if outboard:
+        extra += f" · outboard {','.join(outboard)}px"
+    return f"boundary {support.verdict} · sides {ratios}{extra}"
 
 
 def build_sheet(job_dir: Path, out_path: Path) -> tuple[Path, list[dict]]:
@@ -147,6 +159,15 @@ def build_sheet(job_dir: Path, out_path: Path) -> tuple[Path, list[dict]]:
             "measuredOrientation": metrics["orientation"],
             "tiltDegrees": round(metrics["tiltDegrees"], 2),
             "sides": [round(value, 3) for value in support.sides],
+            "sideVerdicts": list(support.side_verdicts),
+            "sideOffsets": [round(value, 1) for value in support.side_offsets],
+            "sideEvidence": [dict(item) for item in getattr(support, "side_evidence", ())],
+            "sideSamples": [
+                [dict(sample) for sample in samples]
+                for samples in getattr(support, "side_samples", ())
+            ],
+            "looseSides": [i + 1 for i, v in enumerate(support.side_verdicts) if v == "loose"],
+            "shavedSides": [i + 1 for i, v in enumerate(support.side_verdicts) if v == "shaved"],
             "competingSides": [i + 1 for i, flag in enumerate(support.competing_sides) if flag],
             "boundary": support.verdict,
             "supportDetail": support.detail,
@@ -155,15 +176,18 @@ def build_sheet(job_dir: Path, out_path: Path) -> tuple[Path, list[dict]]:
             right = result.image
             orientation = LANDSCAPE if result.width > result.height else PORTRAIT
             outcome.update(
-                state="ready",
+                state="proposed",
+                description="Unverified crop",
                 reason=None,
                 outputWidth=result.width,
                 outputHeight=result.height,
                 outputOrientation=orientation,
                 angleDegrees=round(result.angle_degrees, 2),
+                turnedCw=int(getattr(result, "turned_cw", 0) or 0),
             )
-            status = f"ready · {result.width}x{result.height} {orientation}" \
-                     f" · tilt {result.angle_degrees:.1f}°"
+            status = f"Unverified crop · {result.width}x{result.height} {orientation}" \
+                     f" · tilt {result.angle_degrees:.1f}°" \
+                     f" · turn {outcome['turnedCw']}°"
         else:
             assert isinstance(result, Abstained)
             right = Image.new("RGB", (source.width, source.height), ABSTAIN_FILL)
@@ -220,6 +244,9 @@ def build_sheet(job_dir: Path, out_path: Path) -> tuple[Path, list[dict]]:
 def _print_summary(out_path: Path, outcomes: list[dict], skipped: list[Path]) -> None:
     states = Counter(item["state"] for item in outcomes)
     reasons = Counter(item["reason"] for item in outcomes if item["reason"])
+    boundary_verdicts = Counter(
+        item["boundary"] for item in outcomes if item["state"] == "proposed"
+    )
     orientations = Counter(
         item["outputOrientation"] for item in outcomes if item["outputOrientation"]
     )
@@ -230,6 +257,10 @@ def _print_summary(out_path: Path, outcomes: list[dict], skipped: list[Path]) ->
     print("states: " + ", ".join(f"{key}={states[key]}" for key in sorted(states)))
     if reasons:
         print("reasons: " + ", ".join(f"{key}={reasons[key]}" for key in sorted(reasons)))
+    if boundary_verdicts:
+        print("proposed boundary diagnostics: " + ", ".join(
+            f"{key}={boundary_verdicts[key]}" for key in sorted(boundary_verdicts)
+        ))
     print("output orientations: "
           + (", ".join(f"{key}={orientations[key]}"
                        for key in (PORTRAIT, LANDSCAPE) if orientations[key])
@@ -237,7 +268,7 @@ def _print_summary(out_path: Path, outcomes: list[dict], skipped: list[Path]) ->
     for item in outcomes:
         aspect = f"{item['measuredWidth']:.0f}x{item['measuredHeight']:.0f}px" \
                  f" aspect={item['measuredAspect']:.2f}"
-        if item["state"] == "ready":
+        if item["state"] == "proposed":
             tail = f"{item['outputWidth']}x{item['outputHeight']} {item['outputOrientation']}"
         else:
             tail = f"abstained {item['reason']}"

@@ -476,7 +476,7 @@ class ScanJobStorageTests(unittest.IsolatedAsyncioTestCase):
             manifest_path.name, f"{image_path.stem}.straighten.json"
         )
         payload = json.loads(manifest_path.read_text())
-        self.assertEqual(payload["state"], "ready", payload)
+        self.assertEqual(payload["state"], "proposed", payload)
         self.assertIsNone(payload["reason"])
         self.assertEqual(payload["algorithmVersion"], "v1")
         self.assertEqual(
@@ -499,11 +499,23 @@ class ScanJobStorageTests(unittest.IsolatedAsyncioTestCase):
                 "rotationCw": 0,
             },
         )
-        # The evidence that justified the verdict is persisted, not discarded.
-        self.assertEqual(payload["evidence"]["verdict"], "ok", payload)
-        self.assertEqual(len(payload["evidence"]["sides"]), 4)
-        self.assertEqual(payload["evidence"]["competingSides"], [])
-        self.assertIn("4/4 sides supported", payload["evidence"]["detail"])
+        # Boundary evidence is developer diagnostics, recorded without a
+        # collector-facing confidence label and with no authority over state.
+        boundary = payload["diagnostics"]["boundary"]
+        self.assertEqual(boundary["verdict"], "ok", payload)
+        self.assertNotIn("confidence", boundary)
+        self.assertEqual(len(boundary["sideRatios"]), 4)
+        self.assertEqual(boundary["shavedSides"], [])
+        self.assertEqual(len(boundary["sideVerdicts"]), 4)
+        self.assertEqual(len(boundary["sideOffsets"]), 4)
+        self.assertEqual(len(boundary["sideEvidence"]), 4)
+        self.assertEqual(len(boundary["sideSamples"]), 4)
+        self.assertTrue(all(len(samples) == 7 for samples in boundary["sideSamples"]))
+        self.assertIn("4/4 sides supported", boundary["detail"])
+        # The only collector-facing description of a derivative.
+        self.assertEqual(payload["description"], "Unverified crop")
+        # A portrait capture is not turned.
+        self.assertEqual(payload["turnedCw"], 0)
 
         artifacts = scan_storage.straighten_artifact_paths(image_path)
         self.assertEqual(len(artifacts), 1)
@@ -529,7 +541,7 @@ class ScanJobStorageTests(unittest.IsolatedAsyncioTestCase):
                 (payload["outputWidth"], payload["outputHeight"]), output.size
             )
         self.assertEqual(payload["outputBytes"], artifact.stat().st_size)
-        self.assertIn("straighten mode=shadow state=ready", "\n".join(logs.output))
+        self.assertIn("straighten mode=shadow state=proposed", "\n".join(logs.output))
 
     async def test_shadow_geometry_follows_the_collector_rotation(self):
         geometry = _card_geometry()
@@ -549,7 +561,7 @@ class ScanJobStorageTests(unittest.IsolatedAsyncioTestCase):
 
         with Image.open(image_path) as stored:
             self.assertEqual(stored.size, (600, 420))
-        self.assertEqual(payload["state"], "ready", payload)
+        self.assertEqual(payload["state"], "proposed", payload)
         self.assertEqual(payload["rotationCw"], 90)
         artifact = image_path.with_name(payload["artifact"])
         with Image.open(artifact) as output:
@@ -557,22 +569,92 @@ class ScanJobStorageTests(unittest.IsolatedAsyncioTestCase):
                 (payload["outputWidth"], payload["outputHeight"]), output.size
             )
 
-    async def test_shadow_abstention_writes_manifest_without_artifact(self):
+    async def test_shadow_landscape_capture_manifests_the_quarter_turn(self):
+        size = (600, 420)
+        rect = (20, 20, 579, 399)
+        with patch.dict(os.environ, {"SCAN_STRAIGHTEN": "shadow"}):
+            job = await create_scan_job(
+                self.db,
+                self.user.id,
+                [_upload(_card_canvas_bytes(size=size, rect=rect))],
+                capture_geometry=[_card_geometry(size=size, rect=rect)],
+            )
+        item = self.db.query(ScanJobItem).filter(ScanJobItem.job_id == job.id).one()
+        image_path = scan_storage.resolve_scan_path(item.image_path)
+        payload = json.loads(
+            scan_storage.straighten_manifest_path(image_path).read_text()
+        )
+
+        self.assertEqual(payload["state"], "proposed", payload)
+        self.assertEqual(payload["description"], "Unverified crop")
+        self.assertEqual(payload["turnedCw"], 90)
+        self.assertGreater(payload["outputHeight"], payload["outputWidth"])
+
+    async def test_shadow_shaved_diagnostics_never_withhold_the_proposal(self):
+        """A boundary verdict never withholds the proposal.
+
+        The shrunken quad cuts inside the card, which the old rule treated as
+        an abstention. It is now recorded as developer diagnostics and the
+        derivative is still produced.
+        """
         geometry = _shrink_geometry(_card_geometry())
         _, image_path = await self._shadow_job(geometry)
         manifest_path = scan_storage.straighten_manifest_path(image_path)
 
         payload = json.loads(manifest_path.read_text())
+        self.assertEqual(payload["state"], "proposed", payload)
+        self.assertEqual(payload["description"], "Unverified crop")
+        self.assertIsNone(payload["reason"])
+        self.assertIsNotNone(payload["artifact"])
+        self.assertIsNotNone(payload["outputWidth"])
+        # Diagnostics are retained even when they look like a shave, but they
+        # never decide the state.
+        boundary = payload["diagnostics"]["boundary"]
+        self.assertIn(boundary["verdict"], {"unsupported", "shaved"})
+        self.assertNotIn("confidence", boundary)
+        self.assertEqual(len(boundary["sideRatios"]), 4)
+        self.assertTrue(
+            all(isinstance(value, float) for value in boundary["sideRatios"])
+        )
+        self.assertEqual(len(boundary["sideVerdicts"]), 4)
+        self.assertEqual(len(boundary["sideOffsets"]), 4)
+        self.assertEqual(len(boundary["sideEvidence"]), 4)
+        self.assertEqual(len(boundary["sideSamples"]), 4)
+        self.assertIn("sides=", boundary["detail"])
+        self.assertEqual(len(scan_storage.straighten_artifact_paths(image_path)), 1)
+
+    async def test_diagnostics_failure_never_withholds_the_proposal(self):
+        """Serialising boundary diagnostics is optional; the crop is not."""
+        with patch(
+            "services.scan_straighten.boundary_diagnostics",
+            side_effect=RuntimeError("diagnostics broke"),
+        ):
+            _, image_path = await self._shadow_job(_shrink_geometry(_card_geometry()))
+
+        payload = json.loads(
+            scan_storage.straighten_manifest_path(image_path).read_text()
+        )
+        self.assertEqual(payload["state"], "proposed", payload)
+        self.assertEqual(payload["description"], "Unverified crop")
+        self.assertIsNone(payload["diagnostics"]["boundary"])
+        self.assertIsNotNone(payload["artifact"])
+        self.assertEqual(len(scan_storage.straighten_artifact_paths(image_path)), 1)
+
+    async def test_shadow_invalid_geometry_still_abstains_without_artifact(self):
+        """Only a quad no derivative can be produced from is ``abstained``."""
+        geometry = _card_geometry()
+        # A duplicated corner is invalid geometry, not a boundary verdict.
+        geometry["quad"] = [[0.5, 0.2], [0.5, 0.2], [0.8, 0.8], [0.2, 0.8]]
+        _, image_path = await self._shadow_job(geometry)
+        manifest_path = scan_storage.straighten_manifest_path(image_path)
+
+        payload = json.loads(manifest_path.read_text())
         self.assertEqual(payload["state"], "abstained", payload)
-        self.assertIn(payload["reason"], {"boundary_unsupported", "boundary_competing"})
+        self.assertEqual(payload["reason"], "bad_quad")
         self.assertIsNone(payload["artifact"])
         self.assertIsNone(payload["outputWidth"])
-        # Abstention detail is what makes the safety cost evaluable at all.
-        evidence = payload["evidence"]
-        self.assertIn(evidence["verdict"], {"unsupported", "competing"})
-        self.assertEqual(len(evidence["sides"]), 4)
-        self.assertTrue(all(isinstance(value, float) for value in evidence["sides"]))
-        self.assertIn("sides=", evidence["detail"])
+        self.assertIsNone(payload["diagnostics"]["boundary"])
+        self.assertIsNone(payload["description"])
         self.assertEqual(scan_storage.straighten_artifact_paths(image_path), [])
 
     async def test_shadow_without_geometry_writes_a_skipped_manifest(self):
@@ -584,13 +666,13 @@ class ScanJobStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["state"], "skipped_no_geometry", payload)
         self.assertIn("geometry", payload["reason"])
         self.assertIsNone(payload["artifact"])
-        self.assertIsNone(payload["evidence"])
+        self.assertIsNone(payload["diagnostics"]["boundary"])
         self.assertEqual(scan_storage.straighten_artifact_paths(image_path), [])
 
-    async def test_a_later_attempt_replaces_a_stale_ready_manifest(self):
+    async def test_a_later_attempt_replaces_a_stale_proposed_manifest(self):
         _, image_path = await self._shadow_job(_card_geometry())
         manifest_path = scan_storage.straighten_manifest_path(image_path)
-        self.assertEqual(json.loads(manifest_path.read_text())["state"], "ready")
+        self.assertEqual(json.loads(manifest_path.read_text())["state"], "proposed")
 
         with Image.open(image_path) as stored:
             width, height = stored.size
@@ -737,7 +819,7 @@ class ScanJobStorageTests(unittest.IsolatedAsyncioTestCase):
         ):
             _, image_path = await self._shadow_job(_card_geometry())
 
-        self.assertEqual(seen["state"], "ready")
+        self.assertEqual(seen["state"], "proposed")
         self.assertTrue(seen["exists"])
         self.assertTrue((image_path.parent / seen["artifact"]).is_file())
 
@@ -758,7 +840,7 @@ class ScanJobStorageTests(unittest.IsolatedAsyncioTestCase):
             scan_storage.straighten_manifest_path(image_path).read_text()
         )
 
-        self.assertEqual(payload["state"], "ready", payload)
+        self.assertEqual(payload["state"], "proposed", payload)
         self.assertIn("not implemented yet", "\n".join(logs.output))
 
 

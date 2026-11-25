@@ -364,10 +364,17 @@ def derive_straight_image(
     quad is transformed into the stored raster's pixels and handed to
     ``try_straighten``; the result is written beside the original together with
     a manifest describing what happened. Recognition, the API payload and the
-    stored image are unchanged.
+    stored image are unchanged. The padded original is always authoritative;
+    the derivative is only an ``Unverified crop`` recorded with
+    ``state: proposed``.
+
+    A proposal is withheld only when the transform is technically unusable:
+    invalid or self-crossing geometry, a degenerate or unstable transform,
+    insufficient source pixels, or a failed decode. Boundary diagnostics live
+    under ``diagnostics.boundary`` and cannot approve or withhold anything.
 
     A manifest is written for **every** attempt, including a disabled pipeline
-    or unusable geometry, so a stale ``ready`` can never outlive a later run.
+    or unusable geometry, so a stale ``proposed`` cannot outlive a later run.
     The artifact is published before its manifest, and the manifest is only
     written for the raster that is actually stored: if another writer replaced
     the image, this attempt's source is superseded and gets no manifest.
@@ -429,7 +436,9 @@ def derive_straight_image(
             "configDigest": config_digest,
             "rotationCw": rotation,
         },
-        "evidence": None,
+        "description": None,
+        "diagnostics": {"boundary": None},
+        "turnedCw": 0,
         "outputWidth": None,
         "outputHeight": None,
         "outputBytes": None,
@@ -459,17 +468,20 @@ def derive_straight_image(
             else:
                 result = helper.try_straighten(sanitized.rgb, quad)
                 support = getattr(result, "support", None)
+                # Diagnostics only: no branch below consults the boundary
+                # verdict. Technical validity alone decides the proposal, so a
+                # failure to serialise diagnostics must not cost the artifact.
                 if support is not None:
-                    manifest["evidence"] = {
-                        "verdict": support.verdict,
-                        "sides": [round(float(value), 3) for value in support.sides],
-                        "competingSides": [
-                            index
-                            for index, flag in enumerate(support.competing_sides)
-                            if flag
-                        ],
-                        "detail": support.detail,
-                    }
+                    try:
+                        manifest["diagnostics"]["boundary"] = (
+                            helper.boundary_diagnostics(support)
+                        )
+                    except Exception:  # noqa: BLE001 - diagnostics must not withhold
+                        logger.warning(
+                            "scan straighten diagnostics failed path=%s",
+                            relative_path,
+                            exc_info=True,
+                        )
                 if isinstance(result, helper.Straightened):
                     output = io.BytesIO()
                     result.image.save(
@@ -490,13 +502,15 @@ def derive_straight_image(
                     # bytes which are not on disk yet.
                     _atomic_write_bytes(artifact_path, data)
                     manifest.update(
-                        state="ready",
+                        state="proposed",
+                        description="Unverified crop",
                         reason=None,
                         artifact=artifact_path.name,
                         artifactSha256=digest,
                         outputWidth=result.width,
                         outputHeight=result.height,
                         outputBytes=len(data),
+                        turnedCw=int(getattr(result, "turned_cw", 0) or 0),
                     )
                     out_width, out_height = result.width, result.height
                 else:

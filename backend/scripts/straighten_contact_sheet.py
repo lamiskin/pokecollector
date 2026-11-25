@@ -174,20 +174,26 @@ def _fit(image: Image.Image, max_width: int, max_height: int) -> Image.Image:
 
 def _support_text(support) -> str:
     text = f"{support.verdict} · sides " + " ".join(f"{v:.2f}" for v in support.sides)
-    flagged = [str(index + 1) for index, flag in enumerate(support.competing_sides) if flag]
-    if flagged:
-        text += " · competing " + ",".join(flagged)
+    shaved = [str(index + 1) for index, flag in enumerate(support.competing_sides) if flag]
+    if shaved:
+        text += " · shaved " + ",".join(shaved)
+    outboard = [
+        f"{item.get('outboardOffset', 0.0):.0f}"
+        for item in getattr(support, "side_evidence", ())
+        if float(item.get("outboardOffset", 0.0)) < 0.0
+    ]
+    if outboard:
+        text += " · outboard " + ",".join(outboard) + "px"
     return text
 
 
-def build_sheet(entries: list[dict], out_path: Path,
-                require_boundary: bool = True) -> tuple[Path, list[dict]]:
+def build_sheet(entries: list[dict], out_path: Path) -> tuple[Path, list[dict]]:
     rows = []
     outcomes = []
     for entry in entries:
         source = Image.open(entry["image"]).convert("RGB")
         support = assess_edge_support(source, entry["quad"])
-        result = try_straighten(source, entry["quad"], require_boundary=require_boundary)
+        result = try_straighten(source, entry["quad"])
         if isinstance(result, Straightened):
             right = result.image
             outcome = {
@@ -199,7 +205,10 @@ def build_sheet(entries: list[dict], out_path: Path,
                 "angle_degrees": round(result.angle_degrees, 2),
                 "warnings": list(result.warnings),
             }
-            label = f"straightened {result.width}x{result.height} · {result.angle_degrees:.1f}°"
+            label = (
+                f"Unverified crop {result.width}x{result.height}"
+                f" · {result.angle_degrees:.1f}°"
+            )
         else:
             right = Image.new("RGB", (source.width, source.height), (70, 70, 76))
             outcome = {
@@ -210,10 +219,18 @@ def build_sheet(entries: list[dict], out_path: Path,
                 "detail": result.detail,
             }
             label = f"abstained: {result.reason}"
-        outcome["boundary"] = {
-            "verdict": support.verdict,
-            "sides": [round(value, 3) for value in support.sides],
-            "competing_sides": list(support.competing_sides),
+        outcome["diagnostics"] = {
+            "boundary": {
+                "verdict": support.verdict,
+                "sides": [round(value, 3) for value in support.sides],
+                "sideVerdicts": list(support.side_verdicts),
+                "sideOffsets": [round(value, 1) for value in support.side_offsets],
+                "shavedSides": [
+                    index
+                    for index, flag in enumerate(support.competing_sides)
+                    if flag
+                ],
+            }
         }
         outcomes.append(outcome)
         left = _fit(source, PANEL_MAX, 520)
@@ -251,8 +268,6 @@ def main() -> int:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--synth", type=int, default=0,
                         help="generate N synthetic fixtures and process them")
-    parser.add_argument("--no-boundary", action="store_true",
-                        help="disable the boundary veto (shadow comparison)")
     args = parser.parse_args()
 
     if args.synth:
@@ -265,9 +280,7 @@ def main() -> int:
         parser.error("provide --manifest or --synth")
         return 2
 
-    outcomes_path, outcomes = build_sheet(
-        entries, args.out, require_boundary=not args.no_boundary
-    )
+    outcomes_path, outcomes = build_sheet(entries, args.out)
     print(f"contact sheet: {args.out}")
     print(f"outcomes: {outcomes_path}")
     for outcome in outcomes:
