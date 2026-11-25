@@ -64,9 +64,11 @@ ran into the boundary. Without outboard evidence -- or with no support evidence
 at all -- the quad is used exactly as claimed. The applied growth is recorded
 under ``diagnostics.expansion`` beside the unchanged boundary numbers.
 
-The reported offset must never be double-counted: the expansion is capped, so
-the warp quad exceeds the claim by at most 4 % per side, and the margin band is
-inset from the *expanded* quad rather than added a second time on top of it.
+The reported offset must never be double-counted: the expansion is capped at 4 %
+per side, it is extra output area around a card footprint of the *claimed* size
+(so an asymmetric expansion cannot change the output aspect), and a side grown
+further than its 1.5 % margin band takes that space instead of adding a second
+band on top of it.
 
 Sign convention
 ---------------
@@ -92,9 +94,9 @@ the longer of the two measured side pairs must be the destination's vertical
 pair. The warp is given a corner order re-sequenced by one step when the
 supplied order put the shorter pair vertical; only the warp's order changes.
 Boundary diagnostics and the outward expansion keep the caller's corners
-exactly as supplied and as expanded. The destination's inner dimensions are
-the measured short-pair length by the measured long-pair length -- the means of
-the two pairs of the warp quad -- so rectification cannot squeeze and the
+exactly as supplied and as expanded. The destination's card footprint is the
+claimed quad's measured short-pair length by its measured long-pair length, with
+the growth as extra area around it, so rectification cannot squeeze and the
 output is portrait because the long pair is vertical. No post-warp quarter turn
 is applied and ``turned_cw`` is always 0. Orientation remains ambiguous by a
 half turn: upright versus 180 degrees inverted needs content knowledge, which
@@ -868,22 +870,6 @@ def expansion_diagnostics(
     }
 
 
-def output_pixel_size(
-    measured_w: float,
-    measured_h: float,
-    *,
-    margin: float = 0.015,
-    max_edge: int = 2048,
-) -> tuple[int, int]:
-    """Destination size for a card of the measured size, never upscaled."""
-    out_w = float(measured_w) * (1.0 + 2.0 * float(margin))
-    out_h = float(measured_h) * (1.0 + 2.0 * float(margin))
-    limit_w = min(float(measured_w), float(max_edge))
-    limit_h = min(float(measured_h), float(max_edge))
-    scale = min(1.0, limit_w / out_w if out_w else 0.0, limit_h / out_h if out_h else 0.0)
-    return int(round(out_w * scale)), int(round(out_h * scale))
-
-
 def transform_quad_for_storage(
     quad: Sequence[Tuple[float, float]],
     rotation_cw: int,
@@ -1052,10 +1038,9 @@ def try_straighten(
     # first corner put the card's short pair on the horizontal sides; the
     # expansion itself stays in the caller's order.
     #
-    # Geometry is satisfied on the claim; read the pixels for the boundary
-    # evidence, then grow the quad outward by the outboard edge it demonstrably
-    # missed. Growing can only add background, never remove card, so a shaved
-    # claim is corrected where the evidence exists. The evidence is recorded,
+    # The boundary evidence stays measured on the caller's claim exactly as
+    # supplied, and the outward expansion is measured on the claim too. Growing
+    # can only add background, never remove card. The evidence is recorded,
     # never a veto: there is no branch below that reads ``support.verdict``.
     support = assess_edge_support(rgb, points)
     warp_points, expansion_px, expansion_clamped = expand_quad_outward(

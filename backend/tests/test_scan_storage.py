@@ -625,6 +625,35 @@ class ScanJobStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("sides=", boundary["detail"])
         self.assertEqual(len(scan_storage.straighten_artifact_paths(image_path)), 1)
 
+    async def test_shadow_manifest_records_the_outward_expansion(self):
+        """The growth applied to the crop is diagnostics beside the claim's own.
+
+        A shrunken quad sits inside the card, so the recorded outboard evidence
+        grows the warp quad outward. The block says how far each side moved and
+        the quad the warp used; the boundary numbers stay the claim's.
+        """
+        geometry = _shrink_geometry(_card_geometry(), fraction=0.9)
+        _, image_path = await self._shadow_job(geometry)
+        payload = json.loads(
+            scan_storage.straighten_manifest_path(image_path).read_text()
+        )
+
+        self.assertEqual(payload["state"], "proposed", payload)
+        expansion = payload["diagnostics"]["expansion"]
+        self.assertIsInstance(expansion, dict)
+        self.assertEqual(len(expansion["sides"]), 4)
+        self.assertEqual(len(expansion["clamped"]), 4)
+        self.assertEqual(len(expansion["quad"]), 4)
+        self.assertGreater(expansion["percentile"], 0.0)
+        for entry in expansion["sides"]:
+            self.assertGreaterEqual(entry["expandPx"], 0.0)
+            self.assertIsInstance(entry["expandClamped"], bool)
+        self.assertTrue(any(entry["expandPx"] > 0.0 for entry in expansion["sides"]))
+        # The claimed quad's numbers are untouched and still per supplied side.
+        boundary = payload["diagnostics"]["boundary"]
+        self.assertEqual(len(boundary["sideSamples"]), 4)
+        self.assertTrue(all(len(samples) == 7 for samples in boundary["sideSamples"]))
+
     async def test_diagnostics_failure_never_withholds_the_proposal(self):
         """Serialising boundary diagnostics is optional; the crop is not."""
         with patch(

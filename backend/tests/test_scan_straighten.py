@@ -1046,6 +1046,295 @@ class ConfigIdentityTests(unittest.TestCase):
         with patch.object(scan_straighten, "MIN_STEP", 9.0):
             self.assertNotEqual(scan_straighten.straighten_config_digest(), baseline)
         self.assertEqual(scan_straighten.straighten_config_digest(), baseline)
+def make_expansion_support(per_side, *, verdict="ok"):
+    """Build an EdgeSupport from per-side ``(outboard_offset, strength)`` lists.
+
+    ``outboard_offset`` follows the diagnostic convention: negative is outboard
+    of the claim. Nothing here touches an image, so the expansion rules can be
+    proven from geometry and recorded sample numbers alone.
+    """
+    samples = []
+    evidence = []
+    for side in per_side:
+        samples.append(
+            tuple(
+                {
+                    "offset": float(offset),
+                    "strength": float(strength),
+                    "inboardOffset": 0.0,
+                    "inboardStrength": 0.0,
+                }
+                for offset, strength in side
+            )
+        )
+        evidence.append(
+            {
+                "ratio": 1.0,
+                "claimStep": 0.0,
+                "claimPeak": 0.0,
+                "outboardOffset": float(side[0][0]) if side else 0.0,
+                "outboardStrength": float(max((s for _, s in side), default=0.0)),
+                "inboardOffset": 0.0,
+                "inboardStrength": 0.0,
+                "verdict": verdict,
+            }
+        )
+    return EdgeSupport(
+        verdict=verdict,
+        sides=(1.0, 1.0, 1.0, 1.0),
+        competing_sides=(False, False, False, False),
+        detail="synthetic",
+        side_verdicts=(verdict, verdict, verdict, verdict),
+        side_offsets=(0.0, 0.0, 0.0, 0.0),
+        side_samples=tuple(samples),
+        side_evidence=tuple(evidence),
+    )
+
+
+def no_expansion(quad, support, **kwargs):
+    """The pre-expansion behaviour, for A/B measurements of a real crop."""
+    return (
+        [(float(x), float(y)) for x, y in quad],
+        [0.0, 0.0, 0.0, 0.0],
+        [False, False, False, False],
+    )
+
+
+class OutwardExpansionTests(unittest.TestCase):
+    """Grow a crop outward only where the samples show a real outboard edge."""
+
+    QUAD = [(60.0, 40.0), (260.0, 40.0), (260.0, 340.0), (60.0, 340.0)]
+
+    def test_coherent_skewed_edge_expands_that_side(self):
+        """Most of a side's samples agreeing on a distant edge is a real track.
+
+        The right side is skewed: five samples see the true edge 8-12 px out
+        while two see almost nothing. The percentile of the strong track must
+        win, and only that side may move.
+        """
+        support = make_expansion_support(
+            [
+                [(0.0, 0.0)] * 7,
+                [
+                    (0.0, 9.0), (0.0, 8.0),
+                    (-8.0, 40.0), (-9.0, 42.0), (-10.0, 44.0),
+                    (-11.0, 45.0), (-12.0, 43.0),
+                ],
+                [(0.0, 0.0)] * 7,
+                [(0.0, 0.0)] * 7,
+            ]
+        )
+        quad, expansion, clamped = expand_quad_outward(self.QUAD, support)
+
+        self.assertGreater(expansion[1], 8.0)
+        self.assertLessEqual(expansion[1], 0.04 * 300.0 + 1e-9)
+        self.assertEqual(expansion[0], 0.0)
+        self.assertEqual(expansion[2], 0.0)
+        self.assertEqual(expansion[3], 0.0)
+        self.assertFalse(any(clamped))
+        # The right corners moved right, the others did not move at all.
+        self.assertGreater(quad[1][0], self.QUAD[1][0])
+        self.assertGreater(quad[2][0], self.QUAD[2][0])
+        self.assertEqual(quad[0], self.QUAD[0])
+        self.assertEqual(quad[3], self.QUAD[3])
+
+    def test_single_isolated_spike_does_not_expand(self):
+        """One strong outlier among agreeing samples is noise, not an edge."""
+        spike = [(0.0, 0.0)] * 7
+        spike[3] = (-60.0, 70.0)
+        support = make_expansion_support([spike, spike, spike, spike])
+        quad, expansion, clamped = expand_quad_outward(self.QUAD, support)
+
+        self.assertEqual(expansion, [0.0, 0.0, 0.0, 0.0])
+        self.assertEqual(quad, list(self.QUAD))
+        self.assertEqual(clamped, [False, False, False, False])
+
+    def test_weak_outboard_evidence_never_expands(self):
+        """A real but sub-threshold peak (below MIN_STEP) is not an edge."""
+        weak = [(-9.0, 4.0)] * 7
+        support = make_expansion_support([weak, weak, weak, weak])
+        quad, expansion, _ = expand_quad_outward(self.QUAD, support)
+        self.assertEqual(expansion, [0.0, 0.0, 0.0, 0.0])
+        self.assertEqual(quad, list(self.QUAD))
+
+    def test_expansion_never_moves_a_side_inward(self):
+        """Inboard-only evidence, no evidence and a degenerate side all stay put."""
+        support = make_expansion_support(
+            [
+                [(-6.0, 40.0)] * 7,
+                [(4.0, 60.0)] * 7,          # inboard only: the claim is loose
+                [],                         # no samples at all
+                [(0.0, 0.0)] * 7,           # nothing outboard
+            ]
+        )
+        quad, expansion, _ = expand_quad_outward(self.QUAD, support)
+
+        self.assertGreater(expansion[0], 0.0)
+        self.assertEqual(expansion[1], 0.0)
+        self.assertEqual(expansion[2], 0.0)
+        self.assertEqual(expansion[3], 0.0)
+        for side in range(4):
+            midpoint = (
+                (quad[side][0] + quad[(side + 1) % 4][0]) / 2.0,
+                (quad[side][1] + quad[(side + 1) % 4][1]) / 2.0,
+            )
+            # Negative is outboard: no side may end up inboard of its claim.
+            self.assertLessEqual(edge_signed_offset(self.QUAD, side, midpoint), 1e-9)
+
+    def test_max_expand_frac_caps_a_wild_track(self):
+        wild = [(-90.0, 40.0)] * 7
+        support = make_expansion_support([wild, wild, wild, wild])
+        quad, expansion, _ = expand_quad_outward(self.QUAD, support)
+
+        # The quad is 200 wide and 300 tall, so 4 % is 8 px and 12 px.
+        self.assertAlmostEqual(expansion[0], 8.0, places=6)
+        self.assertAlmostEqual(expansion[1], 12.0, places=6)
+        self.assertAlmostEqual(expansion[2], 8.0, places=6)
+        self.assertAlmostEqual(expansion[3], 12.0, places=6)
+        # Corner 0 sits on the top (8 px) and left (12 px) sides, so both grow.
+        self.assertAlmostEqual(quad[0][0], self.QUAD[0][0] - 12.0, places=6)
+        self.assertAlmostEqual(quad[0][1], self.QUAD[0][1] - 8.0, places=6)
+
+    def test_clamp_at_the_raster_border_is_flagged(self):
+        """A corner the raster cannot follow is flagged, not silently clipped."""
+        claim = [(6.0, 6.0), (194.0, 6.0), (194.0, 254.0), (6.0, 254.0)]
+        support = make_expansion_support(
+            [[(-40.0, 50.0)] * 7] * 4
+        )
+        quad, expansion, clamped = expand_quad_outward(
+            claim, support, bounds=(200.0, 260.0)
+        )
+
+        self.assertTrue(any(expansion))
+        self.assertTrue(any(clamped))
+        for index in range(4):
+            self.assertGreaterEqual(quad[index][0], 0.0)
+            self.assertGreaterEqual(quad[index][1], 0.0)
+            self.assertLessEqual(quad[index][0], 199.0)
+            self.assertLessEqual(quad[index][1], 259.0)
+
+    def test_no_support_evidence_leaves_the_quad_unchanged(self):
+        quad, expansion, clamped = expand_quad_outward(self.QUAD, None)
+        self.assertEqual(quad, list(self.QUAD))
+        self.assertEqual(expansion, [0.0, 0.0, 0.0, 0.0])
+        self.assertEqual(clamped, [False, False, False, False])
+
+    @unittest.skipUnless(DEPS_AVAILABLE, "Pillow/numpy unavailable")
+    def test_a_tight_claim_is_unchanged_and_crops_bit_identically(self):
+        canvas, quad = SyntheticBoundaryDirectionTests._on_dark(make_plain_card())
+        support = assess_edge_support(canvas, quad)
+        self.assertEqual(support.verdict, "ok")
+        expanded, expansion, clamped = expand_quad_outward(
+            quad, support, bounds=(float(canvas.width), float(canvas.height))
+        )
+        self.assertEqual(expansion, [0.0, 0.0, 0.0, 0.0])
+        self.assertFalse(any(clamped))
+        self.assertEqual(expanded, list(quad))
+
+        result = try_straighten(canvas, quad)
+        with patch("services.scan_straighten.expand_quad_outward", side_effect=no_expansion):
+            baseline = try_straighten(canvas, quad)
+        self.assertIsInstance(result, Straightened)
+        self.assertIsInstance(baseline, Straightened)
+        self.assertEqual((result.width, result.height), (baseline.width, baseline.height))
+        self.assertTrue(
+            np.array_equal(np.asarray(result.image), np.asarray(baseline.image))
+        )
+
+    @unittest.skipUnless(DEPS_AVAILABLE, "Pillow/numpy unavailable")
+    def test_a_shaved_claim_gets_the_card_edge_back(self):
+        """The Tauros shape in miniature: the claim sits inside the card.
+
+        A fourteen-pixel inboard left side leaves the card's dark rim outside
+        the crop entirely; the outboard evidence grows that side back onto it.
+        """
+        card = make_card()
+        canvas = Image.new("RGB", (340, 380), DARK)
+        canvas.paste(card, (60, 40))
+        base = [
+            (60.0, 40.0),
+            (274.0, 40.0),
+            (274.0, 339.0),
+            (60.0, 339.0),
+        ]
+        shaved = shift_side(base, 3, 14)
+
+        result = try_straighten(canvas, shaved)
+        with patch(
+            "services.scan_straighten.expand_quad_outward",
+            side_effect=no_expansion,
+        ):
+            before = try_straighten(canvas, shaved)
+        self.assertIsInstance(result, Straightened)
+        self.assertIsInstance(before, Straightened)
+
+        left_growth = result.expansion["sides"][3]["expandPx"]
+        self.assertGreater(left_growth, 0.0)
+        self.assertEqual(result.expansion["sides"][3]["expandClamped"], False)
+
+        after_band = np.asarray(result.image.convert("L"), dtype=float)[:, :1].mean()
+        before_band = np.asarray(before.image.convert("L"), dtype=float)[:, :1].mean()
+        self.assertGreater(before_band, 200.0)  # white card stock only
+        self.assertLess(after_band, 100.0)      # the dark rim is back in frame
+
+    @unittest.skipUnless(DEPS_AVAILABLE, "Pillow/numpy unavailable")
+    def test_expansion_is_reported_without_touching_the_claimed_numbers(self):
+        canvas, quad = SyntheticBoundaryDirectionTests._on_dark(make_plain_card())
+        shaved = [
+            (quad[0][0] + 5.0, quad[0][1] + 5.0),
+            (quad[1][0] - 5.0, quad[1][1] + 5.0),
+            (quad[2][0] - 5.0, quad[2][1] - 5.0),
+            (quad[3][0] + 5.0, quad[3][1] - 5.0),
+        ]
+        result = try_straighten(canvas, shaved)
+        self.assertIsInstance(result, Straightened)
+
+        expansion = result.expansion
+        self.assertEqual(set(expansion), {"percentile", "sides", "clamped", "quad"})
+        self.assertEqual(len(expansion["sides"]), 4)
+        self.assertEqual(len(expansion["clamped"]), 4)
+        self.assertEqual(len(expansion["quad"]), 4)
+        for entry in expansion["sides"]:
+            self.assertEqual(set(entry), {"expandPx", "expandClamped"})
+            self.assertGreater(entry["expandPx"], 0.0)
+        # The claimed quad's own numbers are still measured on the claim.
+        claimed = assess_edge_support(canvas, shaved)
+        self.assertEqual(result.support.sides, claimed.sides)
+        self.assertEqual(result.support.side_verdicts, claimed.side_verdicts)
+        self.assertEqual(
+            boundary_diagnostics(result.support), boundary_diagnostics(claimed)
+        )
+
+    @unittest.skipUnless(DEPS_AVAILABLE, "Pillow/numpy unavailable")
+    def test_output_area_growth_stays_under_the_bound(self):
+        """The 4 % cap plus the 1.5 % margin must not balloon the crop."""
+        canvas, quad = SyntheticBoundaryDirectionTests._on_dark(make_plain_card())
+        shift = 4.0
+        shaved = [
+            (quad[0][0] + shift, quad[0][1] + shift),
+            (quad[1][0] - shift, quad[1][1] + shift),
+            (quad[2][0] - shift, quad[2][1] - shift),
+            (quad[3][0] + shift, quad[3][1] - shift),
+        ]
+        result = try_straighten(canvas, shaved)
+        with patch(
+            "services.scan_straighten.expand_quad_outward",
+            side_effect=no_expansion,
+        ):
+            before = try_straighten(canvas, shaved)
+        self.assertIsInstance(result, Straightened)
+        self.assertIsInstance(before, Straightened)
+
+        area_before = before.width * before.height
+        area_after = result.width * result.height
+        self.assertLess(area_after, int(area_before * 1.10), (before.width, before.height, result.width, result.height))
+        self.assertGreater(area_after, area_before)
+
+        # The card still fills the frame: almost every column is card stock.
+        gray = np.asarray(result.image.convert("L"), dtype=float)
+        column_means = gray.mean(axis=0)
+        card_columns = int((column_means > 128.0).sum())
+        self.assertGreaterEqual(card_columns / result.width, 0.90)
 
 
 if __name__ == "__main__":

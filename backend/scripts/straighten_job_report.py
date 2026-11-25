@@ -84,6 +84,26 @@ def _quad_metrics(quad: list[tuple[float, float]]) -> dict:
     }
 
 
+MAX_EDGE = 2048
+
+
+def _claimed_output_size(sides: list[float]) -> tuple[int, int]:
+    """Output size the same claim would have had without any expansion.
+
+    Mirrors ``try_straighten``'s no-growth case: the card footprint is the
+    measured short and long pair (the warp re-sequences corners so the long pair
+    is vertical), the 1.5 % band is free area and nothing is upscaled, so the
+    output is the measured pair itself, capped by the maximum edge.
+    """
+    short, long = sorted(
+        ((sides[0] + sides[2]) / 2.0, (sides[1] + sides[3]) / 2.0)
+    )
+    return (
+        int(round(min(short, MAX_EDGE))),
+        int(round(min(long, MAX_EDGE))),
+    )
+
+
 def _fit(image: Image.Image, max_width: int, max_height: int) -> Image.Image:
     scale = min(1.0, max_width / image.width, max_height / image.height)
     if scale < 1.0:
@@ -146,6 +166,7 @@ def build_sheet(job_dir: Path, out_path: Path) -> tuple[Path, list[dict]]:
             geometry["quad"], rotation, source.width, source.height
         )
         metrics = _quad_metrics(quad)
+        before_w, before_h = _claimed_output_size(metrics["sides"])
         support = assess_edge_support(source, quad)
         result = try_straighten(source, quad)
 
@@ -175,6 +196,13 @@ def build_sheet(job_dir: Path, out_path: Path) -> tuple[Path, list[dict]]:
         if isinstance(result, Straightened):
             right = result.image
             orientation = LANDSCAPE if result.width > result.height else PORTRAIT
+            expansion = getattr(result, "expansion", None) or {}
+            side_expansion = [
+                float(entry.get("expandPx") or 0.0)
+                for entry in expansion.get("sides", [])
+            ]
+            area_after = result.width * result.height
+            area_before = before_w * before_h
             outcome.update(
                 state="proposed",
                 description="Unverified crop",
@@ -184,10 +212,27 @@ def build_sheet(job_dir: Path, out_path: Path) -> tuple[Path, list[dict]]:
                 outputOrientation=orientation,
                 angleDegrees=round(result.angle_degrees, 2),
                 turnedCw=int(getattr(result, "turned_cw", 0) or 0),
+                expansion=expansion,
+                sideExpansionPx=side_expansion,
+                expandedSides=[
+                    i + 1 for i, value in enumerate(side_expansion) if value > 0.0
+                ],
+                expandClamped=[
+                    i + 1
+                    for i, flag in enumerate(expansion.get("clamped", []))
+                    if flag
+                ],
+                outputWidthBefore=before_w,
+                outputHeightBefore=before_h,
+                outputAreaBefore=area_before,
+                outputAreaAfter=area_after,
+                areaGrowth=round(area_after / max(1, area_before), 4),
             )
+            growth = f"{area_after / max(1, area_before):.3f}x"
             status = f"Unverified crop · {result.width}x{result.height} {orientation}" \
                      f" · tilt {result.angle_degrees:.1f}°" \
-                     f" · turn {outcome['turnedCw']}°"
+                     f" · expand {'/'.join(f'{v:.1f}' for v in side_expansion)}" \
+                     f" · area {before_w}x{before_h}→{result.width}x{result.height} {growth}"
         else:
             assert isinstance(result, Abstained)
             right = Image.new("RGB", (source.width, source.height), ABSTAIN_FILL)
@@ -265,11 +310,46 @@ def _print_summary(out_path: Path, outcomes: list[dict], skipped: list[Path]) ->
           + (", ".join(f"{key}={orientations[key]}"
                        for key in (PORTRAIT, LANDSCAPE) if orientations[key])
              or "none"))
+    proposed = [item for item in outcomes if item["state"] == "proposed"]
+    grown = [
+        item for item in proposed
+        if item.get("outputAreaAfter", 0) > item.get("outputAreaBefore", 0)
+    ]
+    expanded_crops = [
+        item for item in proposed if any(v > 0.0 for v in item.get("sideExpansionPx", []))
+    ]
+    if proposed:
+        print(f"crops grown by expansion: {len(grown)}/{len(proposed)}")
+        print(f"crops the outward expansion grew: {len(expanded_crops)}/{len(proposed)}")
+        for side in range(4):
+            values = [
+                item["sideExpansionPx"][side]
+                for item in proposed
+                if side < len(item.get("sideExpansionPx", []))
+            ]
+            moved = [value for value in values if value > 0.0]
+            if not moved:
+                print(f"side {side + 1}: no expansion in any job")
+                continue
+            print(
+                f"side {side + 1}: {len(moved)}/{len(values)} expanded"
+                f" min={min(moved):.2f} median={sorted(moved)[len(moved) // 2]:.2f}"
+                f" max={max(moved):.2f}px"
+            )
+        clamped = [item["stem"][:8] for item in proposed if item.get("expandClamped")]
+        if clamped:
+            print("expansion clamped by the raster: " + ", ".join(clamped))
     for item in outcomes:
         aspect = f"{item['measuredWidth']:.0f}x{item['measuredHeight']:.0f}px" \
                  f" aspect={item['measuredAspect']:.2f}"
         if item["state"] == "proposed":
-            tail = f"{item['outputWidth']}x{item['outputHeight']} {item['outputOrientation']}"
+            expansion_text = "/".join(f"{v:.1f}" for v in item["sideExpansionPx"])
+            tail = (
+                f"{item['outputWidth']}x{item['outputHeight']} {item['outputOrientation']}"
+                f" area {item['outputAreaBefore']}->{item['outputAreaAfter']}"
+                f" ({item['areaGrowth']:.3f}x)"
+                f" expand={expansion_text}"
+            )
         else:
             tail = f"abstained {item['reason']}"
         print(f"- {item['stem'][:8]}: {tail} | {aspect}"
