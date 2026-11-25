@@ -24,7 +24,7 @@ already have. Measured state of the lab, for context:
 | Where it lives | Third mode on the Scanner page, beside photo upload and guided webcam |
 | Auto-capture default | On, with a visible toggle; the choice is remembered |
 | Captures reach the scanner | Tray, then one job (as the lab does) |
-| Duplicate printings | Flag in review and ask which copy — never silently drop |
+| Duplicate printings | Flag **consecutive** duplicates in review and ask which copy — never silently drop; a repeat that comes back later in a batch is not flagged |
 | Detector delivery | Fetch on first use |
 | iOS | Offered everywhere; failure must be visible and actionable |
 
@@ -78,11 +78,16 @@ Each phase ends at a gate; nothing starts before the previous gate passes.
 
 ### Phase 4 — review hand-off and duplicates
 - Captures land in the tray and submit as one job (already true).
-- In review, detect two items resolving to the same printing and flag them: ask
-  which copy (or both), never merge silently. Include the case of a genuine second
-  copy, which is the common one for collectors.
-- Gate: measured false-merge rate against real duplicate pairs; no silent drops;
-  the prompt is one tap.
+- In review, flag an item only when it resolves to the same printing as the item
+  **immediately before it** in the tray order, and ask which copy (or both) — never
+  merge silently. A collector working through a stack legitimately owns several of
+  the same card: a repeat that comes back after other cards have been scanned is a
+  second copy, not a duplicate, and must not be flagged.
+- Consecutive is the whole rule. It catches the accidental re-capture (the same card
+  presented twice in a row, which appearance re-arm makes rare but not impossible)
+  without second-guessing a deliberate second copy found later in the box.
+- Gate: measured false-merge rate against real consecutive pairs; no silent drops; the
+  prompt is one tap; a repeat three items later is left alone.
 
 ### Phase 5 — hardening and rollout
 - Permissions and HTTPS messaging; camera denied/absent; backgrounded tab; power
