@@ -1092,8 +1092,19 @@ export default function CaptureLab() {
     setWebgpuVerification(null)
     setWebgpuVerifying(false)
     let worker
+    let bootstrapUrl = ''
     try {
-      worker = new Worker(new URL('../workers/cardDetector.worker.js', import.meta.url), {
+      // Start the worker from a blob that imports the real module. A worker
+      // started from its own URL is governed by that script's response headers,
+      // and a content-hashed asset can keep a stale Content-Security-Policy for
+      // as long as the browser caches it - which blocked the detector's wasm
+      // even after the policy was fixed on the server. A blob worker inherits the
+      // document's policy instead, and the document is always revalidated.
+      const moduleUrl = new URL('../workers/cardDetector.worker.js', import.meta.url)
+      bootstrapUrl = URL.createObjectURL(
+        new Blob([`import ${JSON.stringify(moduleUrl.href)}`], { type: 'text/javascript' }),
+      )
+      worker = new Worker(bootstrapUrl, {
         type: 'module',
       })
     } catch (error) {

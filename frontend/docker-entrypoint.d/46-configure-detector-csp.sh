@@ -37,7 +37,7 @@ for file in $csp_files; do
   # Idempotent across restarts, and careful not to match the explanatory comment
   # above the directive: only the directive itself counts as already widened.
   grep -q "script-src 'self' 'wasm-unsafe-eval'" "$file" && continue
-  sed -i "s|script-src 'self';|script-src 'self' 'wasm-unsafe-eval'; worker-src 'self';|g" "$file"
+  sed -i "s|script-src 'self';|script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:;|g" "$file"
   echo "detector: enabled 'wasm-unsafe-eval' in $file"
 done
 
