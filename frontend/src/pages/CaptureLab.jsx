@@ -1160,7 +1160,9 @@ export default function CaptureLab() {
       setWebgpuVerifying(false)
       stopLiveDetection()
     }
-    worker.postMessage({ type: 'init', runtime })
+    // The worker runs from a blob, where root-relative URLs cannot be resolved;
+    // tell it the page's origin so its detector URLs stay absolute.
+    worker.postMessage({ type: 'init', runtime, assetBase: window.location.origin })
   }
 
   const detectFile = async event => {

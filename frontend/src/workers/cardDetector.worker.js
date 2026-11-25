@@ -18,6 +18,13 @@ const RUNTIME_URLS = {
 }
 const MODEL_URL = '/detector/cornelius-2.12.onnx'
 const WASM_DIR = '/detector/vendor/'
+// The worker may be started from a blob (so its policy is the document's, see
+// CaptureLab.loadDetector), and inside a blob worker a root-relative path like
+// '/detector/x' has no base to resolve against - Firefox rejects it outright.
+// The page supplies its origin with the init message and every detector URL is
+// resolved against it.
+let assetBase = ''
+const assetUrl = path => (assetBase ? new URL(path, assetBase).href : path)
 const IMAGENET_MEAN = [0.485, 0.456, 0.406]
 const IMAGENET_STD = [0.229, 0.224, 0.225]
 
@@ -117,17 +124,17 @@ function isUsableQuad(corners) {
 async function loadRuntime(runtime) {
   if (!runtimeModules.has(runtime)) {
     // One namespace per build URL: switching back reuses the imported module.
-    runtimeModules.set(runtime, await import(/* @vite-ignore */ RUNTIME_URLS[runtime]))
+    runtimeModules.set(runtime, await import(/* @vite-ignore */ assetUrl(RUNTIME_URLS[runtime])))
   }
   const module = runtimeModules.get(runtime)
   module.env.wasm.numThreads = 1
-  module.env.wasm.wasmPaths = WASM_DIR
+  module.env.wasm.wasmPaths = assetUrl(WASM_DIR)
   return module
 }
 
 async function getModelBuffer() {
   if (modelBuffer) return modelBuffer
-  const response = await fetch(MODEL_URL)
+  const response = await fetch(assetUrl(MODEL_URL))
   if (!response.ok) {
     throw new Error(`model download failed: HTTP ${response.status}`)
   }
@@ -339,6 +346,7 @@ self.onmessage = async event => {
   const message = event.data || {}
   try {
     if (message.type === 'init') {
+      assetBase = message.assetBase || ''
       await init(message.runtime)
       self.postMessage({ type: 'ready', runtime: activeRuntime })
       return
