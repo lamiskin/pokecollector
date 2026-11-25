@@ -100,6 +100,9 @@ const CAPTURE_SOURCE_MAX_EDGE = 2400
 // One bounded retry after a stale geometry result: request a fresh detection
 // and try the capture again when it lands.
 const CAPTURE_RETRY_MS = 900
+// 'off' | 'shadow' | 'active'. Only 'active' would let a soft result through a
+// stable tracker; this build is 'shadow' and only records the predicate.
+const SOFT_ACCEPT_MODE = 'shadow'
 // Confidence pulse after an accepted model result. The overlay turns the pulse
 // into one eased lock strength for the ring, so this only has to be long enough
 // for consecutive detections to overlap, not a visible state of its own.
@@ -402,6 +405,8 @@ export default function CaptureLab() {
   const lastConfirmCornersRef = useRef(null)
   const lastConfirmSharpnessRef = useRef(null)
   const trackerStatsRef = useRef({ hits: 0, attempts: 0, reason: 'frame' })
+  const trackerHoldHitsRef = useRef(0)
+  const softCandidateRef = useRef(false)
   const diagRef = useRef({ startedAt: null, samples: [], events: [], meta: null, frames: 0, taken: 0 })
   const diagTimerRef = useRef(null)
   const diagSnapshotCanvasRef = useRef(null)
@@ -549,6 +554,7 @@ export default function CaptureLab() {
     trackerFpsRef.current = null
     trackerLastTsRef.current = null
     trackerStatsRef.current = { hits: 0, attempts: 0, reason: 'frame' }
+    trackerHoldHitsRef.current = 0
     setTrackerStats({ hits: 0, attempts: 0, reason: 'frame' })
     setTrackerFps(0)
     setDetectAgeMs(null)
@@ -735,6 +741,7 @@ export default function CaptureLab() {
         phase: diagPhaseRef.current,
         phaseReason: phaseReasonRef.current,
         modelUnusableReason: model?.unusableReason ?? null,
+        softCandidate: softCandidateRef.current,
         detectAgeMs: lastDetectionAtRef.current == null
           ? null
           : Math.round(now - lastDetectionAtRef.current),
@@ -912,6 +919,7 @@ export default function CaptureLab() {
     liveLastTsRef.current = null
     liveIntervalRef.current = null
     liveResultRef.current = null
+    softCandidateRef.current = false
     setLiveResult(null)
     setLiveState('idle')
     setLiveFps(0)
@@ -1805,6 +1813,31 @@ export default function CaptureLab() {
     setLiveResult(result)
 
     const now = performance.now()
+    const softTracked = trackedQuadRef.current
+    const softFresh = softTracked != null && trackerLastTsRef.current != null
+      && now - trackerLastTsRef.current <= TRACK_PHASE_MAX_AGE_MS
+    const softAgreement = result.unusableReason === 'soft' && softTracked
+      ? cornerAgreement({ trackedCorners: softTracked, modelCorners: result.corners })
+      : null
+    const softCandidate = SOFT_ACCEPT_MODE !== 'off'
+      && result.unusableReason === 'soft'
+      && softFresh
+      && trackerHoldHitsRef.current >= 10
+      && softAgreement != null
+      && softAgreement <= 0.04
+    softCandidateRef.current = softCandidate
+    if (SOFT_ACCEPT_MODE !== 'off'
+      && result.unusableReason === 'soft'
+      && softTracked
+      && softAgreement != null) {
+      recordDiagEvent('soft-candidate', {
+        agreement: Number(softAgreement.toFixed(4)),
+        trackHits: trackerHoldHitsRef.current,
+        sharpness: result.sharpness ?? null,
+        area: result.area ?? null,
+        acceptedByRule: softCandidate,
+      })
+    }
     modelIntervalMsRef.current = lastDetectionAtRef.current == null
       ? null
       : Math.round(now - lastDetectionAtRef.current)
@@ -1854,6 +1887,7 @@ export default function CaptureLab() {
       area: result.area ?? null,
       usable: result.usable,
       unusableReason: result.unusableReason ?? null,
+      softCandidate,
       seq: message.seq ?? null,
       detectParts: message.detectParts ?? null,
     })
@@ -1911,6 +1945,7 @@ export default function CaptureLab() {
       trackerLastTsRef.current = null
       trackerFpsRef.current = null
       trackerStatsRef.current = { hits: 0, attempts: 0, reason: 'frame' }
+      trackerHoldHitsRef.current = 0
       setTrackerStats({ hits: 0, attempts: 0, reason: 'frame' })
       if (result.usable) {
         try {
@@ -2157,6 +2192,7 @@ export default function CaptureLab() {
             trackerFpsRef.current = null
             trackerLastTsRef.current = performance.now()
             trackerStatsRef.current = { hits: 0, attempts: 0, reason: 'ok' }
+            trackerHoldHitsRef.current = 1
             setTrackerStats({ hits: 0, attempts: 0, reason: 'ok' })
             setConfirmPulseUntil(performance.now() + CONFIRM_PULSE_MS)
             trackerFrameMsRef.current = Math.round(performance.now() - frameStarted)
@@ -2191,6 +2227,7 @@ export default function CaptureLab() {
       stats.reason = tracker.getLastReason()
 
       if (!tracked) {
+        trackerHoldHitsRef.current = 0
         // A single bad frame is normal: keep the last quad and the phase, and
         // only call it lost after TRACK_LOST_AFTER consecutive misses.
         trackerFailuresRef.current += 1
@@ -2224,6 +2261,7 @@ export default function CaptureLab() {
 
       trackerFailuresRef.current = 0
       stats.hits += 1
+      trackerHoldHitsRef.current += 1
       trackedQuadRef.current = tracked
       // A tracked quad is a camera-rate observation of the card between model
       // results; feed it to the hold window so per-step motion is judged from
@@ -2251,6 +2289,7 @@ export default function CaptureLab() {
       trackerLastTsRef.current = now
     } catch {
       trackerFailuresRef.current += 1
+      trackerHoldHitsRef.current = 0
       if (trackerFailuresRef.current >= TRACK_MAX_MISSES) {
         if (tentativeRef.current) {
           trackerRafRef.current = window.requestAnimationFrame(() => trackerLoopRef.current?.())
