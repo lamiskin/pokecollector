@@ -425,6 +425,40 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
       const current = anim.phase
       const raw = quadRef.current
 
+      const updateBlur = target => {
+        if (!blurRef.current) {
+          anim.blur = 0
+          anim.blurFrom = 0
+          anim.blurTo = 0
+          anim.blurStart = 0
+          return
+        }
+        if (reduced) {
+          anim.blur = target
+          anim.blurFrom = target
+          anim.blurTo = target
+        } else {
+          if (anim.blurTo !== target) {
+            anim.blurFrom = anim.blur
+            anim.blurTo = target
+            anim.blurStart = now
+          }
+          if (anim.blur !== target) {
+            const span = target === 1 ? BLUR_FADE_IN_MS : BLUR_FADE_OUT_MS
+            const ratio = clamp01((now - anim.blurStart) / span)
+            anim.blur = ratio >= 1
+              ? target
+              : anim.blurFrom + (target - anim.blurFrom) * easeOutCubic(ratio)
+          }
+        }
+        const shownBlur = Math.round(anim.blur * 100) / 100
+        if (shownBlur !== anim.blurShown) {
+          anim.blurShown = shownBlur
+          blurRef.current.style.opacity = String(shownBlur)
+          blurRef.current.style.display = shownBlur > 0 ? 'block' : 'none'
+        }
+      }
+
       if (!raw) {
         // Nothing to draw: blank the paint once, then leave the DOM alone so an
         // idle camera does not write to it 60 times a second. The smoother is
@@ -438,17 +472,8 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
         anim.lockTo = 0
         anim.blurWanted = false
         anim.blurReleaseAt = 0
-        anim.blurFrom = 0
-        anim.blurTo = 0
-        anim.blurStart = 0
-        anim.blurShown = -1
-        if (anim.blur !== 0) {
-          anim.blur = 0
-          if (blurRef.current) {
-            blurRef.current.style.opacity = '0'
-            blurRef.current.style.display = 'none'
-          }
-        }
+        // Fade out through the normal tween instead of hiding immediately.
+        updateBlur(0)
         if (blankRef.current) return
         blankRef.current = true
         dimRef.current?.setAttribute('opacity', '0')
@@ -522,7 +547,8 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
       // is still being followed - not just for the 800 ms hold, which is far
       // too short to read. A lost/none phase releases after a short grace so a
       // one-frame blip cannot toggle it; captured and too-small release at once.
-      if (current === 'locked' || current === 'holding') {
+      if (current === 'locked' || current === 'holding'
+        || current === 'tracking' || current === 'lost') {
         anim.blurWanted = true
         anim.blurReleaseAt = 0
       } else if (current === 'captured' || current === 'tooSmall') {
@@ -538,42 +564,9 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
       } else {
         anim.blurReleaseAt = 0
       }
-      if (!blurRef.current) {
-        // Soft focus is off, so nothing is composited: restart the fade from
-        // zero if it is switched back on.
-        anim.blur = 0
-        anim.blurFrom = 0
-        anim.blurTo = 0
-        anim.blurStart = 0
-        anim.blurShown = -1
-      } else {
-        const target = softFocus && anim.blurWanted ? 1 : 0
-        if (reduced) {
-          anim.blur = target
-          anim.blurFrom = target
-          anim.blurTo = target
-        } else {
-          if (anim.blurTo !== target) {
-            anim.blurFrom = anim.blur
-            anim.blurTo = target
-            anim.blurStart = now
-          }
-          if (anim.blur !== target) {
-            const span = target === 1 ? BLUR_FADE_IN_MS : BLUR_FADE_OUT_MS
-            const ratio = clamp01((now - anim.blurStart) / span)
-            anim.blur = ratio >= 1
-              ? target
-              : anim.blurFrom + (target - anim.blurFrom) * easeOutCubic(ratio)
-          }
-        }
-        if (softFocus && anim.blur > 0) paintBlurHole(px, width, height)
-        const shownBlur = Math.round(anim.blur * 100) / 100
-        if (shownBlur !== anim.blurShown) {
-          anim.blurShown = shownBlur
-          blurRef.current.style.opacity = String(shownBlur)
-          blurRef.current.style.display = shownBlur > 0 ? 'block' : 'none'
-        }
-      }
+      const blurTarget = softFocus && anim.blurWanted ? 1 : 0
+      updateBlur(blurTarget)
+      if (softFocus && anim.blur > 0) paintBlurHole(px, width, height)
       for (const node of [underRef.current, baseRef.current, trackRef.current, progRef.current, glowRef.current]) {
         node?.setAttribute('d', path)
       }

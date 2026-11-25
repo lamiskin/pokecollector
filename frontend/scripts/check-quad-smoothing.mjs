@@ -129,6 +129,28 @@ const copy = quad => quad.map(([x, y]) => [x, y])
     `error ${maxMove(smoother.corners, elsewhere).toFixed(6)}`)
 }
 
+// A non-discontinuous sample during a glide retargets the landing point without
+// restarting the full duration.
+{
+  const smoother = createQuadSmoother()
+  smoother.sample(base, 33, 0)
+  const far = shift(base, 0.35, 0.35)
+  smoother.sample(far, 33, 33)
+  smoother.tick(33 + 200)
+  const movedTarget = shift(far, 0.02, -0.02)
+  smoother.sample(movedTarget, 33, 33 + 200)
+  let previous = copy(smoother.corners)
+  let largestStep = 0
+  for (let t = 33 + 216; t <= 3000; t += 16) {
+    smoother.tick(t)
+    largestStep = Math.max(largestStep, maxMove(smoother.corners, previous))
+    previous = copy(smoother.corners)
+  }
+  check('a mid-glide sample moves the landing point', maxMove(smoother.corners, movedTarget) < 1e-5,
+    `error ${maxMove(smoother.corners, movedTarget).toFixed(6)}`)
+  check('retargeting does not teleport', largestStep < 0.03, `largest step ${largestStep.toFixed(4)}`)
+}
+
 // Reduced motion (glide off) and a fresh session both show the quad where it
 // is instead of travelling to it.
 {

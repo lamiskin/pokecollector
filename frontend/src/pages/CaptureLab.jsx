@@ -100,6 +100,8 @@ const CAPTURE_FRAME_WAIT_MS = 200
 // Match the server's MAX_IMAGE_EDGE (2048) so an upload is stored without a
 // second LANCZOS resize after it arrives.
 const CAPTURE_SOURCE_MAX_EDGE = 2048
+// Shared by capture and the re-arm signature so both compare the same region.
+const CAPTURE_BOX_PAD_FRACTION = 0.12
 // One bounded retry after a stale geometry result: request a fresh detection
 // and try the capture again when it lands.
 const CAPTURE_RETRY_MS = 900
@@ -405,6 +407,8 @@ export default function CaptureLab() {
   const lastConfirmCornersRef = useRef(null)
   const lastConfirmSharpnessRef = useRef(null)
   const trackerStatsRef = useRef({ hits: 0, attempts: 0, reason: 'frame' })
+  const lastTrackFrameTimeRef = useRef(null)
+  const lastUsableModelAtRef = useRef(null)
   const diagRef = useRef({ startedAt: null, samples: [], events: [], meta: null, frames: 0, taken: 0 })
   const diagTimerRef = useRef(null)
   const diagSnapshotCanvasRef = useRef(null)
@@ -474,6 +478,7 @@ export default function CaptureLab() {
   const [soundOn, setSoundOn] = useState(isCaptureSoundEnabled)
   const capturedSignatureRef = useRef(null)
   const lastRearmCheckAtRef = useRef(0)
+  const lastRearmFrameTimeRef = useRef(null)
   const rearmChangedStreakRef = useRef(0)
   const [softFocus, setSoftFocus] = useState(() => {
     try {
@@ -554,6 +559,7 @@ export default function CaptureLab() {
     trackerFailuresRef.current = 0
     trackerFpsRef.current = null
     trackerLastTsRef.current = null
+    lastTrackFrameTimeRef.current = null
     trackerStatsRef.current = { hits: 0, attempts: 0, reason: 'frame' }
     setTrackerStats({ hits: 0, attempts: 0, reason: 'frame' })
     setTrackerFps(0)
@@ -1277,8 +1283,8 @@ export default function CaptureLab() {
       // Generous 12 % region around the card: how a person frames a hand-held
       // photo, and enough slack that recognisers see the whole card even when
       // the tracker is slightly tight. No rotation or rectification is applied.
-      const padX = Math.round(boxWidth * 0.12)
-      const padY = Math.round(boxHeight * 0.12)
+      const padX = Math.round(boxWidth * CAPTURE_BOX_PAD_FRACTION)
+      const padY = Math.round(boxHeight * CAPTURE_BOX_PAD_FRACTION)
       const minX = Math.max(0, Math.floor(Math.min(...xs) - padX))
       const maxX = Math.min(videoWidth, Math.ceil(Math.max(...xs) + padX))
       const minY = Math.max(0, Math.floor(Math.min(...ys) - padY))
@@ -1336,6 +1342,7 @@ export default function CaptureLab() {
     setAutoDisarmed(false)
     capturedSignatureRef.current = null
     lastRearmCheckAtRef.current = 0
+    lastRearmFrameTimeRef.current = null
     rearmChangedStreakRef.current = 0
     setAutoHoldStartTs(null)
     setHoldHint('')
@@ -1486,6 +1493,7 @@ export default function CaptureLab() {
         // is strong evidence of a card even while the detector's confidence is
         // too soft. It is a fallback, not a replacement for a fresh model result.
         const trackerCorroborated = decision.source === 'tracked'
+          && trackerFailuresRef.current === 0
           && trackerStatsRef.current.hits >= 12
           && quadAgeMs != null
           && quadAgeMs <= CAPTURE_QUAD_MAX_AGE_MS
@@ -1629,6 +1637,7 @@ export default function CaptureLab() {
         }
         rearmChangedStreakRef.current = 0
         lastRearmCheckAtRef.current = 0
+        lastRearmFrameTimeRef.current = null
         // The success beat starts only once the File exists and is staged.
         setCaptureBeatAt(performance.now())
         if (soundOn) playCaptureSuccess()
@@ -1643,6 +1652,15 @@ export default function CaptureLab() {
           quadSource: decision.source,
           edgeVariance: focusVariance,
           corroboration: corroborationSource,
+          ...(corroborationSource === 'tracker'
+            ? {
+              trackerHits: trackerStatsRef.current.hits,
+              trackerFailures: trackerFailuresRef.current,
+              sinceUsableMs: lastUsableModelAtRef.current == null
+                ? null
+                : Math.round(performance.now() - lastUsableModelAtRef.current),
+            }
+            : {}),
         })
         recordDiagEvent('capture-attempt', {
           ok: true,
@@ -1672,7 +1690,25 @@ export default function CaptureLab() {
   const captureFrame = () => {
     primeCaptureAudio()
     if (liveDetectionRef.current) {
-      void captureWithFreshGeometry({ auto: false })
+      // A tap is a decision: if freshness or the automatic gates refuse, stage
+      // a full frame rather than refusing the collector.
+      void captureWithFreshGeometry({ auto: false }).then(ok => {
+        if (ok) return
+        recordDiagEvent('capture-attempt', {
+          ok: false,
+          retry: false,
+          reason: 'manual-fallback',
+          waitedMs: null,
+          quadAgeMs: null,
+          frameTime: null,
+          sharpness: null,
+          corroborateAgeMs: null,
+          sourceLongEdge: null,
+          cardLongEdge: null,
+          corroboration: 'none',
+        })
+        captureFullFrame()
+      })
       return
     }
     captureFullFrame()
@@ -1785,13 +1821,20 @@ export default function CaptureLab() {
       if (!quad || quad.length !== 4) return
       const xs = quad.map(([x]) => x * video.videoWidth)
       const ys = quad.map(([, y]) => y * video.videoHeight)
-      const minX = Math.max(0, Math.floor(Math.min(...xs)))
-      const maxX = Math.min(video.videoWidth, Math.ceil(Math.max(...xs)))
-      const minY = Math.max(0, Math.floor(Math.min(...ys)))
-      const maxY = Math.min(video.videoHeight, Math.ceil(Math.max(...ys)))
+      const boxWidth = Math.max(1, Math.max(...xs) - Math.min(...xs))
+      const boxHeight = Math.max(1, Math.max(...ys) - Math.min(...ys))
+      const padX = Math.round(boxWidth * CAPTURE_BOX_PAD_FRACTION)
+      const padY = Math.round(boxHeight * CAPTURE_BOX_PAD_FRACTION)
+      const minX = Math.max(0, Math.floor(Math.min(...xs) - padX))
+      const maxX = Math.min(video.videoWidth, Math.ceil(Math.max(...xs) + padX))
+      const minY = Math.max(0, Math.floor(Math.min(...ys) - padY))
+      const maxY = Math.min(video.videoHeight, Math.ceil(Math.max(...ys) + padY))
       const width = maxX - minX
       const height = maxY - minY
       if (!(width > 1) || !(height > 1)) return
+      const frameTime = video.currentTime
+      if (frameTime === lastRearmFrameTimeRef.current) return
+      lastRearmFrameTimeRef.current = frameTime
       const distance = signatureDistance(
         captured,
         signatureOf(video, minX, minY, width, height),
@@ -1842,6 +1885,7 @@ export default function CaptureLab() {
           capturedSignatureRef.current = null
           rearmChangedStreakRef.current = 0
           lastRearmCheckAtRef.current = 0
+          lastRearmFrameTimeRef.current = null
           setAutoDisarmed(false)
           setCaptureNote('')
           setHoldHint('')
@@ -2013,6 +2057,7 @@ export default function CaptureLab() {
       trackerLastTsRef.current = null
       trackerFpsRef.current = null
       trackerStatsRef.current = { hits: 0, attempts: 0, reason: 'frame' }
+      lastTrackFrameTimeRef.current = null
       setTrackerStats({ hits: 0, attempts: 0, reason: 'frame' })
       if (result.usable) {
         try {
@@ -2039,6 +2084,7 @@ export default function CaptureLab() {
     // loop must still look, just not flat out.
     const detectMs = Number.isFinite(message.ms) ? message.ms : 0
     if (result.usable) lastUsableAtRef.current = now
+    if (result.usable) lastUsableModelAtRef.current = now
     const huntingFor = lastUsableAtRef.current == null
       ? 0
       : now - lastUsableAtRef.current
@@ -2227,7 +2273,7 @@ export default function CaptureLab() {
     for (let i = 0, pixel = 0; i < data.length; i += 4, pixel += 1) {
       gray[pixel] = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114
     }
-    return { gray, width, height }
+    return { gray, width, height, frameTime: source.currentTime }
   }
 
   const drawTrackerGray = () => readTrackerGray(videoRef.current)
@@ -2296,6 +2342,7 @@ export default function CaptureLab() {
         // A single bad frame is normal: keep the last quad and the phase, and
         // only call it lost after TRACK_LOST_AFTER consecutive misses.
         trackerFailuresRef.current += 1
+        stats.hits = 0
         if (trackerFailuresRef.current >= TRACK_LOST_AFTER && !trackInLostRef.current) {
           trackInLostRef.current = true
           recordDiagEvent('track-lost', { failures: trackerFailuresRef.current })
@@ -2325,7 +2372,12 @@ export default function CaptureLab() {
       }
 
       trackerFailuresRef.current = 0
-      stats.hits += 1
+      const newExposure = sample.frameTime == null
+        || sample.frameTime !== lastTrackFrameTimeRef.current
+      if (newExposure) {
+        lastTrackFrameTimeRef.current = sample.frameTime
+        stats.hits += 1
+      }
       trackedQuadRef.current = tracked
       // A tracked quad is a camera-rate observation of the card between model
       // results; feed it to the hold window so per-step motion is judged from
@@ -2353,6 +2405,7 @@ export default function CaptureLab() {
       trackerLastTsRef.current = now
     } catch {
       trackerFailuresRef.current += 1
+      trackerStatsRef.current.hits = 0
       if (trackerFailuresRef.current >= TRACK_MAX_MISSES) {
         if (tentativeRef.current) {
           trackerRafRef.current = window.requestAnimationFrame(() => trackerLoopRef.current?.())

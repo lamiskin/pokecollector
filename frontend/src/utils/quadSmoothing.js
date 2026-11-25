@@ -141,6 +141,7 @@ export function createQuadSmoother(options = {}) {
   const glideFrom = new Float64Array(8)
   const glideTo = new Float64Array(8)
   let glideStart = 0
+  let glideDuration = QUAD_GLIDE_MS
   let gliding = false
   // A caller that passes no timestamp still needs a monotonic clock for the
   // glide, so the sample intervals stand in for one.
@@ -182,7 +183,7 @@ export function createQuadSmoother(options = {}) {
       land(true)
       return
     }
-    const ratio = (now - glideStart) / glideMs
+    const ratio = (now - glideStart) / glideDuration
     if (!(ratio < 1)) {
       land(false)
       return
@@ -206,6 +207,7 @@ export function createQuadSmoother(options = {}) {
       speed[i] = 0
     }
     glideStart = now
+    glideDuration = glideMs
     gliding = true
     ready = true
     advanceGlide(now)
@@ -284,6 +286,18 @@ export function createQuadSmoother(options = {}) {
         last[i] = next
         speed[i] += alphaSpeed * (observed - speed[i])
       }
+      // Retarget without restarting the full glide: the destination moves to
+      // the newest quad, travel resumes from what is actually drawn, and only
+      // the time left in the old glide is spent getting there.
+      const remaining = Math.max(1, glideStart + glideDuration - now)
+      for (let i = 0; i < 8; i += 1) {
+        glideFrom[i] = shown[i]
+        value[i] = shown[i]
+        glideTo[i] = quad[i >> 1][i & 1]
+      }
+      glideStart = now
+      glideDuration = remaining
+      advanceGlide(now)
       advanceShown(dt, now)
       return publish()
     }
