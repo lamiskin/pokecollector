@@ -316,9 +316,15 @@ async function detect(bitmap) {
     runMs: round(main.runMs),
     decodeMs: round(main.decodeMs),
   }
-  const usable = Number.isFinite(main.sharpness)
-    && main.sharpness >= MIN_SHARPNESS
-    && isUsableQuad(main.corners)
+  const quadUsable = isUsableQuad(main.corners)
+  const sharpEnough = Number.isFinite(main.sharpness) && main.sharpness >= MIN_SHARPNESS
+  const usable = quadUsable && sharpEnough
+  // Say which gate failed, so the UI can ask for steadiness instead of pointing
+  // the camera. A finite-but-low score is "soft"; a valid quad with no finite
+  // score is also treated as soft, since the geometry is not the problem.
+  const unusableReason = usable
+    ? null
+    : (quadUsable ? 'soft' : 'no-quad')
   lastDetection = { tensorData, width, height, main }
 
   // Verify only once per webgpu session; an explicit verify message can retest.
@@ -336,6 +342,7 @@ async function detect(bitmap) {
     corners: main.corners,
     sharpness: main.sharpness,
     usable,
+    unusableReason,
     ms,
     detectParts,
     ...(verification ? { verification } : {}),

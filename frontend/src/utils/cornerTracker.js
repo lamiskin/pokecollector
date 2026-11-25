@@ -120,6 +120,7 @@ export function derivePhase({
   autoDisarmed = false,
   holding = false,
   hasModel = false,
+  modelUnusableReason = null,
   confirmedPulse = false,
 } = {}) {
   if (captureBeat) return { phase: 'captured', reason: 'captured' }
@@ -136,9 +137,13 @@ export function derivePhase({
   if (confirmedPulse) return { phase: 'locked', reason: 'confirmed' }
   if (trackedFresh) return { phase: 'tracking', reason: 'tracking' }
   if (!modelUsable) {
+    // Name the detector's failing gate instead of asking for steadiness blindly.
+    const reason = hasModel && modelUnusableReason === 'soft'
+      ? 'too-soft'
+      : (hasModel && modelUnusableReason === 'no-quad' ? 'no-quad' : 'model-unusable')
     return {
       phase: 'none',
-      reason: !hasModel ? 'no-quad' : 'model-unusable',
+      reason: hasModel ? reason : 'no-quad',
     }
   }
   return { phase: 'locked', reason: 'tracking' }

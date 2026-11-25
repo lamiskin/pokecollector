@@ -169,6 +169,7 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
   cardArea,
   pendingCount = 0,
   softFocus = true,
+  reason = null,
 }, ref) {
   const quadRef = useRef(quad)
   const [hasQuad, setHasQuad] = useState(Boolean(quad))
@@ -897,7 +898,9 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
             <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-current opacity-90" />
           )}
 
-          <span>{COPY[chromeVisual]}</span>
+          <span>{chromeVisual === 'none' && reason === 'too-soft'
+            ? 'Too soft to confirm — steady the phone'
+            : COPY[chromeVisual]}</span>
 
           <span
             className="relative h-[3px] shrink-0 overflow-hidden rounded-[2px] bg-white/15"

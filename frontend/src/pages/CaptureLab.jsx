@@ -734,6 +734,7 @@ export default function CaptureLab() {
         trackReason: stats.reason,
         phase: diagPhaseRef.current,
         phaseReason: phaseReasonRef.current,
+        modelUnusableReason: model?.unusableReason ?? null,
         detectAgeMs: lastDetectionAtRef.current == null
           ? null
           : Math.round(now - lastDetectionAtRef.current),
@@ -1852,6 +1853,7 @@ export default function CaptureLab() {
       sharpness: result.sharpness ?? null,
       area: result.area ?? null,
       usable: result.usable,
+      unusableReason: result.unusableReason ?? null,
       seq: message.seq ?? null,
       detectParts: message.detectParts ?? null,
     })
@@ -2609,6 +2611,7 @@ export default function CaptureLab() {
     autoDisarmed,
     holding: overlayHolding,
     hasModel: liveResult != null,
+    modelUnusableReason: liveResult?.unusableReason ?? null,
     confirmedPulse: performance.now() < confirmPulseUntil,
   })
   const overlayPhase = phaseState.phase
@@ -2765,6 +2768,7 @@ export default function CaptureLab() {
               cardArea={overlayCardArea}
               pendingCount={pending.length}
               softFocus={softFocus}
+              reason={phaseReason}
             />
           ) : null}
         </div>

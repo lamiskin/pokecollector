@@ -219,6 +219,14 @@ assert.equal(isPatchMatchAcceptable(676, 300), false)
   )
   assert.deepEqual(derivePhase({ modelUsable: true }), { phase: 'locked', reason: 'tracking' })
   assert.deepEqual(derivePhase({ hasModel: false }), { phase: 'none', reason: 'no-quad' })
+  assert.deepEqual(
+    derivePhase({ hasModel: true, modelUsable: false, modelUnusableReason: 'soft' }),
+    { phase: 'none', reason: 'too-soft' },
+  )
+  assert.deepEqual(
+    derivePhase({ hasModel: true, modelUsable: false, modelUnusableReason: 'no-quad' }),
+    { phase: 'none', reason: 'no-quad' },
+  )
 }
 
 // Auto-capture hold: positional drift is free because the warp uses the same
