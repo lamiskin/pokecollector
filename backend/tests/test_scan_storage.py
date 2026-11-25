@@ -867,6 +867,17 @@ class ScanJobStorageTests(unittest.IsolatedAsyncioTestCase):
             turned_cw=180,
             detection="auto",
         )
+        identity = {
+            "algorithmVersion": "cv1",
+            "libraryCommit": "8b295ab80a997766afc00c640a616c1f2716df21",
+            "detectorFile": "cornelius-2.12.onnx",
+            "detectorSha256": "d" * 64,
+            "embedderFile": "model.onnx",
+            "embedderSha256": "e" * 64,
+            "catalogKey": "milo1/tcgplayer/pokemon",
+            "catalogVersion": 75,
+            "cropAspect": [63, 88],
+        }
         env = {
             "SCAN_STRAIGHTEN": "shadow",
             "SCAN_CROP_SOURCE": "collectorvision",
@@ -875,6 +886,8 @@ class ScanJobStorageTests(unittest.IsolatedAsyncioTestCase):
             scan_storage.cv_crop,
             "propose_with_collectorvision",
             return_value=proposal,
+        ), patch.object(
+            scan_storage.cv_crop, "cv_identity", return_value=identity
         ):
             job = await create_scan_job(
                 self.db,
@@ -891,7 +904,15 @@ class ScanJobStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["state"], "proposed", payload)
         self.assertEqual(payload["source"], "collectorvision")
         self.assertEqual(payload["algorithmVersion"], "cv1")
-        self.assertIsNone(payload["configDigest"])
+        self.assertEqual(payload["cvIdentity"], identity)
+        self.assertEqual(
+            payload["configDigest"],
+            scan_storage.cv_crop.cv_identity_digest(identity),
+        )
+        self.assertEqual(
+            payload["generation"]["configDigest"], payload["configDigest"]
+        )
+        self.assertTrue(scan_storage.cv_manifest_is_current(payload))
         self.assertEqual(payload["turnedCw"], 180)
         self.assertEqual(
             payload["identification"],
@@ -914,6 +935,99 @@ class ScanJobStorageTests(unittest.IsolatedAsyncioTestCase):
         )
         with Image.open(artifacts[0]) as output:
             self.assertEqual(output.size, (189, 264))
+
+    async def test_identification_failure_keeps_the_collectorvision_crop(self):
+        """A failed identification must not discard a good crop.
+
+        The proposal carries the detection but no identity; the manifest must
+        still record the CollectorVision source and the identifiable artefact.
+        """
+        from services import cv_crop
+
+        proposal = cv_crop.ProposalCrop(
+            image=Image.new("RGB", (189, 264), "#c8c8c8"),
+            width=189,
+            height=264,
+            identification=None,
+            turned_cw=0,
+            detection="auto",
+        )
+        identity = {
+            "algorithmVersion": "cv1",
+            "libraryCommit": "8b295ab80a997766afc00c640a616c1f2716df21",
+            "detectorFile": "cornelius-2.12.onnx",
+            "detectorSha256": "d" * 64,
+            "embedderFile": "model.onnx",
+            "embedderSha256": "e" * 64,
+            "catalogKey": "milo1/tcgplayer/pokemon",
+            "catalogVersion": 75,
+            "cropAspect": [63, 88],
+        }
+        env = {
+            "SCAN_STRAIGHTEN": "shadow",
+            "SCAN_CROP_SOURCE": "collectorvision",
+        }
+        with patch.dict(os.environ, env), patch.object(
+            scan_storage.cv_crop,
+            "propose_with_collectorvision",
+            return_value=proposal,
+        ), patch.object(
+            scan_storage.cv_crop, "cv_identity", return_value=identity
+        ):
+            job = await create_scan_job(
+                self.db,
+                self.user.id,
+                [_upload(_card_canvas_bytes())],
+                capture_geometry=[_card_geometry()],
+            )
+        item = self.db.query(ScanJobItem).filter(ScanJobItem.job_id == job.id).one()
+        image_path = scan_storage.resolve_scan_path(item.image_path)
+        payload = json.loads(
+            scan_storage.straighten_manifest_path(image_path).read_text()
+        )
+
+        self.assertEqual(payload["state"], "proposed", payload)
+        self.assertEqual(payload["source"], "collectorvision")
+        self.assertIsNone(payload["identification"])
+        self.assertEqual(payload["turnedCw"], 0)
+        self.assertIsNotNone(payload["artifact"])
+        self.assertEqual(
+            (payload["outputWidth"], payload["outputHeight"]), (189, 264)
+        )
+        self.assertEqual(payload["cvIdentity"], identity)
+        self.assertTrue(scan_storage.cv_manifest_is_current(payload))
+
+    def test_a_manifest_without_an_identity_digest_is_stale(self):
+        """An older ``cv1`` manifest has no artefact identity and is not trusted."""
+        legacy = {
+            "state": "proposed",
+            "source": "collectorvision",
+            "algorithmVersion": "cv1",
+            "configDigest": None,
+            "identification": {"id": "sv1", "name": "Charizard", "score": 0.9},
+        }
+        self.assertFalse(scan_storage.cv_manifest_is_current(legacy))
+
+        identity = {
+            "algorithmVersion": "cv1",
+            "libraryCommit": "8b295ab80a997766afc00c640a616c1f2716df21",
+            "detectorFile": "cornelius-2.12.onnx",
+            "detectorSha256": "d" * 64,
+            "embedderFile": "model.onnx",
+            "embedderSha256": "e" * 64,
+            "catalogKey": "milo1/tcgplayer/pokemon",
+            "catalogVersion": 75,
+            "cropAspect": [63, 88],
+        }
+        current = dict(
+            legacy,
+            cvIdentity=identity,
+            configDigest=scan_storage.cv_crop.cv_identity_digest(identity),
+        )
+        self.assertTrue(scan_storage.cv_manifest_is_current(current))
+
+        tampered = dict(current, cvIdentity=dict(identity, catalogVersion=76))
+        self.assertFalse(scan_storage.cv_manifest_is_current(tampered))
 
     async def test_shadow_falls_back_to_phone_when_collectorvision_returns_none(self):
         env = {

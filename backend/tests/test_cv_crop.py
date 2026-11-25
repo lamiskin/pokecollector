@@ -192,15 +192,100 @@ class CvCropTests(unittest.TestCase):
         )
         self.assertIsNone(self._propose(engine))
 
-    def test_engine_failure_never_raises_into_the_request_path(self):
+    def test_engine_failure_in_identification_still_returns_the_crop(self):
         engine, _detector, _detection = _engine(
             embedder=types.SimpleNamespace(embed=lambda image: 1 / 0)
         )
         with self.assertLogs("services.cv_crop", level="WARNING") as logs:
-            self.assertIsNone(self._propose(engine))
-        self.assertIn("proposal failed", "\n".join(logs.output))
+            proposal = self._propose(engine)
+        self.assertIsNotNone(proposal)
+        self.assertIsNone(proposal.identification)
+        self.assertEqual(proposal.turned_cw, 0)
+        self.assertIn("identification failed", "\n".join(logs.output))
 
-    def test_missing_library_degrades_with_a_single_warning(self):
+    def test_catalogue_failure_still_returns_the_crop(self):
+        class BrokenCatalog:
+            def search_records(self, embedding, top_k=1):
+                raise RuntimeError("catalogue offline")
+
+        engine, _detector, _detection = _engine(catalog=BrokenCatalog())
+        with self.assertLogs("services.cv_crop", level="WARNING") as logs:
+            proposal = self._propose(engine)
+
+        self.assertIsNotNone(proposal)
+        self.assertIsNone(proposal.identification)
+        self.assertEqual(proposal.turned_cw, 0)
+        self.assertEqual(proposal.detection, cv_crop.DETECTION_AUTO)
+        self.assertEqual((proposal.width, proposal.height), (448, 626))
+        self.assertIn("identification failed", "\n".join(logs.output))
+
+    def test_orientation_failure_returns_the_crop_unturned(self):
+        engine, _detector, _detection = _engine(top=RED, bottom=BLUE)
+
+        def broken_rotate(image):
+            raise RuntimeError("rotation broke")
+
+        engine.rotate_180 = broken_rotate
+        with self.assertLogs("services.cv_crop", level="WARNING") as logs:
+            proposal = self._propose(engine)
+
+        self.assertIsNotNone(proposal)
+        self.assertIsNone(proposal.identification)
+        self.assertEqual(proposal.turned_cw, 0)
+        self.assertEqual(proposal.detection, cv_crop.DETECTION_AUTO)
+        # The pixels are the upright crop: red stayed on top.
+        red, _green, blue = proposal.image.getpixel((proposal.width // 2, 4))
+        self.assertGreater(red, blue)
+        self.assertIn("identification failed", "\n".join(logs.output))
+
+    def test_identification_is_present_when_the_catalogue_answers(self):
+        engine, _detector, _detection = _engine()
+        proposal = self._propose(engine)
+        self.assertIsNotNone(proposal.identification)
+        self.assertEqual(proposal.identification.id, "id-2")
+
+    def test_cv_identity_records_the_artefacts_and_crop_aspect(self):
+        engine, _detector, _detection = _engine()
+        identity = cv_crop.cv_identity(engine)
+
+        self.assertEqual(set(identity), set(cv_crop.IDENTITY_KEYS))
+        self.assertEqual(identity["algorithmVersion"], cv_crop.CV_ALGORITHM_VERSION)
+        self.assertEqual(identity["catalogKey"], "milo1/tcgplayer/pokemon")
+        self.assertEqual(identity["catalogVersion"], 75)
+        self.assertEqual(
+            identity["cropAspect"],
+            [cv_crop.CARD_ASPECT_WIDTH, cv_crop.CARD_ASPECT_HEIGHT],
+        )
+        self.assertEqual(len(cv_crop.cv_identity_digest(identity)), 64)
+
+    def test_changing_any_identity_field_changes_the_digest(self):
+        baseline = {
+            "algorithmVersion": "cv1",
+            "libraryCommit": "a" * 40,
+            "detectorFile": "cornelius-2.12.onnx",
+            "detectorSha256": "b" * 64,
+            "embedderFile": "model.onnx",
+            "embedderSha256": "c" * 64,
+            "catalogKey": "milo1/tcgplayer/pokemon",
+            "catalogVersion": 75,
+            "cropAspect": [63, 88],
+        }
+        digest = cv_crop.cv_identity_digest(baseline)
+        self.assertEqual(set(baseline), set(cv_crop.IDENTITY_KEYS))
+
+        for key in baseline:
+            mutated = dict(baseline)
+            if key == "catalogVersion":
+                mutated[key] = baseline[key] + 1
+            elif key == "cropAspect":
+                mutated[key] = [1, 1]
+            else:
+                mutated[key] = f"changed-{baseline[key]}"
+            self.assertNotEqual(
+                cv_crop.cv_identity_digest(mutated),
+                digest,
+                f"changing {key} left the digest unchanged",
+            )
         with patch.object(
             cv_crop, "_import_library", side_effect=ImportError("no collector_vision")
         ), self.assertLogs("services.cv_crop", level="WARNING") as logs:
@@ -223,7 +308,7 @@ class CvCropTests(unittest.TestCase):
         with patch.object(
             cv_crop, "_import_library", side_effect=lambda: fake_module
         ) as importer, patch.object(
-            cv_crop, "_resolve_embedder", return_value=object()
+            cv_crop, "_resolve_embedder", return_value=(object(), None)
         ), self.assertLogs(
             "services.cv_crop", level="INFO"
         ) as logs:

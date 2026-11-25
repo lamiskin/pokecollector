@@ -67,6 +67,10 @@ class _Proposal:
     source: str = "phone"
     identification: dict | None = None
     turned_cw: int = 0
+    # CollectorVision's artefact identity and its digest. Both are None on the
+    # phone path, which has its own ``STRAIGHTEN_VERSION``/config digest.
+    cv_identity: dict | None = None
+    config_digest: str | None = None
 
 
 # Keyed by (stem, sidecar/image mtime, algorithm version, config digest), so a
@@ -296,6 +300,7 @@ def _build_proposal(
     if cv_crop.crop_source() == "collectorvision":
         proposal = cv_crop.propose_with_collectorvision(rgb)
         if proposal is not None:
+            identity = cv_crop.cv_identity()
             return _Proposal(
                 crop=_jpeg_bytes(proposal.image),
                 turned=_jpeg_bytes(
@@ -304,12 +309,18 @@ def _build_proposal(
                 output_width=proposal.width,
                 output_height=proposal.height,
                 source="collectorvision",
-                identification={
-                    **proposal.identification.as_dict(),
-                    "detection": proposal.detection,
-                    "turnedCw": int(proposal.turned_cw or 0),
-                },
+                identification=(
+                    {
+                        **proposal.identification.as_dict(),
+                        "detection": proposal.detection,
+                        "turnedCw": int(proposal.turned_cw or 0),
+                    }
+                    if proposal.identification is not None
+                    else None
+                ),
                 turned_cw=int(proposal.turned_cw or 0),
+                cv_identity=identity,
+                config_digest=cv_crop.cv_identity_digest(identity),
             )
 
     points = _parse_quad(geometry)
@@ -461,6 +472,8 @@ def list_proposals(user: User = Depends(get_current_user)):
                 "source": proposal.source,
                 "identification": proposal.identification,
                 "turnedCw": proposal.turned_cw,
+                "cvIdentity": proposal.cv_identity,
+                "configDigest": proposal.config_digest,
                 "cv": _cv_entry(stem, cv_index),
             }
             if (cv_dir / f"{stem}.jpg").is_file():

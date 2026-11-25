@@ -416,10 +416,23 @@ class CaptureLabProposalTests(unittest.TestCase):
     def test_collectorvision_crop_and_listing_when_selected(self):
         _write_proposal(self.root, 320, STEM_A)
         env = {"SCAN_CROP_SOURCE": "collectorvision"}
+        identity = {
+            "algorithmVersion": "cv1",
+            "libraryCommit": "8b295ab80a997766afc00c640a616c1f2716df21",
+            "detectorFile": "cornelius-2.12.onnx",
+            "detectorSha256": "d" * 64,
+            "embedderFile": "model.onnx",
+            "embedderSha256": "e" * 64,
+            "catalogKey": "milo1/tcgplayer/pokemon",
+            "catalogVersion": 75,
+            "cropAspect": [63, 88],
+        }
         with self._enabled_env(), patch.dict(os.environ, env), patch.object(
             capture_lab_proposals.cv_crop,
             "propose_with_collectorvision",
             return_value=self._cv_proposal(),
+        ), patch.object(
+            capture_lab_proposals.cv_crop, "cv_identity", return_value=identity
         ):
             crop = self.client.get(
                 f"/api/capture-lab/proposals/{STEM_A}/crop"
@@ -433,6 +446,11 @@ class CaptureLabProposalTests(unittest.TestCase):
         item = listing["items"][0]
         self.assertEqual(item["source"], "collectorvision")
         self.assertEqual(item["turnedCw"], 180)
+        self.assertEqual(item["cvIdentity"], identity)
+        self.assertEqual(
+            item["configDigest"],
+            capture_lab_proposals.cv_crop.cv_identity_digest(identity),
+        )
         self.assertEqual(
             item["identification"],
             {
@@ -444,6 +462,51 @@ class CaptureLabProposalTests(unittest.TestCase):
             },
         )
         self.assertEqual((item["outputWidth"], item["outputHeight"]), (120, 168))
+
+    def test_collectorvision_keeps_the_crop_when_identification_fails(self):
+        _write_proposal(self.root, 320, STEM_A)
+        identity = {
+            "algorithmVersion": "cv1",
+            "libraryCommit": "8b295ab80a997766afc00c640a616c1f2716df21",
+            "detectorFile": "cornelius-2.12.onnx",
+            "detectorSha256": "d" * 64,
+            "embedderFile": "model.onnx",
+            "embedderSha256": "e" * 64,
+            "catalogKey": "milo1/tcgplayer/pokemon",
+            "catalogVersion": 75,
+            "cropAspect": [63, 88],
+        }
+        proposal = capture_lab_proposals.cv_crop.ProposalCrop(
+            image=Image.open(io.BytesIO(_card_jpeg((120, 168)))).convert("RGB"),
+            width=120,
+            height=168,
+            identification=None,
+            turned_cw=0,
+            detection="auto",
+        )
+        env = {"SCAN_CROP_SOURCE": "collectorvision"}
+        with self._enabled_env(), patch.dict(os.environ, env), patch.object(
+            capture_lab_proposals.cv_crop,
+            "propose_with_collectorvision",
+            return_value=proposal,
+        ), patch.object(
+            capture_lab_proposals.cv_crop, "cv_identity", return_value=identity
+        ):
+            crop = self.client.get(
+                f"/api/capture-lab/proposals/{STEM_A}/crop"
+            )
+            listing = self.client.get("/api/capture-lab/proposals").json()
+
+        self.assertEqual(crop.status_code, 200)
+        item = listing["items"][0]
+        self.assertEqual(item["source"], "collectorvision")
+        self.assertIsNone(item["identification"])
+        self.assertEqual(item["turnedCw"], 0)
+        self.assertEqual(item["cvIdentity"], identity)
+        self.assertEqual(
+            item["configDigest"],
+            capture_lab_proposals.cv_crop.cv_identity_digest(identity),
+        )
 
     def test_listing_falls_back_to_phone_when_collectorvision_returns_none(self):
         _write_proposal(self.root, 320, STEM_A)
@@ -458,6 +521,8 @@ class CaptureLabProposalTests(unittest.TestCase):
         item = listing["items"][0]
         self.assertEqual(item["source"], "phone")
         self.assertIsNone(item["identification"])
+        self.assertIsNone(item["cvIdentity"])
+        self.assertIsNone(item["configDigest"])
         self.assertEqual(item["turnedCw"], 0)
         self.assertGreater(item["outputWidth"], 0)
         self.assertGreater(item["outputHeight"], 0)

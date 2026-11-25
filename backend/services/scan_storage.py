@@ -288,6 +288,25 @@ def straighten_manifest_path(image_path: Path) -> Path:
     return image_path.with_name(f"{image_path.stem}{STRAIGHTEN_MANIFEST_SUFFIX}")
 
 
+def cv_manifest_is_current(payload: dict | None) -> bool:
+    """Whether a manifest's CollectorVision identity still matches itself.
+
+    Older manifests record only ``algorithmVersion: cv1`` with a null config
+    digest. They carry no artefact identity, so a consumer must treat the
+    artifact as stale rather than trusting it: the absent digest is the signal,
+    not a version string that happens to match. A current manifest stores both
+    ``cvIdentity`` and the ``configDigest`` hashed from that exact dict, so the
+    pair is verified before it can be believed.
+    """
+    if not isinstance(payload, dict):
+        return False
+    identity = payload.get("cvIdentity")
+    digest = payload.get("configDigest")
+    if not isinstance(identity, dict) or not isinstance(digest, str) or not digest:
+        return False
+    return digest == cv_crop.cv_identity_digest(identity)
+
+
 def straighten_artifact_paths(image_path: Path) -> list[Path]:
     """Every derived straight crop written for one sanitized scan image.
 
@@ -446,6 +465,9 @@ def derive_straight_image(
         # when that path did. ``None`` when no proposal was produced.
         "source": None,
         "identification": None,
+        # The CollectorVision artefact identity and its digest when that path
+        # produced the proposal; both stay null on the phone path.
+        "cvIdentity": None,
         "diagnostics": {"boundary": None, "expansion": None},
         "turnedCw": 0,
         "outputWidth": None,
@@ -468,19 +490,40 @@ def derive_straight_image(
                 proposal = cv_crop.propose_with_collectorvision(sanitized.rgb)
             if proposal is not None:
                 manifest["source"] = "collectorvision"
-                manifest["identification"] = {
-                    **proposal.identification.as_dict(),
-                    "detection": proposal.detection,
-                    "turnedCw": int(proposal.turned_cw or 0),
-                }
+                # A successful crop with a failed identification is still a
+                # proposal: the crop is the artefact, the identity is optional.
+                manifest["identification"] = (
+                    {
+                        **proposal.identification.as_dict(),
+                        "detection": proposal.detection,
+                        "turnedCw": int(proposal.turned_cw or 0),
+                    }
+                    if proposal.identification is not None
+                    else None
+                )
                 manifest["algorithmVersion"] = cv_crop.CV_ALGORITHM_VERSION
-                manifest["configDigest"] = None
+                # The identity of the artefacts, not just the rule version. A
+                # failure to build it must not cost the crop, so it degrades to
+                # nulls and the digest still describes that exact (unknown)
+                # identity rather than silently matching a known one.
+                try:
+                    identity = cv_crop.cv_identity()
+                    identity_digest = cv_crop.cv_identity_digest(identity)
+                except Exception:  # noqa: BLE001 - identity is diagnostic
+                    logger.warning(
+                        "scan straighten collectorvision identity failed path=%s",
+                        relative_path,
+                        exc_info=True,
+                    )
+                    identity, identity_digest = None, None
+                manifest["cvIdentity"] = identity
+                manifest["configDigest"] = identity_digest
                 # A different algorithm writes a different artifact name; the
                 # deletion glob covers every generation alike.
                 manifest["generation"] = {
                     "sourceSha256": source_digest,
                     "algorithmVersion": cv_crop.CV_ALGORITHM_VERSION,
-                    "configDigest": None,
+                    "configDigest": identity_digest,
                     "rotationCw": rotation,
                 }
                 output = io.BytesIO()

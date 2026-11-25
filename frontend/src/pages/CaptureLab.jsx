@@ -1352,7 +1352,7 @@ export default function CaptureLab() {
   const stageDock = (item, corners, sourceRect, count) => {
     lastStagedAtRef.current = performance.now()
     setReceiptCorners(corners || null)
-    setDockAnnouncement(`Captured #${item.sequence} · ${count} in tray`)
+    setDockAnnouncement(`Captured #${item.sequence}${item.geometry ? '' : ' · guide crop'} · ${count} in tray`)
     flightTokenRef.current += 1
     setFlight({
       token: flightTokenRef.current,
@@ -1379,10 +1379,29 @@ export default function CaptureLab() {
   const captureFullFrame = ({ mode = 'manual' } = {}) => {
     const video = videoRef.current
     if (!video || !video.videoWidth || !video.videoHeight) return
+    // No trustworthy geometry: use the centred card guide, with the same
+    // generous margin as a detected-card crop. Never silently save the frame.
+    const frameWidth = video.videoWidth
+    const frameHeight = video.videoHeight
+    const guideWidth = frameWidth * 0.6
+    const guideHeight = Math.min(frameHeight * 0.8, guideWidth / 0.625)
+    const padX = guideWidth * CAPTURE_BOX_PAD_FRACTION
+    const padY = guideHeight * CAPTURE_BOX_PAD_FRACTION
+    const sourceRect = {
+      x: Math.max(0, Math.floor((frameWidth - guideWidth) / 2 - padX)),
+      y: Math.max(0, Math.floor((frameHeight - guideHeight) / 2 - padY)),
+      width: 0,
+      height: 0,
+    }
+    const maxX = Math.min(frameWidth, Math.ceil((frameWidth + guideWidth) / 2 + padX))
+    const maxY = Math.min(frameHeight, Math.ceil((frameHeight + guideHeight) / 2 + padY))
+    sourceRect.width = maxX - sourceRect.x
+    sourceRect.height = maxY - sourceRect.y
+    const scale = Math.min(1, CAPTURE_SOURCE_MAX_EDGE / Math.max(sourceRect.width, sourceRect.height))
     const canvas = document.createElement('canvas')
-    canvas.width = video.videoWidth
-    canvas.height = video.videoHeight
-    canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height)
+    canvas.width = Math.max(1, Math.round(sourceRect.width * scale))
+    canvas.height = Math.max(1, Math.round(sourceRect.height * scale))
+    canvas.getContext('2d').drawImage(video, sourceRect.x, sourceRect.y, sourceRect.width, sourceRect.height, 0, 0, canvas.width, canvas.height)
     canvas.toBlob(blob => {
       if (!blob) return
       if (trayUnsentCount() >= TRAY_CAPACITY) {
@@ -1394,12 +1413,7 @@ export default function CaptureLab() {
         rotationCW: sessionRotationRef.current,
       })
       if (created[0]) {
-        stageDock(created[0], null, {
-          x: 0,
-          y: 0,
-          width: video.videoWidth,
-          height: video.videoHeight,
-        }, pendingRef.current.length + 1)
+        stageDock(created[0], null, null, pendingRef.current.length + 1)
       }
       if (soundOn) playCaptureSuccess()
       recordDiagEvent('capture', {
@@ -1407,7 +1421,7 @@ export default function CaptureLab() {
         rectified: false,
         corners: null,
         // The whole frame is this capture's crop; no card quad was involved.
-        cropRect: { x: 0, y: 0, width: canvas.width, height: canvas.height },
+        cropRect: sourceRect,
         cropQuad: null,
       })
     }, 'image/jpeg', 0.92)
@@ -1620,6 +1634,7 @@ export default function CaptureLab() {
             corroboration: 'none',
             ...attemptFields(),
           })
+          if (!auto) return false
           if (!retry && liveDetectionRef.current) {
             setCaptureRechecking(true)
             const retryStarted = performance.now()

@@ -3,11 +3,13 @@
 CollectorVision is the *proposal source* for the capture-lab image. It locates
 the card itself, rectifies it and identifies it against the offline Pokémon
 catalog, so its crop is what the pipeline would produce without the phone's
-quad. Our phone-quad straightening (``services.scan_straighten``) stays as the
-fallback: whenever this module cannot produce a proposal -- library missing,
-catalog not vendored, no card found, any error -- it returns ``None`` and the
-caller keeps its existing path. Nothing here ever raises into a request or a
-scan.
+quad. Detection, dewarp and the restored card frame are the crop; orientation
+and catalogue identification are optional, so a failure there returns the crop
+unidentified and unturned rather than discarding a good detection. Our
+phone-quad straightening (``services.scan_straighten``) stays as the fallback:
+whenever this module cannot produce a crop -- library missing, no card found, a
+detection or dewarp failure -- it returns ``None`` and the caller keeps its
+existing path. Nothing here ever raises into a request or a scan.
 
 The dewarped crop CollectorVision hands back is a 448x448 square: that shape is
 an artefact of its embedder's input, not the card's shape. We embed the square
@@ -28,11 +30,14 @@ artifact degrades to the phone path instead of reaching the network.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 from PIL import Image
@@ -59,6 +64,22 @@ DETECTION_RETRY = "retry_border_replicate"
 # phone helper's ``STRAIGHTEN_VERSION`` so a later rule set writes a new name.
 CV_ALGORITHM_VERSION = "cv1"
 
+# The identity records what produced a proposal, not just the rule version: the
+# library commit and the exact detector/embedder artefacts make two crops of the
+# same card comparable even when only one of them was measured. ``cropAspect``
+# is the frame the dewarped square is restored to before publication.
+IDENTITY_KEYS = (
+    "algorithmVersion",
+    "libraryCommit",
+    "detectorFile",
+    "detectorSha256",
+    "embedderFile",
+    "embedderSha256",
+    "catalogKey",
+    "catalogVersion",
+    "cropAspect",
+)
+
 _engine_lock = threading.Lock()
 _engine: "_Engine | None" = None
 _unavailable_reason: str | None = None
@@ -84,7 +105,7 @@ class ProposalCrop:
     image: Image.Image
     width: int
     height: int
-    identification: CvIdentification
+    identification: CvIdentification | None
     turned_cw: int
     detection: str
 
@@ -97,6 +118,10 @@ class _Engine:
     rotate_180: Callable[[Image.Image], Image.Image]
     catalog_key: str | None = None
     catalog_version: int | None = None
+    # The actual artefact files behind the detector and embedder. They are
+    # recorded in ``cv_identity`` by name and SHA-256 rather than copied.
+    detector_path: Path | None = None
+    embedder_path: Path | None = None
 
 
 def crop_source() -> str:
@@ -138,12 +163,14 @@ def _import_library():
     return collector_vision
 
 
-def _resolve_embedder(cvg, catalog) -> Any:
+def _resolve_embedder(cvg, catalog) -> tuple[Any, Path]:
     """Build the catalog's exact embedder, resolving its weights offline.
 
     ``catalog.embedder`` would download a missing artifact. The image vendors
     it, and this path refuses the network so a broken cache degrades to the
-    phone crop instead of hanging on a request.
+    phone crop instead of hanging on a request. The resolved checkpoint is
+    returned beside the embedder so ``cv_identity`` can hash the artefact that
+    actually ran, not a registry string.
     """
     from collector_vision.model_artifacts import resolve_model_artifact
     from collector_vision.model_registry import get_model
@@ -159,7 +186,7 @@ def _resolve_embedder(cvg, catalog) -> Any:
             f"installed model registry does not match {identity!r}"
         )
     checkpoint = resolve_model_artifact(model, offline=True)
-    return cvg.NeuralEmbedder(checkpoint=checkpoint, provider="cpu")
+    return cvg.NeuralEmbedder(checkpoint=checkpoint, provider="cpu"), Path(checkpoint)
 
 
 def _load_engine() -> "_Engine | None":
@@ -177,7 +204,7 @@ def _load_engine() -> "_Engine | None":
             cvg = _import_library()
             catalog = cvg.Catalog.load("pokemon", offline=True)
             detector = cvg.NeuralCornerDetector(provider="cpu")
-            embedder = _resolve_embedder(cvg, catalog)
+            embedder, embedder_path = _resolve_embedder(cvg, catalog)
             rotate_180 = getattr(cvg, "rotate_card_180", None)
             if rotate_180 is None:
                 rotate_180 = lambda image: image.transpose(  # noqa: E731
@@ -198,6 +225,8 @@ def _load_engine() -> "_Engine | None":
             rotate_180=rotate_180,
             catalog_key=getattr(catalog, "catalog_key", None),
             catalog_version=getattr(catalog, "version", None),
+            detector_path=getattr(detector, "_checkpoint", None),
+            embedder_path=embedder_path,
         )
         try:
             card_count = len(catalog)
@@ -211,6 +240,81 @@ def _load_engine() -> "_Engine | None":
             card_count,
         )
         return _engine
+
+
+def _library_commit() -> str | None:
+    """The installed CollectorVision commit, from pip's ``direct_url.json``.
+
+    The library is installed from a pinned Git commit (see
+    ``Dockerfile.capture-lab``); its distribution metadata records that commit.
+    A wheel or edit install without VCS metadata degrades to ``None`` rather
+    than inventing an identity.
+    """
+    try:
+        from importlib.metadata import distribution
+
+        raw = distribution("collectorvision").read_text("direct_url.json")
+        if raw:
+            info = json.loads(raw)
+            commit = (info.get("vcs_info") or {}).get("commit_id")
+            if commit:
+                return str(commit)
+    except Exception:  # noqa: BLE001 - identity is diagnostic, never fatal
+        pass
+    return None
+
+
+def _file_sha256(path: Path | None) -> str | None:
+    """SHA-256 of an artefact file, or ``None`` when it cannot be read."""
+    if path is None:
+        return None
+    digest = hashlib.sha256()
+    try:
+        with Path(path).open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
+def cv_identity(engine: "_Engine | None" = None) -> dict[str, Any]:
+    """The artefacts that define a CollectorVision proposal.
+
+    This is deliberately more than a version string. Two environments can both
+    run ``cv1`` while shipping a different detector, embedder or catalogue; the
+    library commit, the model files (by name and SHA-256), the catalogue key and
+    version, and the restored crop's target aspect pin down which artefacts
+    produced a crop. ``cv_identity_digest`` hashes this dict so a manifest can
+    record the identity itself and a compact value to compare against.
+    """
+    if engine is None:
+        engine = _load_engine()
+    detector_path = getattr(engine, "detector_path", None) if engine else None
+    embedder_path = getattr(engine, "embedder_path", None) if engine else None
+    return {
+        "algorithmVersion": CV_ALGORITHM_VERSION,
+        "libraryCommit": _library_commit(),
+        "detectorFile": Path(detector_path).name if detector_path else None,
+        "detectorSha256": _file_sha256(detector_path),
+        "embedderFile": Path(embedder_path).name if embedder_path else None,
+        "embedderSha256": _file_sha256(embedder_path),
+        "catalogKey": engine.catalog_key if engine else None,
+        "catalogVersion": engine.catalog_version if engine else None,
+        "cropAspect": [CARD_ASPECT_WIDTH, CARD_ASPECT_HEIGHT],
+    }
+
+
+def cv_identity_digest(identity: dict[str, Any] | None = None) -> str:
+    """SHA-256 over a canonical ``cv_identity`` dict.
+
+    ``identity`` defaults to the live engine's identity. Callers that record a
+    manifest must pass the same dict they store so the digest and the dict can
+    never disagree; ``straighten_manifest_is_current`` verifies that pairing.
+    """
+    payload = cv_identity() if identity is None else identity
+    body = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
 def _to_bgr(rgb: Image.Image):
@@ -263,17 +367,23 @@ def _restore_card_aspect(square: Image.Image) -> Image.Image:
 
 
 def propose_with_collectorvision(rgb_image: Image.Image | None) -> ProposalCrop | None:
-    """Detect, dewarp, orient and identify a card, or return ``None``.
+    """Detect, dewarp and restore a crop; identify it when that is possible.
 
-    Any failure -- a missing library or vendored catalog, no card in the frame,
-    a decode or inference error -- returns ``None`` so the caller keeps its
-    phone-quad path. This function never raises.
+    Detection, dewarp and restoring the card aspect produce the crop, and only
+    a failure there returns ``None`` so the caller keeps its phone-quad path.
+    Orientation selection and catalogue identification are optional: any
+    exception in that block leaves ``identification`` as ``None`` and
+    ``turned_cw`` as 0 while the crop is still returned, because the crop is
+    the artefact the pipeline needs and the identity is a bonus. This function
+    never raises.
     """
     if rgb_image is None:
         return None
+
+    # Detection and dewarp are the proposal itself. Initialisation is inside
+    # the guard too: an unexpected failure while loading must fall back rather
+    # than reach the request path.
     try:
-        # Initialisation is inside the guard too: even an unexpected failure
-        # while loading must fall back rather than reach the request path.
         engine = _load_engine()
         if engine is None:
             return None
@@ -294,7 +404,23 @@ def propose_with_collectorvision(rgb_image: Image.Image | None) -> ProposalCrop 
         square = detection.dewarp(frame)
         if square is None:
             return None
+        crop = _restore_card_aspect(square)
+    except Exception as exc:  # noqa: BLE001 - a proposal must never fail a scan
+        logger.warning(
+            "CollectorVision proposal failed; the phone crop will be used: %s: %s",
+            type(exc).__name__,
+            exc,
+        )
+        return None
 
+    # The crop exists. Identification and the half-turn choice may fail for any
+    # reason -- a missing catalogue, an embedder error, a rotation helper -- and
+    # the crop is still what the pipeline came for, so keep it unturned and
+    # unidentified instead of discarding a good detection.
+    identification = None
+    turned_cw = 0
+    image = crop
+    try:
         upright_embedding = engine.embedder.embed(square)
         turned_square = engine.rotate_180(square)
         turned_embedding = engine.embedder.embed(turned_square)
@@ -306,32 +432,36 @@ def propose_with_collectorvision(rgb_image: Image.Image | None) -> ProposalCrop 
         if turned_score is not None and (
             upright_score is None or turned_score > upright_score
         ):
-            chosen = turned_square
             hits = turned_hits
+            # The square and its restored crop have the same orientation, so a
+            # half turn of the crop is exactly the chosen turned square.
+            image = crop.transpose(Image.Transpose.ROTATE_180)
             turned_cw = 180
         else:
-            chosen = square
             hits = upright_hits
-            turned_cw = 0
 
         record = hits[0] if hits else {}
-        image = _restore_card_aspect(chosen)
-        return ProposalCrop(
-            image=image,
-            width=image.width,
-            height=image.height,
-            identification=CvIdentification(
-                id=_text(record.get("id")),
-                name=_text(record.get("name")),
-                score=_score(hits),
-            ),
-            turned_cw=turned_cw,
-            detection=detection_mode,
+        identification = CvIdentification(
+            id=_text(record.get("id")),
+            name=_text(record.get("name")),
+            score=_score(hits),
         )
-    except Exception as exc:  # noqa: BLE001 - a proposal must never fail a scan
+    except Exception as exc:  # noqa: BLE001 - identity is optional; the crop is not
         logger.warning(
-            "CollectorVision proposal failed; the phone crop will be used: %s: %s",
+            "CollectorVision identification failed; returning the crop without "
+            "it: %s: %s",
             type(exc).__name__,
             exc,
         )
-        return None
+        identification = None
+        turned_cw = 0
+        image = crop
+
+    return ProposalCrop(
+        image=image,
+        width=image.width,
+        height=image.height,
+        identification=identification,
+        turned_cw=turned_cw,
+        detection=detection_mode,
+    )
