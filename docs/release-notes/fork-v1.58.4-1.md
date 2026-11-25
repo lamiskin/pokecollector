@@ -50,4 +50,4 @@
 - The artwork sweep and image cache live in the database, so cached artwork is part of database backups and does not expire on its own.
 - The TCGplayer fallback needs a saved USD→EUR rate and never overrides a real Cardmarket price; German cards still require the cross-language permission to use it.
 - Binder removal and the manual scan card are fork features; there is no upstream equivalent.
-- Upgrading from 1.57.9 run a backup first: startup adds the `idempotency_keys` and `push_subscriptions` tables and the pricing/artwork columns. The migrations are additive and safe to rerun.
+- Upgrading from 1.57.9 run a backup first: startup adds the `idempotency_keys` and `push_subscriptions` tables and the artwork-sweep columns. The migrations are additive and safe to rerun.
