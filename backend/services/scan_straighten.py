@@ -126,6 +126,13 @@ MIN_OUTPUT_PX = 32
 MIN_STEP = 8.0          # grey levels: minimum contrast across the claimed line
 SUPPORT_RATIO = 1.5     # claimed response / median inward response
 SHAVE_RATIO = 1.1       # an outboard edge must beat the claim by this margin
+
+# Padding kept around the card in the proposal, as a fraction of each output
+# dimension. It was 1.5%, which the collector's review showed is not enough: the
+# bottom edge of the card was regularly sliced, sometimes through the collector
+# number. A generous margin costs nothing but a slightly looser image and turns a
+# short claim into harmless padding instead of a cut.
+MARGIN_FRACTION = 0.08
 _RATIO_EPS = 0.5        # keeps a flat profile from dividing by zero
 SUPPORT_SAMPLES = 7     # points sampled along each claimed side
 SUPPORT_BAND_PX = 6     # support band around the claimed line, in pixels
@@ -156,6 +163,7 @@ def straighten_config_digest() -> str:
         "min_step": MIN_STEP,
         "support_ratio": SUPPORT_RATIO,
         "shave_ratio": SHAVE_RATIO,
+        "margin_fraction": MARGIN_FRACTION,
         "ratio_eps": _RATIO_EPS,
         "support_samples": SUPPORT_SAMPLES,
         "support_band_px": SUPPORT_BAND_PX,
@@ -965,11 +973,29 @@ def _usable_warp_quad(
     return True
 
 
-def try_straighten(
+def _distance_to_border(x: float, y: float, dx: float, dy: float,
+                        width: int, height: int) -> float:
+    """How far a point can travel along (dx, dy) before leaving the raster."""
+    if abs(dx) < 1e-12 and abs(dy) < 1e-12:
+        return 0.0
+    limits = []
+    if dx > 1e-12:
+        limits.append((width - x) / dx)
+    elif dx < -1e-12:
+        limits.append((0.0 - x) / dx)
+    if dy > 1e-12:
+        limits.append((height - y) / dy)
+    elif dy < -1e-12:
+        limits.append((0.0 - y) / dy)
+    limits = [value for value in limits if value > 0.0]
+    return min(limits) if limits else 0.0
+
+
+def _straighten_once(
     rgb: Image.Image,
     quad: Sequence[Tuple[float, float]],
     *,
-    margin: float = 0.015,
+    margin: float = MARGIN_FRACTION,
     max_edge: int = 2048,
 ) -> Straightened | Abstained:
     """Warp a supplied quad into a portrait proposal, or abstain technically.
@@ -1107,6 +1133,19 @@ def try_straighten(
     for index in range(4):
         if source_clamped[index]:
             insets[index] = 0.0
+        else:
+            # The band is drawn from real source pixels, so it can only extend
+            # as far as the raster allows on that side. Clamping here is what
+            # keeps a generous margin from extrapolating past the edge of the
+            # photo and failing the warp.
+            p0 = source_points[index]
+            p1 = source_points[(index + 1) % 4]
+            nx, ny = edge_inward_normal(p0, p1, quad_centroid(source_points))
+            available = min(
+                _distance_to_border(p0[0], p0[1], -nx, -ny, width, height),
+                _distance_to_border(p1[0], p1[1], -nx, -ny, width, height),
+            )
+            insets[index] = min(insets[index], max(0.0, available - 2.0))
     inset_left, inset_top = insets[3], insets[0]
     inset_right, inset_bottom = insets[1], insets[2]
 
@@ -1205,3 +1244,35 @@ def try_straighten(
         turned_cw=turned_cw,
         expansion=expansion,
     )
+
+
+def try_straighten(
+    rgb: Image.Image,
+    quad: Sequence[Tuple[float, float]],
+    *,
+    margin: float = MARGIN_FRACTION,
+    max_edge: int = 2048,
+) -> Straightened | Abstained:
+    """Propose a warp, giving up padding before giving up the proposal.
+
+    The margin is deliberately generous, because the collector's review showed a
+    tight crop slicing the card's bottom edge. A card that touches the frame has
+    no room for that band, and extrapolating into the void is not a reason to
+    refuse a proposal, so the padding is reduced step by step -- 100 %, 50 %,
+    25 %, then none -- and the first technically valid warp is returned. Any
+    other abstention is returned immediately: it is a geometry failure, and less
+    padding cannot fix it.
+    """
+    attempts = (margin, margin * 0.5, margin * 0.25, 0.0)
+    last: Straightened | Abstained | None = None
+    for attempt in attempts:
+        result = _straighten_once(
+            rgb, quad, margin=attempt, max_edge=max_edge
+        )
+        if isinstance(result, Straightened):
+            return result
+        last = result
+        if result.reason != "out_of_source":
+            return result
+    assert last is not None
+    return last
