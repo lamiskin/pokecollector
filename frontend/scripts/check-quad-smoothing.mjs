@@ -1,11 +1,7 @@
 // Sanity checks for the display-only quad smoother: it must absorb tracker
-// noise completely, still follow a card that actually moves, and travel to a
-// re-locked quad instead of teleporting.
-import {
-  createQuadSmoother,
-  QUAD_GLIDE_MS,
-  QUAD_STILL_FRACTION,
-} from '../src/utils/quadSmoothing.js'
+// noise without a staircase, follow a real move with deliberate smoothing, and
+// travel to a re-locked quad instead of teleporting.
+import { createQuadSmoother, QUAD_GLIDE_MS } from '../src/utils/quadSmoothing.js'
 
 let failures = 0
 const check = (name, ok, detail = '') => {
@@ -20,63 +16,89 @@ const shift = (quad, dx, dy) => quad.map(([x, y]) => [x + dx, y + dy])
 const maxMove = (a, b) => Math.max(...a.map(([x, y], i) => Math.hypot(x - b[i][0], y - b[i][1])))
 const copy = quad => quad.map(([x, y]) => [x, y])
 
-// Noise smaller than the still band must not move the published outline at all.
+// Continuity: a stationary quad with ±1 px (0.002 normalised) noise at 60 fps
+// must never move the drawn outline in a visible step. This is the staircase
+// check: the old stillness freeze repainted up to 12 px at once.
 {
   const smoother = createQuadSmoother()
-  smoother.sample(base, 33)
-  const drawn = smoother.corners.map(([x, y]) => [x, y])
-  let moved = 0
-  for (let i = 0; i < 60; i += 1) {
-    const jitter = (i % 2 ? 1 : -1) * QUAD_STILL_FRACTION * 0.6
-    smoother.sample(shift(base, jitter, -jitter), 33)
-    moved = Math.max(moved, maxMove(smoother.corners, drawn))
+  smoother.sample(base, 16.7, 0)
+  let previous = copy(smoother.corners)
+  let largest = 0
+  for (let i = 1; i <= 120; i += 1) {
+    const jitter = (i % 2 ? 1 : -1) * 0.002
+    smoother.sample(shift(base, jitter, -jitter), 16.7, i * 16.7)
+    largest = Math.max(largest, maxMove(smoother.corners, previous))
+    previous = copy(smoother.corners)
   }
-  check('noise inside the still band never repaints', moved === 0, `moved ${moved.toFixed(4)}`)
+  check('tracker noise never produces a visible step', largest < 0.0004,
+    `largest ${largest.toFixed(6)}`)
 }
 
-// A real move must be followed promptly (not frozen by the still band).
+// Step response: a real but non-discontinuous 0.05 move must be smoothed, not
+// snapped. 90 % should take at least 200 ms.
 {
   const smoother = createQuadSmoother()
-  smoother.sample(base, 33)
-  const target = shift(base, 0.08, 0.08)
-  for (let i = 0; i < 30; i += 1) smoother.sample(target, 33)
-  const error = maxMove(smoother.corners, target)
-  check('a real move is followed', error < 0.01, `error ${error.toFixed(4)}`)
+  smoother.sample(base, 16.7, 0)
+  const target = shift(base, 0.05, 0)
+  let reachedAt = null
+  for (let i = 1; i <= 120; i += 1) {
+    const t = i * 16.7
+    smoother.sample(target, 16.7, t)
+    if (reachedAt == null && maxMove(smoother.corners, target) <= 0.005) reachedAt = t
+  }
+  check('a 0.05 move is not snapped', reachedAt != null && reachedAt >= 200,
+    `90 % at ${reachedAt}`)
+  check('the smoothed move eventually arrives', maxMove(smoother.corners, target) < 0.001,
+    `error ${maxMove(smoother.corners, target).toFixed(5)}`)
 }
 
-// A discontinuity (card swapped or re-locked elsewhere) leaves the drawn quad
-// where it was and glides from there: the first frame must not teleport.
+// Jump glide: a discontinuity travels over roughly QUAD_GLIDE_MS, leaves
+// gently, never teleports, and finally lands.
+{
+  const smoother = createQuadSmoother()
+  smoother.sample(base, 16.7, 0)
+  const far = shift(base, 0.35, 0.35)
+  smoother.sample(far, 16.7, 16.7)
+  check('a discontinuity does not teleport', maxMove(smoother.corners, base) < 1e-9,
+    `moved ${maxMove(smoother.corners, base).toFixed(4)}`)
+  check('a discontinuity starts a glide', smoother.gliding === true)
+
+  let previous = copy(smoother.corners)
+  let largestStep = 0
+  let reachedAt = null
+  for (let t = 33.4; t <= 1200; t += 16.7) {
+    smoother.tick(t)
+    largestStep = Math.max(largestStep, maxMove(smoother.corners, previous))
+    previous = copy(smoother.corners)
+    if (reachedAt == null && maxMove(smoother.corners, far) <= 0.05) reachedAt = t
+  }
+  check('the glide reaches the new quad around its duration',
+    reachedAt != null && reachedAt >= QUAD_GLIDE_MS * 0.7 && reachedAt <= QUAD_GLIDE_MS + 200,
+    `90 % at ${reachedAt}, glide ${QUAD_GLIDE_MS}`)
+  check('the glide never jumps', largestStep < 0.06, `largest step ${largestStep.toFixed(4)}`)
+  check('the glide eventually lands exactly', maxMove(smoother.corners, far) < 1e-5,
+    `error ${maxMove(smoother.corners, far).toFixed(6)}`)
+}
+
+// Monotonic, no overshoot.
 {
   const smoother = createQuadSmoother()
   smoother.sample(base, 33, 0)
   const far = shift(base, 0.35, 0.35)
   smoother.sample(far, 33, 33)
-  check('a discontinuity does not teleport', maxMove(smoother.corners, base) < 1e-9,
-    `moved ${maxMove(smoother.corners, base).toFixed(4)}`)
-  check('a discontinuity starts a glide', smoother.gliding === true)
-
-  // Monotonic approach along the direction of travel, never past the target,
-  // and landed on it within the glide window.
-  const startX = smoother.corners[0][0]
   const targetX = far[0][0]
-  let previous = startX
+  let previousX = smoother.corners[0][0]
   let monotonic = true
   let overshoot = false
-  let landedAt = null
-  for (let t = 33 + 16; t <= 33 + QUAD_GLIDE_MS + 16; t += 16) {
+  for (let t = 49; t <= 1200; t += 16) {
     smoother.tick(t)
     const x = smoother.corners[0][0]
-    if (x < previous - 1e-12) monotonic = false
+    if (x < previousX - 1e-12) monotonic = false
     if (x > targetX + 1e-12) overshoot = true
-    previous = x
-    if (landedAt == null && !smoother.gliding) landedAt = t
+    previousX = x
   }
   check('the glide approaches monotonically', monotonic)
   check('the glide never overshoots the target', !overshoot)
-  check('the glide lands within the glide window', landedAt != null && landedAt <= 33 + QUAD_GLIDE_MS + 16,
-    `landed at ${landedAt}`)
-  check('the glide ends exactly on the new quad', maxMove(smoother.corners, far) < 1e-9,
-    `error ${maxMove(smoother.corners, far).toFixed(6)}`)
 }
 
 // A second discontinuity mid-glide restarts from wherever the outline is: no
@@ -95,14 +117,14 @@ const copy = quad => quad.map(([x, y]) => [x, y])
 
   let previousX = smoother.corners[0][0]
   let monotonic = true
-  for (let t = 33 + 96; t <= 33 + 80 + QUAD_GLIDE_MS + 16; t += 16) {
+  for (let t = 33 + 96; t <= 1400; t += 16) {
     smoother.tick(t)
     const x = smoother.corners[0][0]
     if (x > previousX + 1e-12) monotonic = false
     previousX = x
   }
   check('the restart approaches its new target monotonically', monotonic)
-  check('the restart lands on the newest quad', maxMove(smoother.corners, elsewhere) < 1e-9,
+  check('the restart lands on the newest quad', maxMove(smoother.corners, elsewhere) < 1e-5,
     `error ${maxMove(smoother.corners, elsewhere).toFixed(6)}`)
 }
 
@@ -145,7 +167,7 @@ const copy = quad => quad.map(([x, y]) => [x, y])
   const far = shift(base, 0.35, 0.35)
   smoother.sample(far, 33, 33)
   const crept = shift(far, 0.02, 0.02)
-  for (let i = 1; i <= 20; i += 1) smoother.sample(crept, 33, 33 + QUAD_GLIDE_MS + i * 33)
+  for (let i = 1; i <= 30; i += 1) smoother.sample(crept, 33, 33 + QUAD_GLIDE_MS + i * 33)
   const error = maxMove(smoother.corners, crept)
   check('filtering resumes after a glide', error < 0.01, `error ${error.toFixed(4)}`)
 }

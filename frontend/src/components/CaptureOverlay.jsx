@@ -459,9 +459,10 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
       blankRef.current = false
 
       // Displayed geometry only: the raw quad in quadRef is never rewritten, so
-      // capture, the hold rule and diagnostics keep reading it. A new sample is
-      // filtered once, when it arrives; frames in between reuse the value the
-      // smoother already holds - or, while a re-lock glides, advance the glide.
+      // capture, the hold rule and diagnostics keep reading it. Every frame
+      // advances the display interpolator toward the filtered target; a new
+      // tracker sample re-seeds that target once. The blur hole, dim inverse and
+      // ring all read this same interpolated outline, so they move together.
       const smoother = smootherRef.current || (smootherRef.current = createQuadSmoother({
         glideMs: reduced ? 0 : QUAD_GLIDE_MS,
       }))
