@@ -400,6 +400,68 @@ class CaptureLabProposalTests(unittest.TestCase):
         self.assertIsNone(body["items"][0]["cv"])
         self.assertEqual(missing.status_code, 409)
 
+    def _cv_proposal(self, *, turned_cw=180):
+        image = Image.open(io.BytesIO(_card_jpeg((120, 168)))).convert("RGB")
+        return capture_lab_proposals.cv_crop.ProposalCrop(
+            image=image,
+            width=120,
+            height=168,
+            identification=capture_lab_proposals.cv_crop.CvIdentification(
+                id="sv1", name="Charizard", score=0.93
+            ),
+            turned_cw=turned_cw,
+            detection="retry_border_replicate",
+        )
+
+    def test_collectorvision_crop_and_listing_when_selected(self):
+        _write_proposal(self.root, 320, STEM_A)
+        env = {"SCAN_CROP_SOURCE": "collectorvision"}
+        with self._enabled_env(), patch.dict(os.environ, env), patch.object(
+            capture_lab_proposals.cv_crop,
+            "propose_with_collectorvision",
+            return_value=self._cv_proposal(),
+        ):
+            crop = self.client.get(
+                f"/api/capture-lab/proposals/{STEM_A}/crop"
+            )
+            listing = self.client.get("/api/capture-lab/proposals").json()
+
+        self.assertEqual(crop.status_code, 200)
+        with Image.open(io.BytesIO(crop.content)) as image:
+            self.assertEqual(image.size, (120, 168))
+            self.assertNotEqual(image.width, image.height)
+        item = listing["items"][0]
+        self.assertEqual(item["source"], "collectorvision")
+        self.assertEqual(item["turnedCw"], 180)
+        self.assertEqual(
+            item["identification"],
+            {
+                "id": "sv1",
+                "name": "Charizard",
+                "score": 0.93,
+                "detection": "retry_border_replicate",
+                "turnedCw": 180,
+            },
+        )
+        self.assertEqual((item["outputWidth"], item["outputHeight"]), (120, 168))
+
+    def test_listing_falls_back_to_phone_when_collectorvision_returns_none(self):
+        _write_proposal(self.root, 320, STEM_A)
+        env = {"SCAN_CROP_SOURCE": "collectorvision"}
+        with self._enabled_env(), patch.dict(os.environ, env), patch.object(
+            capture_lab_proposals.cv_crop,
+            "propose_with_collectorvision",
+            return_value=None,
+        ):
+            listing = self.client.get("/api/capture-lab/proposals").json()
+
+        item = listing["items"][0]
+        self.assertEqual(item["source"], "phone")
+        self.assertIsNone(item["identification"])
+        self.assertEqual(item["turnedCw"], 0)
+        self.assertGreater(item["outputWidth"], 0)
+        self.assertGreater(item["outputHeight"], 0)
+
     def test_cv_index_is_cached_by_mtime_and_reread_after_a_change(self):
         _write_proposal(self.root, 320, STEM_A)
         _write_cv(self.root, STEM_A, entry=CV_ENTRY)

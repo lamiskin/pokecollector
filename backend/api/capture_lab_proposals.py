@@ -30,6 +30,7 @@ from PIL import Image
 from api.auth import get_current_user
 from api.dev_capture_lab import _require_enabled
 from models import User
+from services import cv_crop
 from services.scan_storage import (
     GEOMETRY_SIDECAR_SUFFIX,
     STRAIGHTEN_JPEG_QUALITY,
@@ -61,6 +62,11 @@ class _Proposal:
     turned: bytes
     output_width: int
     output_height: int
+    # Which path produced this proposal. ``phone`` keeps the existing
+    # geometry-only warp; ``collectorvision`` carries its identification.
+    source: str = "phone"
+    identification: dict | None = None
+    turned_cw: int = 0
 
 
 # Keyed by (stem, sidecar/image mtime, algorithm version, config digest), so a
@@ -274,13 +280,11 @@ def _build_proposal(
 ) -> _Proposal:
     """Recompute the crop from the stored JPEG with the current rules.
 
-    Raises HTTPException(409) with the technical reason when the proposal
-    cannot be produced; a placeholder is never substituted.
+    The selected crop source decides the first attempt. CollectorVision does
+    not need the phone's quad, so it runs before the geometry is parsed; when
+    it produces nothing the unchanged phone path runs, and only that path's
+    technical failures become a 409. A placeholder is never substituted.
     """
-    points = _parse_quad(geometry)
-    if points is None:
-        raise HTTPException(status_code=409, detail="geometry quad unusable", headers=NO_STORE)
-
     rotation = geometry.get("storedRotationCw", 0) or 0
     try:
         with Image.open(image_path) as source:
@@ -288,6 +292,29 @@ def _build_proposal(
             rgb = source.convert("RGB")
     except Exception:  # noqa: BLE001 - an unreadable source is a technical failure
         raise HTTPException(status_code=409, detail="stored image unreadable", headers=NO_STORE)
+
+    if cv_crop.crop_source() == "collectorvision":
+        proposal = cv_crop.propose_with_collectorvision(rgb)
+        if proposal is not None:
+            return _Proposal(
+                crop=_jpeg_bytes(proposal.image),
+                turned=_jpeg_bytes(
+                    proposal.image.transpose(Image.Transpose.ROTATE_180)
+                ),
+                output_width=proposal.width,
+                output_height=proposal.height,
+                source="collectorvision",
+                identification={
+                    **proposal.identification.as_dict(),
+                    "detection": proposal.detection,
+                    "turnedCw": int(proposal.turned_cw or 0),
+                },
+                turned_cw=int(proposal.turned_cw or 0),
+            )
+
+    points = _parse_quad(geometry)
+    if points is None:
+        raise HTTPException(status_code=409, detail="geometry quad unusable", headers=NO_STORE)
 
     width, height = rgb.size
     try:
@@ -308,6 +335,9 @@ def _build_proposal(
         turned=_jpeg_bytes(result.image.transpose(Image.Transpose.ROTATE_180)),
         output_width=result.width,
         output_height=result.height,
+        source="phone",
+        identification=None,
+        turned_cw=int(getattr(result, "turned_cw", 0) or 0),
     )
 
 
@@ -324,7 +354,15 @@ def _proposal_for(
     except OSError:
         raise HTTPException(status_code=409, detail="stored proposal unreadable", headers=NO_STORE)
 
-    key = (stem, mtime_ns, STRAIGHTEN_VERSION, straighten_config_digest())
+    # The crop source is part of the identity: flipping the flag must never
+    # serve a cached proposal from the other path.
+    key = (
+        stem,
+        mtime_ns,
+        STRAIGHTEN_VERSION,
+        straighten_config_digest(),
+        cv_crop.crop_source(),
+    )
     cached = _cache_get(key)
     if cached is not None:
         return cached
@@ -420,6 +458,9 @@ def list_proposals(user: User = Depends(get_current_user)):
                 "originalUrl": f"/api/capture-lab/proposals/{stem}/original",
                 "cropUrl": f"/api/capture-lab/proposals/{stem}/crop",
                 "rotatedUrl": f"/api/capture-lab/proposals/{stem}/turned",
+                "source": proposal.source,
+                "identification": proposal.identification,
+                "turnedCw": proposal.turned_cw,
                 "cv": _cv_entry(stem, cv_index),
             }
             if (cv_dir / f"{stem}.jpg").is_file():

@@ -1,0 +1,77 @@
+# Capture-lab backend image.
+#
+# The released backend image (backend/Dockerfile) is untouched. This variant
+# adds CollectorVision as the capture-lab proposal source: the AGPL-3.0-or-later
+# library, onnxruntime and the vendored catalog/models. It is built only for the
+# capture lab and must not be promoted to Dev or Prod.
+#
+# Build with the repository root as the build context:
+#   podman build -f backend/Dockerfile.capture-lab \
+#     -t pokecollector-backend:capture-lab .
+FROM python:3.11-slim
+
+LABEL org.opencontainers.image.source="https://github.com/Git-Romer/pokecollector" \
+      org.opencontainers.image.description="PokéCollector FastAPI backend (capture lab)" \
+      org.opencontainers.image.licenses="AGPL-3.0-only"
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    wget \
+    gnupg \
+    lsb-release \
+    gcc \
+    && install -d /etc/apt/keyrings \
+    && wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /etc/apt/keyrings/postgresql.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/postgresql.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends postgresql-client-18 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY backend/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# onnxruntime and opencv-python-headless need these shared libraries; the
+# wheels do not bundle them.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgomp1 \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# CollectorVision is pinned to the commit that was measured against the 28 real
+# captures. onnxruntime and opencv are pinned to releases that keep the
+# backend's numpy==1.26.4 constraint; pip leaves the installed numpy alone.
+#
+# The library and model artifacts are fetched once, here at image-build time,
+# and baked into ~/.cache/collectorvision. Runtime resolution is offline, so a
+# missing artifact degrades to the phone crop instead of reaching the network.
+ARG COLLECTORVISION_COMMIT=8b295ab80a997766afc00c640a616c1f2716df21
+ARG COLLECTORVISION_CATALOG_VERSION=75
+ENV COLLECTORVISION_CACHE=/root/.cache/collectorvision
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && pip install --no-cache-dir \
+        "onnxruntime==1.20.1" \
+        "opencv-python-headless==4.10.0.84" \
+        "collectorvision[hf] @ git+https://github.com/HanClinto/CollectorVision.git@${COLLECTORVISION_COMMIT}" \
+    && python -c "import collector_vision as c; catalog = c.Catalog.load('pokemon', version=${COLLECTORVISION_CATALOG_VERSION}); embedder = catalog.embedder; detector = c.NeuralCornerDetector(provider='cpu'); print('vendored', catalog.catalog_key, catalog.version, len(catalog.card_ids), embedder, detector)" \
+    && python -c "import collector_vision as c; catalog = c.Catalog.load('pokemon', offline=True); embedder = catalog.embedder; detector = c.NeuralCornerDetector(provider='cpu'); print('offline ok', catalog.catalog_key, catalog.version, len(catalog.card_ids))" \
+    && apt-get purge -y --auto-remove git \
+    && rm -rf /var/lib/apt/lists/*
+
+# CollectorVision is the proposal source in this image only. The phone-quad
+# straightening remains the fallback, and the code default stays ``phone``.
+ENV SCAN_CROP_SOURCE=collectorvision
+
+COPY VERSION /app/VERSION
+COPY backend/ .
+
+RUN mkdir -p /app/backups /app/debug /app/data/pokedex-images/sprites /app/data/pokedex-images/artwork
+
+EXPOSE 8000
+
+# Access logging stays enabled. OIDC query strings (the one-time callback
+# code/state) are stripped at the logging boundary by the uvicorn.access filter
+# installed from services/access_log.py; the bundled proxy logs those paths
+# path-only too (see frontend/nginx.conf).
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

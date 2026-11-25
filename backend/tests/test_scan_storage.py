@@ -854,6 +854,96 @@ class ScanJobStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(seen["exists"])
         self.assertTrue((image_path.parent / seen["artifact"]).is_file())
 
+    async def test_shadow_prefers_collectorvision_when_selected(self):
+        from services import cv_crop
+
+        proposal = cv_crop.ProposalCrop(
+            image=Image.new("RGB", (189, 264), "#c8c8c8"),
+            width=189,
+            height=264,
+            identification=cv_crop.CvIdentification(
+                id="sv1", name="Charizard", score=0.91
+            ),
+            turned_cw=180,
+            detection="auto",
+        )
+        env = {
+            "SCAN_STRAIGHTEN": "shadow",
+            "SCAN_CROP_SOURCE": "collectorvision",
+        }
+        with patch.dict(os.environ, env), patch.object(
+            scan_storage.cv_crop,
+            "propose_with_collectorvision",
+            return_value=proposal,
+        ):
+            job = await create_scan_job(
+                self.db,
+                self.user.id,
+                [_upload(_card_canvas_bytes())],
+                capture_geometry=[_card_geometry()],
+            )
+        item = self.db.query(ScanJobItem).filter(ScanJobItem.job_id == job.id).one()
+        image_path = scan_storage.resolve_scan_path(item.image_path)
+        payload = json.loads(
+            scan_storage.straighten_manifest_path(image_path).read_text()
+        )
+
+        self.assertEqual(payload["state"], "proposed", payload)
+        self.assertEqual(payload["source"], "collectorvision")
+        self.assertEqual(payload["algorithmVersion"], "cv1")
+        self.assertIsNone(payload["configDigest"])
+        self.assertEqual(payload["turnedCw"], 180)
+        self.assertEqual(
+            payload["identification"],
+            {
+                "id": "sv1",
+                "name": "Charizard",
+                "score": 0.91,
+                "detection": "auto",
+                "turnedCw": 180,
+            },
+        )
+        self.assertEqual(
+            (payload["outputWidth"], payload["outputHeight"]), (189, 264)
+        )
+        self.assertIsNone(payload["diagnostics"]["boundary"])
+        artifacts = scan_storage.straighten_artifact_paths(image_path)
+        self.assertEqual(len(artifacts), 1)
+        self.assertTrue(
+            artifacts[0].name.startswith(f"{image_path.stem}.straight-cv1-")
+        )
+        with Image.open(artifacts[0]) as output:
+            self.assertEqual(output.size, (189, 264))
+
+    async def test_shadow_falls_back_to_phone_when_collectorvision_returns_none(self):
+        env = {
+            "SCAN_STRAIGHTEN": "shadow",
+            "SCAN_CROP_SOURCE": "collectorvision",
+        }
+        with patch.dict(os.environ, env), patch.object(
+            scan_storage.cv_crop,
+            "propose_with_collectorvision",
+            return_value=None,
+        ) as cv:
+            job = await create_scan_job(
+                self.db,
+                self.user.id,
+                [_upload(_card_canvas_bytes())],
+                capture_geometry=[_card_geometry()],
+            )
+        item = self.db.query(ScanJobItem).filter(ScanJobItem.job_id == job.id).one()
+        image_path = scan_storage.resolve_scan_path(item.image_path)
+        payload = json.loads(
+            scan_storage.straighten_manifest_path(image_path).read_text()
+        )
+
+        cv.assert_called_once()
+        self.assertEqual(payload["state"], "proposed", payload)
+        self.assertEqual(payload["source"], "phone")
+        self.assertIsNone(payload["identification"])
+        self.assertEqual(payload["algorithmVersion"], "v1")
+        self.assertIsNotNone(payload["diagnostics"]["boundary"])
+
     async def test_on_mode_warns_once_and_runs_as_shadow(self):
         scan_storage._straighten_on_warned = False
         with patch.dict(os.environ, {"SCAN_STRAIGHTEN": "on"}), self.assertLogs(

@@ -21,6 +21,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from models import ScanJob, ScanJobItem
+from services import cv_crop
 
 logger = logging.getLogger(__name__)
 
@@ -360,13 +361,15 @@ def derive_straight_image(
 ) -> None:
     """Shadow-only straight derivative; never raises and never touches the scan.
 
-    Called after the stored JPEG is written. In ``shadow`` mode a valid client
-    quad is transformed into the stored raster's pixels and handed to
-    ``try_straighten``; the result is written beside the original together with
-    a manifest describing what happened. Recognition, the API payload and the
-    stored image are unchanged. The padded original is always authoritative;
-    the derivative is only an ``Unverified crop`` recorded with
-    ``state: proposed``.
+    Called after the stored JPEG is written. In ``shadow`` mode the selected
+    crop source produces the proposal: ``collectorvision`` detects and
+    identifies the card itself (see ``services.cv_crop``), and when that yields
+    nothing the unchanged phone path transforms the client quad into the
+    stored raster's pixels and hands it to ``try_straighten``. The result is
+    written beside the original together with a manifest describing which path
+    produced it. Recognition, the API payload and the stored image are
+    unchanged. The padded original is always authoritative; the derivative is
+    only an ``Unverified crop`` recorded with ``state: proposed``.
 
     A proposal is withheld only when the transform is technically unusable:
     invalid or self-crossing geometry, a degenerate or unstable transform,
@@ -386,6 +389,7 @@ def derive_straight_image(
         return
 
     mode = straighten_mode()
+    source_pref = cv_crop.crop_source()
     source_digest = hashlib.sha256(sanitized.data).hexdigest()
     try:
         stored_digest = hashlib.sha256(image_path.read_bytes()).hexdigest()
@@ -438,6 +442,10 @@ def derive_straight_image(
             "rotationCw": rotation,
         },
         "description": None,
+        # Which path produced the proposal, and CollectorVision's identification
+        # when that path did. ``None`` when no proposal was produced.
+        "source": None,
+        "identification": None,
         "diagnostics": {"boundary": None, "expansion": None},
         "turnedCw": 0,
         "outputWidth": None,
@@ -451,80 +459,141 @@ def derive_straight_image(
     try:
         if mode == "off":
             manifest.update(state="skipped_disabled", reason=None)
-        elif helper is None:
-            manifest.update(state="error", reason="straighten helper unavailable")
         else:
-            quad = None
-            if sanitized.width and sanitized.height:
-                quad = _straighten_quad_pixels(
-                    geometry, rotation, sanitized.width, sanitized.height
+            # CollectorVision is the proposal source when selected. It locates
+            # the card itself, so it does not need the phone's quad; a failure
+            # of any kind falls through to the unchanged phone path below.
+            proposal = None
+            if source_pref == "collectorvision" and sanitized.rgb is not None:
+                proposal = cv_crop.propose_with_collectorvision(sanitized.rgb)
+            if proposal is not None:
+                manifest["source"] = "collectorvision"
+                manifest["identification"] = {
+                    **proposal.identification.as_dict(),
+                    "detection": proposal.detection,
+                    "turnedCw": int(proposal.turned_cw or 0),
+                }
+                manifest["algorithmVersion"] = cv_crop.CV_ALGORITHM_VERSION
+                manifest["configDigest"] = None
+                # A different algorithm writes a different artifact name; the
+                # deletion glob covers every generation alike.
+                manifest["generation"] = {
+                    "sourceSha256": source_digest,
+                    "algorithmVersion": cv_crop.CV_ALGORITHM_VERSION,
+                    "configDigest": None,
+                    "rotationCw": rotation,
+                }
+                output = io.BytesIO()
+                proposal.image.save(
+                    output,
+                    format="JPEG",
+                    quality=STRAIGHTEN_JPEG_QUALITY,
+                    optimize=True,
+                    progressive=True,
                 )
-            if quad is None:
+                data = output.getvalue()
+                digest = hashlib.sha256(data).hexdigest()
+                artifact_path = image_path.with_name(
+                    f"{image_path.stem}{STRAIGHTEN_ARTIFACT_PREFIX}"
+                    f"{cv_crop.CV_ALGORITHM_VERSION}-"
+                    f"{digest[:STRAIGHTEN_ARTIFACT_DIGEST_CHARS]}.jpg"
+                )
+                # Artifact first, then the manifest that names it.
+                _atomic_write_bytes(artifact_path, data)
                 manifest.update(
-                    state="skipped_no_geometry",
-                    reason="geometry absent or quad unusable",
+                    state="proposed",
+                    description="Unverified crop",
+                    reason=None,
+                    artifact=artifact_path.name,
+                    artifactSha256=digest,
+                    outputWidth=proposal.width,
+                    outputHeight=proposal.height,
+                    outputBytes=len(data),
+                    turnedCw=int(proposal.turned_cw or 0),
                 )
-            elif sanitized.rgb is None:
-                manifest.update(state="error", reason="sanitized raster unavailable")
+                out_width, out_height = proposal.width, proposal.height
+            elif helper is None:
+                manifest.update(
+                    state="error", reason="straighten helper unavailable"
+                )
             else:
-                result = helper.try_straighten(sanitized.rgb, quad)
-                support = getattr(result, "support", None)
-                # Diagnostics only: no branch below consults the boundary
-                # verdict. Technical validity alone decides the proposal, so a
-                # failure to serialise diagnostics must not cost the artifact.
-                if support is not None:
-                    try:
-                        manifest["diagnostics"]["boundary"] = (
-                            helper.boundary_diagnostics(support)
-                        )
-                    except Exception:  # noqa: BLE001 - diagnostics must not withhold
-                        logger.warning(
-                            "scan straighten diagnostics failed path=%s",
-                            relative_path,
-                            exc_info=True,
-                        )
-                if isinstance(result, helper.Straightened):
-                    # The outward expansion is developer diagnostics beside the
-                    # claim's own numbers; it explains the crop's geometry and
-                    # has no authority over state either.
-                    expansion = getattr(result, "expansion", None)
-                    if isinstance(expansion, dict):
-                        manifest["diagnostics"]["expansion"] = expansion
-                    output = io.BytesIO()
-                    result.image.save(
-                        output,
-                        format="JPEG",
-                        quality=STRAIGHTEN_JPEG_QUALITY,
-                        optimize=True,
-                        progressive=True,
+                # The phone path is what runs now, so record it even when it
+                # abstains: the crop source describes the producing path.
+                manifest["source"] = "phone"
+                quad = None
+                if sanitized.width and sanitized.height:
+                    quad = _straighten_quad_pixels(
+                        geometry, rotation, sanitized.width, sanitized.height
                     )
-                    data = output.getvalue()
-                    digest = hashlib.sha256(data).hexdigest()
-                    artifact_path = image_path.with_name(
-                        f"{image_path.stem}{STRAIGHTEN_ARTIFACT_PREFIX}"
-                        f"{helper.STRAIGHTEN_VERSION}-"
-                        f"{digest[:STRAIGHTEN_ARTIFACT_DIGEST_CHARS]}.jpg"
-                    )
-                    # Artifact first: never publish a manifest that authorizes
-                    # bytes which are not on disk yet.
-                    _atomic_write_bytes(artifact_path, data)
+                if quad is None:
                     manifest.update(
-                        state="proposed",
-                        description="Unverified crop",
-                        reason=None,
-                        artifact=artifact_path.name,
-                        artifactSha256=digest,
-                        outputWidth=result.width,
-                        outputHeight=result.height,
-                        outputBytes=len(data),
-                        turnedCw=int(getattr(result, "turned_cw", 0) or 0),
+                        state="skipped_no_geometry",
+                        reason="geometry absent or quad unusable",
                     )
-                    out_width, out_height = result.width, result.height
+                elif sanitized.rgb is None:
+                    manifest.update(
+                        state="error", reason="sanitized raster unavailable"
+                    )
                 else:
-                    manifest.update(
-                        state="abstained",
-                        reason=str(getattr(result, "reason", "abstained")),
-                    )
+                    result = helper.try_straighten(sanitized.rgb, quad)
+                    support = getattr(result, "support", None)
+                    # Diagnostics only: no branch below consults the boundary
+                    # verdict. Technical validity alone decides the proposal, so
+                    # a failure to serialise diagnostics must not cost the
+                    # artifact.
+                    if support is not None:
+                        try:
+                            manifest["diagnostics"]["boundary"] = (
+                                helper.boundary_diagnostics(support)
+                            )
+                        except Exception:  # noqa: BLE001 - diagnostics must not withhold
+                            logger.warning(
+                                "scan straighten diagnostics failed path=%s",
+                                relative_path,
+                                exc_info=True,
+                            )
+                    if isinstance(result, helper.Straightened):
+                        # The outward expansion is developer diagnostics beside
+                        # the claim's own numbers; it explains the crop's
+                        # geometry and has no authority over state either.
+                        expansion = getattr(result, "expansion", None)
+                        if isinstance(expansion, dict):
+                            manifest["diagnostics"]["expansion"] = expansion
+                        output = io.BytesIO()
+                        result.image.save(
+                            output,
+                            format="JPEG",
+                            quality=STRAIGHTEN_JPEG_QUALITY,
+                            optimize=True,
+                            progressive=True,
+                        )
+                        data = output.getvalue()
+                        digest = hashlib.sha256(data).hexdigest()
+                        artifact_path = image_path.with_name(
+                            f"{image_path.stem}{STRAIGHTEN_ARTIFACT_PREFIX}"
+                            f"{helper.STRAIGHTEN_VERSION}-"
+                            f"{digest[:STRAIGHTEN_ARTIFACT_DIGEST_CHARS]}.jpg"
+                        )
+                        # Artifact first: never publish a manifest that
+                        # authorizes bytes which are not on disk yet.
+                        _atomic_write_bytes(artifact_path, data)
+                        manifest.update(
+                            state="proposed",
+                            description="Unverified crop",
+                            reason=None,
+                            artifact=artifact_path.name,
+                            artifactSha256=digest,
+                            outputWidth=result.width,
+                            outputHeight=result.height,
+                            outputBytes=len(data),
+                            turnedCw=int(getattr(result, "turned_cw", 0) or 0),
+                        )
+                        out_width, out_height = result.width, result.height
+                    else:
+                        manifest.update(
+                            state="abstained",
+                            reason=str(getattr(result, "reason", "abstained")),
+                        )
     except Exception as exc:  # noqa: BLE001 - shadow work must never fail a scan
         logger.warning(
             "scan straighten failed path=%s", relative_path, exc_info=True
