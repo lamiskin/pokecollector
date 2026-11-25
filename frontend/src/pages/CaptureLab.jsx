@@ -30,6 +30,7 @@ import {
   setCaptureSoundEnabled,
 } from '../utils/captureSound'
 import { quadAreaFraction } from '../utils/perspectiveWarp'
+import { paddedCropRect } from '../utils/refineCrop'
 import { signatureDistance, signatureOf, nextRearmStreak, shouldRearmByChange, REARM_CHANGED_COOLDOWN_MS } from '../utils/patchSignature'
 import {
   cornerAgreement,
@@ -125,6 +126,10 @@ const CAPTURE_EDGE_MIN = 0.015
 const CAPTURE_ASPECT_MIN = 0.55
 const CAPTURE_ASPECT_MAX = 0.85
 const CAPTURE_LOW_DETAIL = 200
+const REFINE_MIN_AREA = 0.04
+const REFINE_MAX_EDGE = 1024
+const REFINE_INTERVAL_MS = 400
+const REFINE_PADDING = 0.12
 // Confidence pulse after an accepted model result. The overlay turns the pulse
 // into one eased lock strength for the ring, so this only has to be long enough
 // for consecutive detections to overlap, not a visible state of its own.
@@ -431,6 +436,11 @@ export default function CaptureLab() {
   const lastAgreementAtRef = useRef(null)
   const lastAgreementRef = useRef(null)
   const lastDecisionRef = useRef(null)
+  const refineInFlightRef = useRef(false)
+  const refineLastAtRef = useRef(0)
+  const refineSeqRef = useRef(0)
+  const refineBeforeRef = useRef(null)
+  const refinesSinceCaptureRef = useRef(0)
   const lastAttemptFieldsRef = useRef(null)
   const trackerStatsRef = useRef({ hits: 0, attempts: 0, reason: 'frame' })
   const lastTrackFrameTimeRef = useRef(null)
@@ -1012,6 +1022,8 @@ export default function CaptureLab() {
     lastAgreementAtRef.current = null
     lastAgreementRef.current = null
     lastDecisionRef.current = null
+    refineInFlightRef.current = false
+    refineBeforeRef.current = null
     lastHoldDriftRef.current = null
     autoStateRef.current = newAutoState()
     stopAutoFireTimer()
@@ -1229,6 +1241,10 @@ export default function CaptureLab() {
         if (message.verification) setWebgpuVerification(message.verification)
         return
       }
+      if (message.type === 'refined') {
+        liveResultHandlerRef.current?.({ ...message, refined: true })
+        return
+      }
       if (message.type === 'error') {
         if (message.seq >= LIVE_SEQ_BASE) {
           liveErrorHandlerRef.current?.(message)
@@ -1378,7 +1394,8 @@ export default function CaptureLab() {
         }, pendingRef.current.length + 1)
       }
       if (soundOn) playCaptureSuccess()
-      recordDiagEvent('capture', { mode, rectified: false, corners: null })
+      recordDiagEvent('capture', { mode, rectified: false, corners: null, refineCount: refinesSinceCaptureRef.current })
+      refinesSinceCaptureRef.current = 0
     }, 'image/jpeg', 0.92)
   }
 
@@ -1884,6 +1901,7 @@ export default function CaptureLab() {
           quadSource: decision.source,
           edgeVariance: focusVariance,
           corroboration: corroborationSource,
+          refineCount: refinesSinceCaptureRef.current,
           ...(corroborationSource === 'tracker'
             ? {
               trackerHits: trackerStatsRef.current.hits,
@@ -1910,6 +1928,7 @@ export default function CaptureLab() {
         })
         lastAttemptFieldsRef.current = attemptFields()
         // Start hunting for the next card while the user is still panning.
+        refinesSinceCaptureRef.current = 0
         liveScheduleRef.current?.(CAPTURE_HUNT_DELAY_MS)
         if (auto) disarmAutoCapture()
         else setCaptureNote('Captured a rectified card crop.')
@@ -2177,27 +2196,104 @@ export default function CaptureLab() {
     return frame
   }
 
+  // A soft but card-shaped result gets one zoomed second look at the card plus
+  // padding. The crop comes from the current video frame, so the model sees far
+  // more pixels without another detector or a server round trip.
+  function maybeRequestRefine(result, now) {
+    if (result.refined || result.unusableReason !== 'soft') return
+    if (refineInFlightRef.current || captureInFlightRef.current) return
+    if (autoStateRef.current.anchorTs != null) return
+    if (now - refineLastAtRef.current < REFINE_INTERVAL_MS) return
+    const video = videoRef.current
+    const worker = detectorWorkerRef.current
+    if (!video?.videoWidth || !video?.videoHeight || !worker) return
+    const frame = { width: video.videoWidth, height: video.videoHeight }
+    const contain = isContainableQuad(result.corners, {
+      frame,
+      minEdge: CAPTURE_EDGE_MIN,
+      minAspect: CAPTURE_ASPECT_MIN,
+      maxAspect: CAPTURE_ASPECT_MAX,
+    })
+    if (!contain.ok || !(result.area >= REFINE_MIN_AREA)) return
+    const crop = paddedCropRect(result.corners, frame, REFINE_PADDING)
+    if (!crop || crop.width < 24 || crop.height < 24) return
+    const scale = Math.min(1, REFINE_MAX_EDGE / Math.max(crop.width, crop.height))
+    const width = Math.max(1, Math.round(crop.width * scale))
+    const height = Math.max(1, Math.round(crop.height * scale))
+    const canvas = document.createElement('canvas')
+    canvas.width = width
+    canvas.height = height
+    canvas.getContext('2d').drawImage(
+      video, crop.x, crop.y, crop.width, crop.height, 0, 0, width, height,
+    )
+    refineInFlightRef.current = true
+    refineLastAtRef.current = now
+    refineBeforeRef.current = result.sharpness ?? null
+    refinesSinceCaptureRef.current += 1
+    const seq = LIVE_SEQ_BASE + (refineSeqRef.current += 1)
+    createImageBitmap(canvas).then(bitmap => {
+      if (!liveDetectionRef.current || detectorWorkerRef.current !== worker) {
+        bitmap.close?.()
+        refineInFlightRef.current = false
+        return
+      }
+      worker.postMessage({ type: 'refine', bitmap, cropRect: crop, seq })
+    }).catch(() => {
+      refineInFlightRef.current = false
+    })
+  }
+
   const handleLiveResult = message => {
     if (!liveDetectionRef.current) {
       liveInFlightRef.current = false
+      refineInFlightRef.current = false
       return
     }
-    liveInFlightRef.current = false
+    const refined = Boolean(message.refined)
+    if (refined) {
+      refineInFlightRef.current = false
+      const area = message.corners ? quadAreaFraction(message.corners) : null
+      recordDiagEvent('refine', {
+        before: refineBeforeRef.current,
+        after: message.sharpness ?? null,
+        area,
+        usable: Boolean(message.usable),
+      })
+      refineBeforeRef.current = null
+      if (!message.usable) return
+    } else {
+      liveInFlightRef.current = false
+    }
     if (message.verification) setWebgpuVerification(message.verification)
-    const result = { ...message, area: quadAreaFraction(message.corners) }
+    const result = {
+      ...message,
+      area: quadAreaFraction(message.corners),
+      source: refined ? 'refined' : 'model',
+      unusableReason: refined
+        ? (message.usable ? null : (message.reason ?? 'soft'))
+        : message.unusableReason,
+    }
     liveResultRef.current = result
     setLiveResult(result)
 
     const now = performance.now()
-    modelIntervalMsRef.current = lastDetectionAtRef.current == null
-      ? null
-      : Math.round(now - lastDetectionAtRef.current)
-    lastDetectionAtRef.current = now
+    if (!refined) {
+      modelIntervalMsRef.current = lastDetectionAtRef.current == null
+        ? null
+        : Math.round(now - lastDetectionAtRef.current)
+      lastDetectionAtRef.current = now
+    }
     // The model quad describes the frame at request time, not result time.
     const resultFrame = detectionFrameRef.current
-    lastModelFrameAtRef.current = resultFrame && resultFrame.seq === message.seq
-      ? resultFrame.postedAt
-      : now
+    lastModelFrameAtRef.current = refined
+      ? now
+      : (resultFrame && resultFrame.seq === message.seq ? resultFrame.postedAt : now)
+    if (refined) {
+      lastConfirmTsRef.current = now
+      lastConfirmCornersRef.current = result.corners
+      lastConfirmSharpnessRef.current = result.sharpness ?? null
+      lastAgreementAtRef.current = now
+    }
     // A fresh model result no longer clears the tracker-lost state by itself:
     // the phase is derived from consecutive misses, not from model results.
     setLiveState(
@@ -2244,6 +2340,7 @@ export default function CaptureLab() {
       area: result.area ?? null,
       usable: result.usable,
       unusableReason: result.unusableReason ?? null,
+      source: result.source,
       seq: message.seq ?? null,
       detectParts: message.detectParts ?? null,
     })
@@ -2326,6 +2423,12 @@ export default function CaptureLab() {
     evaluateAutoCapture(result)
     // A capture waiting on stale geometry retries as soon as this result lands.
     pendingCaptureRetryRef.current?.(true)
+    if (!refined) maybeRequestRefine(result, now)
+    if (refined) {
+      if (result.usable) lastUsableAtRef.current = now
+      if (result.usable) lastUsableModelAtRef.current = now
+      return
+    }
     // Hunting (no usable card) is latency-bound: start the next look as soon as
     // inference ends. A usable card keeps the relaxed cadence because the
     // tracker carries the outline and the phone should not burn in the meantime.
@@ -2687,6 +2790,7 @@ export default function CaptureLab() {
   liveResultHandlerRef.current = handleLiveResult
   liveErrorHandlerRef.current = message => {
     liveInFlightRef.current = false
+    refineInFlightRef.current = false
     setCaptureNote(`Live detection error: ${message.message || 'unknown error'}`)
     liveScheduleRef.current?.(1000)
   }

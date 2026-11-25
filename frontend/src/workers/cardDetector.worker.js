@@ -8,6 +8,8 @@
 // can degrade to "unverified" without stopping detection. Wasm modes keep
 // numThreads at 1 so no SharedArrayBuffer / COOP+COEP is needed.
 
+import { cropQuadToFrame } from '../utils/refineCrop'
+
 const DETECTOR_SIZE = 384
 const MIN_SHARPNESS = 0.02
 const RUNTIME_URLS = {
@@ -349,6 +351,23 @@ async function detect(bitmap) {
   }
 }
 
+async function refine(bitmap, cropRect) {
+  if (!bitmap || bitmap.width < 24 || bitmap.height < 24) {
+    return { corners: null, sharpness: null, usable: false, reason: 'bad-crop' }
+  }
+  const aspect = bitmap.width / bitmap.height
+  if (aspect > 4 || aspect < 0.25) {
+    return { corners: null, sharpness: null, usable: false, reason: 'bad-crop' }
+  }
+  const result = await detect(bitmap)
+  return {
+    corners: cropQuadToFrame(result.corners, cropRect),
+    sharpness: result.sharpness,
+    usable: result.usable,
+    reason: result.unusableReason,
+  }
+}
+
 self.onmessage = async event => {
   const message = event.data || {}
   try {
@@ -363,6 +382,11 @@ self.onmessage = async event => {
       self.postMessage({ type: 'result', seq: message.seq, ...result })
       return
     }
+    if (message.type === 'refine') {
+      const result = await refine(message.bitmap, message.cropRect)
+      self.postMessage({ type: 'refined', seq: message.seq, cropRect: message.cropRect, ...result })
+      return
+    }
     if (message.type === 'verify') {
       self.postMessage({ type: 'verification', verification: await verifyWebgpu() })
       return
@@ -375,6 +399,6 @@ self.onmessage = async event => {
       message: `${error?.name || 'Error'}: ${error?.message || String(error)}`,
     })
   } finally {
-    if (message.type === 'detect') message.bitmap?.close()
+    if (message.type === 'detect' || message.type === 'refine') message.bitmap?.close()
   }
 }
