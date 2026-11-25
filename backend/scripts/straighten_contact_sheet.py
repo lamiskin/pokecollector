@@ -48,6 +48,16 @@ def _card(width=215, height=300, nested=False, inner_art=False, plain=False):
     return card
 
 
+def _landscape_card(width=300, height=215):
+    """Card stock captured wider than tall, text bands across the width."""
+    card = Image.new("RGB", (width, height), WHITE)
+    draw = ImageDraw.Draw(card)
+    draw.rectangle((0, 0, width - 1, height - 1), outline=(4, 4, 4), width=7)
+    for top in (48, 98, 148):
+        draw.rectangle((24, top, width - 24, top + 24), fill=GREY)
+    return card
+
+
 def _rotate_point(x, y, degrees):
     radians = math.radians(degrees)
     return (x * math.cos(radians) + y * math.sin(radians),
@@ -103,9 +113,12 @@ def _render_corner_cut(card, canvas_size=(300, 360), offset=(100, 140)):
 
 def _cases() -> list[tuple[str, str, Image.Image, list]]:
     cases = []
-    for tilt in (0, 8, 16, 22):
+    for tilt in (0, 8, 16, 22, 50):
         canvas, quad = _render_rotated(_card(), tilt)
         cases.append((f"tilt-{tilt}", "upright card, tilt", canvas, quad))
+    canvas, quad = _render_rotated(_landscape_card(), 5)
+    cases.append(("landscape", "card captured wider than tall, expect 88:63",
+                  canvas, quad))
     canvas, quad = _render_rotated(_card(nested=True), 5)
     cases.append(("loader-nested-border", "loader-like nested border", canvas, quad))
     canvas, quad = _render_rotated(_card(inner_art=True), 11)

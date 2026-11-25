@@ -42,7 +42,11 @@ JPEG_QUALITY = 90
 GEOMETRY_SIDECAR_SUFFIX = ".geometry.json"
 STRAIGHTEN_JPEG_QUALITY = 92
 STRAIGHTEN_MANIFEST_SUFFIX = ".straighten.json"
-STRAIGHTEN_ARTIFACT_PREFIX = ".straight-v1-"
+# Artifact names are content-addressed and carry the algorithm version, so a
+# later rule set writes a new name beside the old one and deletion can remove
+# every generation with one glob.
+STRAIGHTEN_ARTIFACT_PREFIX = ".straight-"
+STRAIGHTEN_ARTIFACT_DIGEST_CHARS = 16
 STRAIGHTEN_MODES = ("off", "shadow", "on")
 STRAIGHTEN_DEFAULT_MODE = "off"
 SCAN_RETENTION_DAYS = 14
@@ -284,16 +288,26 @@ def straighten_manifest_path(image_path: Path) -> Path:
 
 
 def straighten_artifact_paths(image_path: Path) -> list[Path]:
-    """Every derived straight crop written for one sanitized scan image."""
+    """Every derived straight crop written for one sanitized scan image.
+
+    The glob spans helper versions, so deletion also removes artifacts left by
+    an older rule set beside a newer one.
+    """
     return sorted(
         image_path.parent.glob(f"{image_path.stem}{STRAIGHTEN_ARTIFACT_PREFIX}*.jpg")
     )
 
 
 def _atomic_write_bytes(path: Path, data: bytes) -> None:
-    temporary_path = path.with_name(f".{path.name}.tmp")
+    """Write through a unique same-directory temporary file, then rename.
+
+    A deterministic ``.<name>.tmp`` path lets two concurrent writers truncate
+    each other's staging file and then race on the rename. Each call therefore
+    gets its own randomized suffix, and a failed write removes it.
+    """
+    temporary_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
-        with temporary_path.open("wb") as handle:
+        with temporary_path.open("xb") as handle:
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
@@ -351,75 +365,145 @@ def derive_straight_image(
     ``try_straighten``; the result is written beside the original together with
     a manifest describing what happened. Recognition, the API payload and the
     stored image are unchanged.
+
+    A manifest is written for **every** attempt, including a disabled pipeline
+    or unusable geometry, so a stale ``ready`` can never outlive a later run.
+    The artifact is published before its manifest, and the manifest is only
+    written for the raster that is actually stored: if another writer replaced
+    the image, this attempt's source is superseded and gets no manifest.
     """
-    if straighten_mode() == "off":
-        return
     try:
         image_path = resolve_scan_path(relative_path)
     except ScanUploadError:
         return
-    if sanitized.rgb is None or not sanitized.width or not sanitized.height:
-        return
+
+    mode = straighten_mode()
+    source_digest = hashlib.sha256(sanitized.data).hexdigest()
     try:
-        quad = _straighten_quad_pixels(
-            geometry, sanitized.rotation_cw, sanitized.width, sanitized.height
-        )
-    except Exception:  # noqa: BLE001 - a missing helper dependency must not fail a scan
+        stored_digest = hashlib.sha256(image_path.read_bytes()).hexdigest()
+    except OSError:
         logger.warning(
-            "scan straighten quad transform failed path=%s", relative_path, exc_info=True
+            "scan straighten skipped: stored image unreadable path=%s",
+            relative_path,
         )
         return
-    if quad is None:
+    if stored_digest != source_digest:
+        logger.warning(
+            "scan straighten skipped: stored image is a newer generation path=%s",
+            relative_path,
+        )
         return
 
+    helper = None
+    try:
+        from services import scan_straighten as helper
+    except Exception:  # noqa: BLE001 - an optional dependency must not fail a scan
+        logger.warning(
+            "scan straighten helper unavailable path=%s", relative_path, exc_info=True
+        )
+
+    algorithm_version = getattr(helper, "STRAIGHTEN_VERSION", None)
+    config_digest = None
+    if helper is not None:
+        try:
+            config_digest = helper.straighten_config_digest()
+        except Exception:  # noqa: BLE001 - identity is diagnostic, not required
+            logger.warning(
+                "scan straighten config digest failed path=%s",
+                relative_path,
+                exc_info=True,
+            )
+
+    rotation = int(sanitized.rotation_cw or 0)
     manifest: dict = {
         "state": "error",
         "reason": None,
-        "helperVersion": None,
-        "sourceSha256": hashlib.sha256(sanitized.data).hexdigest(),
+        "algorithmVersion": algorithm_version,
+        "configDigest": config_digest,
+        "sourceSha256": source_digest,
         "geometry": geometry,
-        "rotationCw": int(sanitized.rotation_cw or 0),
+        "rotationCw": rotation,
+        "generation": {
+            "sourceSha256": source_digest,
+            "algorithmVersion": algorithm_version,
+            "configDigest": config_digest,
+            "rotationCw": rotation,
+        },
+        "evidence": None,
         "outputWidth": None,
         "outputHeight": None,
         "outputBytes": None,
         "artifact": None,
+        "artifactSha256": None,
         "createdAt": datetime.datetime.utcnow().isoformat() + "Z",
     }
     out_width = out_height = 0
     try:
-        from services import scan_straighten
-
-        manifest["helperVersion"] = scan_straighten.HELPER_VERSION
-        result = scan_straighten.try_straighten(sanitized.rgb, quad)
-        if isinstance(result, scan_straighten.Straightened):
-            output = io.BytesIO()
-            result.image.save(
-                output,
-                format="JPEG",
-                quality=STRAIGHTEN_JPEG_QUALITY,
-                optimize=True,
-                progressive=True,
-            )
-            data = output.getvalue()
-            digest = hashlib.sha256(data).hexdigest()
-            artifact_path = image_path.with_name(
-                f"{image_path.stem}{STRAIGHTEN_ARTIFACT_PREFIX}{digest[:8]}.jpg"
-            )
-            _atomic_write_bytes(artifact_path, data)
-            manifest.update(
-                state="ready",
-                reason=None,
-                artifact=artifact_path.name,
-                outputWidth=result.width,
-                outputHeight=result.height,
-                outputBytes=len(data),
-            )
-            out_width, out_height = result.width, result.height
+        if mode == "off":
+            manifest.update(state="skipped_disabled", reason=None)
+        elif helper is None:
+            manifest.update(state="error", reason="straighten helper unavailable")
         else:
-            manifest.update(
-                state="abstained",
-                reason=str(getattr(result, "reason", "abstained")),
-            )
+            quad = None
+            if sanitized.width and sanitized.height:
+                quad = _straighten_quad_pixels(
+                    geometry, rotation, sanitized.width, sanitized.height
+                )
+            if quad is None:
+                manifest.update(
+                    state="skipped_no_geometry",
+                    reason="geometry absent or quad unusable",
+                )
+            elif sanitized.rgb is None:
+                manifest.update(state="error", reason="sanitized raster unavailable")
+            else:
+                result = helper.try_straighten(sanitized.rgb, quad)
+                support = getattr(result, "support", None)
+                if support is not None:
+                    manifest["evidence"] = {
+                        "verdict": support.verdict,
+                        "sides": [round(float(value), 3) for value in support.sides],
+                        "competingSides": [
+                            index
+                            for index, flag in enumerate(support.competing_sides)
+                            if flag
+                        ],
+                        "detail": support.detail,
+                    }
+                if isinstance(result, helper.Straightened):
+                    output = io.BytesIO()
+                    result.image.save(
+                        output,
+                        format="JPEG",
+                        quality=STRAIGHTEN_JPEG_QUALITY,
+                        optimize=True,
+                        progressive=True,
+                    )
+                    data = output.getvalue()
+                    digest = hashlib.sha256(data).hexdigest()
+                    artifact_path = image_path.with_name(
+                        f"{image_path.stem}{STRAIGHTEN_ARTIFACT_PREFIX}"
+                        f"{helper.STRAIGHTEN_VERSION}-"
+                        f"{digest[:STRAIGHTEN_ARTIFACT_DIGEST_CHARS]}.jpg"
+                    )
+                    # Artifact first: never publish a manifest that authorizes
+                    # bytes which are not on disk yet.
+                    _atomic_write_bytes(artifact_path, data)
+                    manifest.update(
+                        state="ready",
+                        reason=None,
+                        artifact=artifact_path.name,
+                        artifactSha256=digest,
+                        outputWidth=result.width,
+                        outputHeight=result.height,
+                        outputBytes=len(data),
+                    )
+                    out_width, out_height = result.width, result.height
+                else:
+                    manifest.update(
+                        state="abstained",
+                        reason=str(getattr(result, "reason", "abstained")),
+                    )
     except Exception as exc:  # noqa: BLE001 - shadow work must never fail a scan
         logger.warning(
             "scan straighten failed path=%s", relative_path, exc_info=True
@@ -427,16 +511,23 @@ def derive_straight_image(
         manifest.update(
             state="error",
             reason=f"{type(exc).__name__}: {exc}"[:300],
+            artifact=None,
+            artifactSha256=None,
+            outputWidth=None,
+            outputHeight=None,
+            outputBytes=None,
         )
     finally:
         _write_straighten_manifest(image_path, manifest)
         logger.info(
-            "straighten mode=shadow state=%s reason=%s out=%sx%s",
+            "straighten mode=%s state=%s reason=%s out=%sx%s",
+            mode,
             manifest["state"],
             manifest.get("reason") or "-",
             out_width,
             out_height,
         )
+
 
 
 def resolve_scan_path(relative_path: str) -> Path:

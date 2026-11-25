@@ -6,7 +6,7 @@ This folder holds the **standalone CLI / admin utilities** for PokéCollector �
 operational entrypoints a host operator runs from a shell rather than through the
 HTTP API. None of these modules are part of the FastAPI application; they are thin,
 self-contained commands that open their own resources and exit with a process
-status. Seven scripts live here:
+status. Nine scripts live here:
 
 1. **`analyse_scan_traces.py`** — read-only, offline summary of consented scanner
    diagnostics. It never touches the database or the network; it aggregates JSON
@@ -23,7 +23,13 @@ status. Seven scripts live here:
    passwords, JWTs or collection data.
 6. **`set_admin_password.py`** — reset (and optionally promote) an account's
    password from the host, for recovering a lost/locked admin account.
-7. **`warm_collection_artwork.py`** — pre-fill the shared `image_cache` table
+7. **`straighten_contact_sheet.py`** — read-only contact sheet for the straighten
+   helper: original and straightened panels beside the boundary-support verdict,
+   from a JSON manifest or generated synthetic fixtures (`--synth`).
+8. **`straighten_job_report.py`** — read-only replay of a captured scan job:
+   straighten every `<stem>.jpg` with its `<stem>.geometry.json` quad and print
+   counts by state/reason and output orientation, with a labelled contact sheet.
+9. **`warm_collection_artwork.py`** — pre-fill the shared `image_cache` table
    with each collection card's catalogue artwork, so the first open of a card is
    a local cache read instead of a multi-second TCGdex transfer. Re-runnable and
    safe: it skips cached keys, custom cards and cards without a source URL.
@@ -122,6 +128,15 @@ new password (non-empty; interactive path confirms twice) → set
 `hashed_password = hash_password(password)` and clear `must_change_password`;
 with `--make-admin` also set `role="admin"`, `is_active=True` → `db.commit()` →
 print confirmation, exit `0`.
+
+**`straighten_job_report.py`** — `argparse` (`job_dir` required, `--out` default
+`/tmp/opencode/<job>-straighten.jpg`) → for each `*.geometry.json` sidecar with a
+sibling `.jpg`, map the client quad with `transform_quad_for_storage` and call
+`assess_edge_support`/`try_straighten` → write a contact sheet (original |
+straight, or a grey panel when abstained) labelled with outcome, reason, measured
+aspect/tilt and the four side ratios, plus a sibling JSON; print counts by state
+and reason and the portrait/landscape output split. Never writes to the job
+directory.
 
 **`warm_collection_artwork.py`** — parse `--limit` (0 = all), `--concurrency`
 (default 4), `--size large|small|both` (default large), `--dry-run` → open

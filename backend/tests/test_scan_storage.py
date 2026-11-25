@@ -4,7 +4,9 @@ import io
 import json
 import os
 import tempfile
+import threading
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 try:
@@ -430,7 +432,7 @@ class ScanJobStorageTests(unittest.IsolatedAsyncioTestCase):
         image_path = scan_storage.resolve_scan_path(item.image_path)
         return item, image_path
 
-    async def test_straighten_off_writes_no_artifact_or_manifest(self):
+    async def test_straighten_off_still_writes_a_skipped_manifest(self):
         job = await create_scan_job(
             self.db,
             self.user.id,
@@ -439,11 +441,22 @@ class ScanJobStorageTests(unittest.IsolatedAsyncioTestCase):
         )
         item = self.db.query(ScanJobItem).filter(ScanJobItem.job_id == job.id).one()
         image_path = scan_storage.resolve_scan_path(item.image_path)
+        manifest_path = scan_storage.straighten_manifest_path(image_path)
 
-        self.assertFalse(scan_storage.straighten_manifest_path(image_path).exists())
+        payload = json.loads(manifest_path.read_text())
+        self.assertEqual(payload["state"], "skipped_disabled", payload)
+        self.assertIsNone(payload["reason"])
+        self.assertIsNone(payload["artifact"])
+        self.assertEqual(payload["algorithmVersion"], "v1")
+        self.assertEqual(len(payload["configDigest"]), 64)
+        self.assertEqual(
+            payload["generation"]["sourceSha256"], payload["sourceSha256"]
+        )
         self.assertEqual(scan_storage.straighten_artifact_paths(image_path), [])
 
     async def test_shadow_mode_writes_artifact_and_manifest(self):
+        from services import scan_straighten
+
         raw = _card_canvas_bytes()
         geometry = _card_geometry()
         with patch.dict(os.environ, {"SCAN_STRAIGHTEN": "shadow"}), self.assertLogs(
@@ -465,7 +478,11 @@ class ScanJobStorageTests(unittest.IsolatedAsyncioTestCase):
         payload = json.loads(manifest_path.read_text())
         self.assertEqual(payload["state"], "ready", payload)
         self.assertIsNone(payload["reason"])
-        self.assertEqual(payload["helperVersion"], "v1")
+        self.assertEqual(payload["algorithmVersion"], "v1")
+        self.assertEqual(
+            payload["configDigest"],
+            scan_straighten.straighten_config_digest(),
+        )
         self.assertEqual(
             payload["sourceSha256"],
             hashlib.sha256(image_path.read_bytes()).hexdigest(),
@@ -473,6 +490,20 @@ class ScanJobStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["geometry"], geometry)
         self.assertEqual(payload["rotationCw"], 0)
         self.assertIsInstance(payload["createdAt"], str)
+        self.assertEqual(
+            payload["generation"],
+            {
+                "sourceSha256": payload["sourceSha256"],
+                "algorithmVersion": "v1",
+                "configDigest": payload["configDigest"],
+                "rotationCw": 0,
+            },
+        )
+        # The evidence that justified the verdict is persisted, not discarded.
+        self.assertEqual(payload["evidence"]["verdict"], "ok", payload)
+        self.assertEqual(len(payload["evidence"]["sides"]), 4)
+        self.assertEqual(payload["evidence"]["competingSides"], [])
+        self.assertIn("4/4 sides supported", payload["evidence"]["detail"])
 
         artifacts = scan_storage.straighten_artifact_paths(image_path)
         self.assertEqual(len(artifacts), 1)
@@ -481,8 +512,14 @@ class ScanJobStorageTests(unittest.IsolatedAsyncioTestCase):
             artifact.name,
             payload["artifact"],
         )
-        self.assertTrue(
-            artifact.name.startswith(f"{image_path.stem}.straight-v1-")
+        prefix = f"{image_path.stem}.straight-v1-"
+        self.assertTrue(artifact.name.startswith(prefix))
+        suffix = artifact.name[len(prefix):-len(".jpg")]
+        self.assertEqual(len(suffix), 16)
+        self.assertEqual(suffix, payload["artifactSha256"][:16])
+        self.assertEqual(
+            payload["artifactSha256"],
+            hashlib.sha256(artifact.read_bytes()).hexdigest(),
         )
         self.assertTrue(artifact.is_file())
         self.assertEqual(artifact.stat().st_mode & 0o777, 0o600)
@@ -530,7 +567,49 @@ class ScanJobStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(payload["reason"], {"boundary_unsupported", "boundary_competing"})
         self.assertIsNone(payload["artifact"])
         self.assertIsNone(payload["outputWidth"])
+        # Abstention detail is what makes the safety cost evaluable at all.
+        evidence = payload["evidence"]
+        self.assertIn(evidence["verdict"], {"unsupported", "competing"})
+        self.assertEqual(len(evidence["sides"]), 4)
+        self.assertTrue(all(isinstance(value, float) for value in evidence["sides"]))
+        self.assertIn("sides=", evidence["detail"])
         self.assertEqual(scan_storage.straighten_artifact_paths(image_path), [])
+
+    async def test_shadow_without_geometry_writes_a_skipped_manifest(self):
+        _, image_path = await self._shadow_job(None)
+        payload = json.loads(
+            scan_storage.straighten_manifest_path(image_path).read_text()
+        )
+
+        self.assertEqual(payload["state"], "skipped_no_geometry", payload)
+        self.assertIn("geometry", payload["reason"])
+        self.assertIsNone(payload["artifact"])
+        self.assertIsNone(payload["evidence"])
+        self.assertEqual(scan_storage.straighten_artifact_paths(image_path), [])
+
+    async def test_a_later_attempt_replaces_a_stale_ready_manifest(self):
+        _, image_path = await self._shadow_job(_card_geometry())
+        manifest_path = scan_storage.straighten_manifest_path(image_path)
+        self.assertEqual(json.loads(manifest_path.read_text())["state"], "ready")
+
+        with Image.open(image_path) as stored:
+            width, height = stored.size
+        sanitized = scan_storage.SanitizedScanImage(
+            data=image_path.read_bytes(),
+            rotation_cw=0,
+            width=width,
+            height=height,
+        )
+        with patch.dict(os.environ, {"SCAN_STRAIGHTEN": "shadow"}):
+            scan_storage.derive_straight_image(
+                self.db.query(ScanJobItem).one().image_path,
+                {"quad": [[0.0, 0.0]]},
+                sanitized,
+            )
+
+        payload = json.loads(manifest_path.read_text())
+        self.assertEqual(payload["state"], "skipped_no_geometry", payload)
+        self.assertIsNone(payload["artifact"])
 
     async def test_shadow_helper_failure_is_logged_and_the_scan_succeeds(self):
         with patch.dict(os.environ, {"SCAN_STRAIGHTEN": "shadow"}), patch(
@@ -573,6 +652,94 @@ class ScanJobStorageTests(unittest.IsolatedAsyncioTestCase):
         for artifact in artifacts:
             self.assertFalse(artifact.exists())
         self.assertFalse(image_path.parent.exists())
+
+    async def test_deleting_the_image_removes_artifacts_across_versions(self):
+        _, image_path = await self._shadow_job(_card_geometry())
+        manifest_path = scan_storage.straighten_manifest_path(image_path)
+        older = image_path.with_name(
+            f"{image_path.stem}.straight-v0-0123456789abcdef.jpg"
+        )
+        newer = image_path.with_name(
+            f"{image_path.stem}.straight-v2-ffffffffffffffff.jpg"
+        )
+        older.write_bytes(b"older")
+        newer.write_bytes(b"newer")
+        self.assertEqual(len(scan_storage.straighten_artifact_paths(image_path)), 3)
+
+        relative_path = self.db.query(ScanJobItem).one().image_path
+        scan_storage.delete_scan_image(relative_path)
+
+        self.assertFalse(image_path.exists())
+        self.assertFalse(manifest_path.exists())
+        self.assertFalse(older.exists())
+        self.assertFalse(newer.exists())
+        self.assertFalse(image_path.parent.exists())
+        # Deleting again, after everything is gone, must stay quiet.
+        scan_storage.delete_scan_image(relative_path)
+
+    def test_atomic_write_uses_a_unique_temporary_name_per_writer(self):
+        """Two concurrent writers must not share a staging path.
+
+        The writers meet inside fsync, after both have opened their temporary
+        file and before either renames it. A deterministic ``.<name>.tmp``
+        would let the second open truncate the first writer's staging file and
+        the second rename then fail with ENOENT.
+        """
+        target = Path(self.temp_dir.name) / "artifact.bin"
+        barrier = threading.Barrier(2)
+        errors: list[BaseException] = []
+        real_fsync = os.fsync
+
+        def synchronised_fsync(fd):
+            try:
+                barrier.wait(timeout=5)
+            except threading.BrokenBarrierError:
+                pass
+            real_fsync(fd)
+
+        def writer(data):
+            try:
+                scan_storage._atomic_write_bytes(target, data)
+            except BaseException as exc:  # noqa: BLE001 - reported as a failure
+                errors.append(exc)
+
+        with patch("services.scan_storage.os.fsync", side_effect=synchronised_fsync):
+            threads = [
+                threading.Thread(target=writer, args=(b"a" * 64,)),
+                threading.Thread(target=writer, args=(b"b" * 64,)),
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=10)
+
+        self.assertEqual(errors, [])
+        self.assertIn(target.read_bytes(), (b"a" * 64, b"b" * 64))
+        self.assertEqual(sorted(path.name for path in Path(self.temp_dir.name).iterdir()),
+                         ["artifact.bin"])
+
+    async def test_artifact_is_published_before_its_manifest(self):
+        seen = {}
+        original = scan_storage._write_straighten_manifest
+
+        def recorder(image_path, payload):
+            seen["state"] = payload["state"]
+            seen["artifact"] = payload["artifact"]
+            seen["exists"] = (
+                (image_path.parent / payload["artifact"]).is_file()
+                if payload["artifact"]
+                else None
+            )
+            original(image_path, payload)
+
+        with patch.object(
+            scan_storage, "_write_straighten_manifest", side_effect=recorder
+        ):
+            _, image_path = await self._shadow_job(_card_geometry())
+
+        self.assertEqual(seen["state"], "ready")
+        self.assertTrue(seen["exists"])
+        self.assertTrue((image_path.parent / seen["artifact"]).is_file())
 
     async def test_on_mode_warns_once_and_runs_as_shadow(self):
         scan_storage._straighten_on_warned = False

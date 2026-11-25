@@ -2,6 +2,7 @@
 
 import math
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 from PIL import Image, ImageDraw
@@ -59,6 +60,35 @@ def make_bordered_card(width=200, height=280):
 def make_plain_card(width=200, height=280):
     """Flat card stock: only the silhouette has structure."""
     return Image.new("RGB", (width, height), WHITE)
+
+
+def make_landscape_card(width=300, height=215):
+    """A card captured wider than tall, with its text bands across the width."""
+    card = Image.new("RGB", (width, height), WHITE)
+    draw = ImageDraw.Draw(card)
+    draw.rectangle((0, 0, width - 1, height - 1), outline=(4, 4, 4), width=7)
+    for top in (48, 98, 148):
+        draw.rectangle((24, top, width - 24, top + 24), fill=GREY)
+    return card
+
+
+def shift_side(quad, index, pixels):
+    """Move one side parallel to itself, towards the quad's centroid."""
+    p0 = quad[index]
+    p1 = quad[(index + 1) % 4]
+    cx = sum(x for x, _ in quad) / 4.0
+    cy = sum(y for _, y in quad) / 4.0
+    dx, dy = p1[0] - p0[0], p1[1] - p0[1]
+    length = math.hypot(dx, dy)
+    nx, ny = -dy / length, dx / length
+    mid = ((p0[0] + p1[0]) / 2.0, (p0[1] + p1[1]) / 2.0)
+    if (cx - mid[0]) * nx + (cy - mid[1]) * ny < 0.0:
+        nx, ny = -nx, -ny
+    moved = {
+        index: (p0[0] + nx * pixels, p0[1] + ny * pixels),
+        (index + 1) % 4: (p1[0] + nx * pixels, p1[1] + ny * pixels),
+    }
+    return [moved.get(position, point) for position, point in enumerate(quad)]
 
 
 def shrink_quad(quad, fraction=0.8):
@@ -209,11 +239,34 @@ class StraightenTests(unittest.TestCase):
         tiny = [(40, 40), (60, 40), (60, 70), (40, 70)]
         self.assertEqual(try_straighten(Image.new("RGB", (120, 120), WHITE), tiny).reason, "too_small")
 
-        tilted, tilted_quad = render_rotated(make_card(), 50)
-        self.assertEqual(try_straighten(tilted, tilted_quad).reason, "tilt_exceeded")
-
         wide = [(80, 100), (280, 100), (230, 300), (130, 300)]
         self.assertEqual(try_straighten(canvas, wide).reason, "bad_shape")
+
+    @unittest.skipUnless(DEPS_AVAILABLE, "Pillow/numpy unavailable")
+    def test_large_in_plane_tilt_is_accepted(self):
+        """The warp levels any angle; there is no tilt policy."""
+        canvas, quad = render_rotated(make_card(), 50)
+        result = try_straighten(canvas, quad)
+        self.assertIsInstance(result, Straightened)
+        self.assertAlmostEqual(result.width / result.height, 63 / 88,
+                               delta=0.02 * (63 / 88))
+        self.assertGreater(abs(result.angle_degrees), 45.0)
+
+    @unittest.skipUnless(DEPS_AVAILABLE, "Pillow/numpy unavailable")
+    def test_landscape_quad_straightens_into_a_landscape_frame(self):
+        """A wider-than-tall quad gets 88:63, not a sideways 63:88 squeeze."""
+        canvas, quad = render_rotated(make_landscape_card(), 5)
+        result = try_straighten(canvas, quad)
+        self.assertIsInstance(result, Straightened)
+        self.assertGreater(result.width, result.height)
+        self.assertAlmostEqual(result.width / result.height, 88 / 63,
+                               delta=0.02 * (88 / 63))
+        top, bottom, left, right, centre = edge_means(result.image)
+        for edge in (top, bottom, left, right):
+            self.assertLess(edge, centre)
+        # Text bands run across the card, so rows vary more than columns.
+        gray = np.asarray(result.image.convert("L"), dtype=float)
+        self.assertGreater(np.var(gray.mean(axis=1)), np.var(gray.mean(axis=0)))
 
     @unittest.skipUnless(DEPS_AVAILABLE, "Pillow/numpy unavailable")
     def test_never_upscales_beyond_card(self):
@@ -296,6 +349,34 @@ class EdgeSupportTests(unittest.TestCase):
         self.assertIsInstance(support, EdgeSupport)
 
     @unittest.skipUnless(DEPS_AVAILABLE, "Pillow/numpy unavailable")
+    def test_a_single_competing_side_vetoes(self):
+        """One side with no edge of its own and a real edge nearby abstains.
+
+        Shifting only the top side 24 px inside the card leaves the claim on
+        the printed border (no edge of its own) with the real outer edge
+        parallel to it. Under the strict rule that single competing side is a
+        veto: the crop would shave the top of the card.
+        """
+        canvas, quad = render_rotated(make_bordered_card(), 6)
+        shifted = shift_side(quad, 0, 24)
+        support = self.support(canvas, shifted)
+        self.assertEqual(sum(support.competing_sides), 1)
+        self.assertEqual(support.verdict, "competing")
+        result = try_straighten(canvas, shifted)
+        self.assertIsInstance(result, Abstained)
+        self.assertEqual(result.reason, "boundary_competing")
+
+    @unittest.skipUnless(DEPS_AVAILABLE, "Pillow/numpy unavailable")
+    def test_two_competing_sides_still_veto(self):
+        """A quad locked onto the inner frame competes on both parallel sides."""
+        canvas, quad = render_rotated(make_bordered_card(), 6)
+        locked = self.support(canvas, shrink_quad(quad, 0.8))
+        self.assertGreaterEqual(sum(locked.competing_sides), 2)
+        self.assertEqual(locked.verdict, "competing")
+        result = try_straighten(canvas, shrink_quad(quad, 0.8))
+        self.assertEqual(result.reason, "boundary_competing")
+
+    @unittest.skipUnless(DEPS_AVAILABLE, "Pillow/numpy unavailable")
     def test_quad_in_background_is_unsupported(self):
         """Measured: sides [0.0, 0.0, 0.0, 0.0], 0/4 supported."""
         canvas, _ = render_rotated(make_bordered_card(), 6)
@@ -357,6 +438,25 @@ class EdgeSupportTests(unittest.TestCase):
         self.assertEqual(bad.verdict, "unsupported")
         self.assertTrue(np.array_equal(np.asarray(canvas, dtype=np.uint8), before))
         self.assertIsInstance(assess_edge_support(canvas, quad), EdgeSupport)
+
+
+class ConfigIdentityTests(unittest.TestCase):
+    """The manifest's algorithm identity must follow the live rules."""
+
+    @unittest.skipUnless(DEPS_AVAILABLE, "Pillow/numpy unavailable")
+    def test_config_digest_changes_when_a_threshold_changes(self):
+        from services import scan_straighten
+
+        baseline = scan_straighten.straighten_config_digest()
+        self.assertEqual(len(baseline), 64)
+        int(baseline, 16)
+        with patch.object(scan_straighten, "SUPPORT_RATIO", 1.4):
+            self.assertNotEqual(scan_straighten.straighten_config_digest(), baseline)
+        with patch.object(scan_straighten, "COMPETE_RATIO", 3.0):
+            self.assertNotEqual(scan_straighten.straighten_config_digest(), baseline)
+        with patch.object(scan_straighten, "MIN_STEP", 9.0):
+            self.assertNotEqual(scan_straighten.straighten_config_digest(), baseline)
+        self.assertEqual(scan_straighten.straighten_config_digest(), baseline)
 
 
 if __name__ == "__main__":

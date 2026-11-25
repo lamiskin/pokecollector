@@ -11,13 +11,25 @@ edges on perspective photographs.
 
 Geometry alone cannot tell whether the supplied quad is the card's boundary.
 ``assess_edge_support`` reads a 1-D gradient profile normal to each claimed
-side and vetoes the warp when any of the four claims has no edge of its own
-(a card cut by the frame) or when a stronger parallel edge sits off the claim
-(a quad locked onto a loader lip, a printed inner frame or inner artwork).
+side and vetoes the warp unless **all four** claims land on a supported edge.
+An unsupported side is a claim where the pixels show no edge (a card cut by
+the frame, or a claim on blank card stock); a competing side is a claim with no
+edge of its own while a stronger parallel edge lies elsewhere in the profile (a
+quad on a loader lip, a printed inner frame or inner artwork). Either one
+vetoes: shaving a single side is already a wrong crop, and an edge found
+somewhere else in the profile does not prove the claimed line is right -- it is
+evidence the claim sits beside the real boundary.
+
+The destination orientation follows the measured quad: a quad whose sides
+measure wider than tall is straightened into an 88:63 landscape frame, rather
+than squeezed sideways into the 63:88 portrait frame a card has in its own
+hands.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from dataclasses import dataclass
 from typing import Sequence, Tuple
@@ -25,7 +37,7 @@ from typing import Sequence, Tuple
 import numpy as np
 from PIL import Image
 
-HELPER_VERSION = "v1"
+STRAIGHTEN_VERSION = "v1"
 
 CARD_ASPECT = 63.0 / 88.0
 MIN_SIDE_PX = 8.0
@@ -37,8 +49,49 @@ MIN_OUTPUT_PX = 32
 # Boundary-support thresholds; see assess_edge_support for the method.
 MIN_STEP = 8.0          # grey levels: minimum contrast across the claimed line
 SUPPORT_RATIO = 1.5     # claimed response / median inward response
-COMPETE_RATIO = 1.5     # parallel response / claimed response
+COMPETE_RATIO = 2.0     # parallel response / claimed response
 _RATIO_EPS = 0.5        # keeps a flat profile from dividing by zero
+SUPPORT_SAMPLES = 7     # points sampled along each claimed side
+SUPPORT_BAND_PX = 6     # support band around the claimed line, in pixels
+SUPPORT_INWARD_FRAC = 0.10  # competing search reach as a fraction of side length
+
+
+def straighten_config_digest() -> str:
+    """SHA-256 over the thresholds and rule flags that decide the verdict.
+
+    The manifest records this beside ``STRAIGHTEN_VERSION`` so a derivative can
+    never be mistaken for one produced by different rules. It is computed from
+    the live constants, so changing any threshold changes the digest.
+    """
+    config = {
+        "version": STRAIGHTEN_VERSION,
+        "card_aspect": CARD_ASPECT,
+        "min_side_px": MIN_SIDE_PX,
+        "min_angle": MIN_ANGLE,
+        "max_angle": MAX_ANGLE,
+        "max_opposing_ratio": MAX_OPPOSING_RATIO,
+        "min_output_px": MIN_OUTPUT_PX,
+        "min_step": MIN_STEP,
+        "support_ratio": SUPPORT_RATIO,
+        "compete_ratio": COMPETE_RATIO,
+        "ratio_eps": _RATIO_EPS,
+        "support_samples": SUPPORT_SAMPLES,
+        "support_band_px": SUPPORT_BAND_PX,
+        "support_inward_frac": SUPPORT_INWARD_FRAC,
+        "require_boundary": True,
+        "competing_vetoes_any": True,
+        "all_sides_required": True,
+    }
+    body = json.dumps(config, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class EdgeSupport:
+    verdict: str                  # "ok" | "unsupported" | "competing"
+    sides: tuple[float, ...]      # per-side support ratio, 4 values
+    competing_sides: tuple[bool, ...]
+    detail: str
 
 
 @dataclass(frozen=True)
@@ -49,20 +102,14 @@ class Straightened:
     margin_fraction: float
     angle_degrees: float
     warnings: tuple[str, ...]
+    support: EdgeSupport | None = None
 
 
 @dataclass(frozen=True)
 class Abstained:
     reason: str
     detail: str
-
-
-@dataclass(frozen=True)
-class EdgeSupport:
-    verdict: str                  # "ok" | "unsupported" | "competing"
-    sides: tuple[float, ...]      # per-side support ratio, 4 values
-    competing_sides: tuple[bool, ...]
-    detail: str
+    support: EdgeSupport | None = None
 
 
 Point = Tuple[float, float]
@@ -112,9 +159,9 @@ def assess_edge_support(
     rgb: Image.Image,
     quad: Sequence[Tuple[float, float]],
     *,
-    samples: int = 7,
-    band_px: int = 6,
-    inward_frac: float = 0.10,
+    samples: int = SUPPORT_SAMPLES,
+    band_px: int = SUPPORT_BAND_PX,
+    inward_frac: float = SUPPORT_INWARD_FRAC,
 ) -> EdgeSupport:
     """Decide whether the supplied quad actually sits on the card's boundary.
 
@@ -146,14 +193,16 @@ def assess_edge_support(
     A side is **competing** when the step contrast is below ``MIN_STEP`` (no
     edge of its own) and a parallel response elsewhere in the profile exceeds
     ``COMPETE_RATIO`` times the step (floored at ``MIN_STEP``, so a flat claim
-    needs a parallel response above 12 grey levels): the claim is inside the
+    needs a parallel response above 16 grey levels): the claim is inside the
     card and a real edge lies off it.
 
-    Verdict: ``competing`` if any side is competing, else ``unsupported`` if
-    any of the four sides is unsupported, else ``ok``. Requiring all four is
-deliberate: a card cut along one whole side looks exactly like a valid
-three-sided claim, and straightening a shaved card loses card content, while
-abstaining only leaves the padded photo in place.
+    Verdict: ``competing`` when **any** side is competing, else ``unsupported``
+    when any side is unsupported, else ``ok``. Only a supported side counts:
+    there is no leniency for a claim that merely has an edge somewhere in its
+    profile, because that edge is usually the real boundary the claim missed.
+    Any single weak side is a veto: locking one claim onto a printed inner
+    frame, or shaving one side of the crop, is already a wrong derivative,
+    while abstaining only keeps the padded photo in place.
 
     Limitation: a quad sitting on a top-loader's *outer* silhouette is
     pixel-identical to a card with a thick dark border, so this method passes
@@ -256,7 +305,8 @@ abstaining only leaves the padded photo in place.
             f"peak={parallel_peak:.0f}"
         )
 
-    if any(competing):
+    competing_count = sum(1 for flag in competing if flag)
+    if competing_count:
         verdict = "competing"
     elif supported_count < 4:
         verdict = "unsupported"
@@ -306,6 +356,21 @@ def transform_quad_for_storage(
     return points
 
 
+def destination_aspect(measured_w: float, measured_h: float) -> float:
+    """Width/height of the straight crop for a quad's measured side lengths.
+
+    The warp always maps quad side 0 onto the destination's top edge, so the
+    destination's shape has to follow the quad, not the card's nominal shape:
+    squeezing a landscape capture into 63:88 draws the card sideways and
+    stretches it. Landscape quads therefore get 88:63; everything else keeps
+    the portrait 63:88. Both stay capped by the measured pixels and
+    ``max_edge``, with no upscaling (see ``try_straighten``).
+    """
+    if measured_w > measured_h:
+        return 1.0 / CARD_ASPECT
+    return CARD_ASPECT
+
+
 def _homography(dst: Sequence[Point], src: Sequence[Point]) -> np.ndarray:
     """Solve the 3x3 destination->source projective transform."""
     rows = []
@@ -335,7 +400,6 @@ def try_straighten(
     *,
     margin: float = 0.015,
     max_edge: int = 2048,
-    max_tilt_degrees: float = 45.0,
     require_boundary: bool = True,
 ) -> Straightened | Abstained:
     if rgb.mode != "RGB":
@@ -380,22 +444,18 @@ def try_straighten(
     if max(opposing) > MAX_OPPOSING_RATIO:
         return Abstained("bad_shape", f"opposing side ratio {max(opposing):.2f}")
 
-    raw_tilt = _normalise_tilt(math.degrees(math.atan2(
+    # In-plane tilt is reported, never vetoed: the projective warp levels any
+    # angle, and a card held sideways is legitimate because the destination
+    # orientation follows the measured quad.
+    tilt = _normalise_tilt(math.degrees(math.atan2(
         points[1][1] - points[0][1], points[1][0] - points[0][0],
     )))
-    # A card that is almost sideways is best treated as a quarter turn of the
-    # supplied order; the transform still maps the card top edge to horizontal.
-    if abs(raw_tilt) >= 80.0:
-        tilt = 0.0
-    else:
-        tilt = raw_tilt
-    if abs(tilt) > max_tilt_degrees:
-        return Abstained("tilt_exceeded", f"tilt {tilt:.1f} degrees")
 
     measured_w = min(sides[0], sides[2])
     measured_h = min(sides[1], sides[3])
-    inner_h = min(measured_h, measured_w / CARD_ASPECT)
-    inner_w = CARD_ASPECT * inner_h
+    aspect = destination_aspect(measured_w, measured_h)
+    inner_w = min(measured_w, measured_h * aspect)
+    inner_h = inner_w / aspect
     out_w = inner_w * (1.0 + 2.0 * margin)
     out_h = inner_h * (1.0 + 2.0 * margin)
 
@@ -409,6 +469,7 @@ def try_straighten(
 
     # Geometry is satisfied; ask the pixels whether the claim is really the
     # card's boundary before paying for the warp.
+    support: EdgeSupport | None = None
     if require_boundary:
         support = assess_edge_support(rgb, points)
         if support.verdict != "ok":
@@ -416,7 +477,7 @@ def try_straighten(
                 "boundary_competing" if support.verdict == "competing"
                 else "boundary_unsupported"
             )
-            return Abstained(reason, support.detail)
+            return Abstained(reason, support.detail, support)
 
     inset_x = out_w * margin
     inset_y = out_h * margin
@@ -456,4 +517,5 @@ def try_straighten(
         margin_fraction=float(margin),
         angle_degrees=float(tilt),
         warnings=warnings,
+        support=support,
     )
