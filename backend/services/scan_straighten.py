@@ -50,6 +50,24 @@ Gradients cannot tell a printed inner border from container material, so a
 printed border inboard of a correct claim reads as ``loose`` too. That is why
 the diagnostics cannot grant or withhold anything.
 
+Outward-only crop growth
+------------------------
+The detector's quad is frequently a few pixels *inside* the physical card, and
+on a skewed side the miss can differ per sample. Because a crop can never lose
+card by growing, ``expand_quad_outward`` grows each side outward along its own
+normal by a percentile of the outboard offsets that side's samples actually
+measured, capped per side at ``MAX_EXPAND_FRAC`` of that side's length. A single
+isolated spike cannot grow a side (it is weaker than half the side's strongest
+outboard sample); a coherent skewed edge can. Growth is clamped into the raster
+and never moves a side inward, and it consumes the margin band on any side that
+ran into the boundary. Without outboard evidence -- or with no support evidence
+at all -- the quad is used exactly as claimed. The applied growth is recorded
+under ``diagnostics.expansion`` beside the unchanged boundary numbers.
+
+The reported offset must never be double-counted: the expansion is capped, so
+the warp quad exceeds the claim by at most 4 % per side, and the margin band is
+inset from the *expanded* quad rather than added a second time on top of it.
+
 Sign convention
 ---------------
 For every ordered edge, ``edge_inward_normal`` builds a unit normal and orients
@@ -68,13 +86,19 @@ vetoing rule. Under the current rule every one of them is technically valid
 and produces a proposal; 88744406's outboard evidence is retained as
 diagnostics.
 
-The warp never re-pairs the caller's corners. Its destination has the
-*measured* w/h of the quad as supplied, so rectification cannot squeeze the
-card. A quad measured wider than tall is a sideways capture; the resulting
-pixels are then turned a quarter turn clockwise so the derivative is portrait,
-and ``turned_cw`` records that turn. Orientation remains ambiguous by a half
-turn: upright versus 180 degrees inverted needs content knowledge, which this
-geometry-only helper does not have.
+Orientation is decided by the card's own shape, not by the order in which the
+detector happened to list the corners. A Pokemon card is 63:88 portrait, so
+the longer of the two measured side pairs must be the destination's vertical
+pair. The warp is given a corner order re-sequenced by one step when the
+supplied order put the shorter pair vertical; only the warp's order changes.
+Boundary diagnostics and the outward expansion keep the caller's corners
+exactly as supplied and as expanded. The destination's inner dimensions are
+the measured short-pair length by the measured long-pair length -- the means of
+the two pairs of the warp quad -- so rectification cannot squeeze and the
+output is portrait because the long pair is vertical. No post-warp quarter turn
+is applied and ``turned_cw`` is always 0. Orientation remains ambiguous by a
+half turn: upright versus 180 degrees inverted needs content knowledge, which
+this geometry-only helper does not have.
 """
 
 from __future__ import annotations
@@ -90,7 +114,6 @@ from PIL import Image
 
 STRAIGHTEN_VERSION = "v1"
 
-CARD_ASPECT = 63.0 / 88.0
 MIN_SIDE_PX = 8.0
 MIN_ANGLE = 45.0
 MAX_ANGLE = 135.0
@@ -106,6 +129,12 @@ SUPPORT_SAMPLES = 7     # points sampled along each claimed side
 SUPPORT_BAND_PX = 6     # support band around the claimed line, in pixels
 SUPPORT_INWARD_FRAC = 0.10  # parallel-edge search reach as a fraction of side length
 
+# Outward-only crop expansion; see expand_quad_outward.
+EXPAND_PERCENTILE = 0.75   # of the side's accepted outboard offsets
+MAX_EXPAND_FRAC = 0.04     # per side, as a fraction of that side's length
+EXPAND_STRENGTH_FRAC = 0.5 # samples weaker than half the strongest are noise
+EXPAND_MIN_SAMPLES = 2     # an isolated sample can never expand a side
+
 
 def straighten_config_digest() -> str:
     """SHA-256 over the thresholds and rule flags behind the diagnostics.
@@ -117,7 +146,6 @@ def straighten_config_digest() -> str:
     """
     config = {
         "version": STRAIGHTEN_VERSION,
-        "card_aspect": CARD_ASPECT,
         "min_side_px": MIN_SIDE_PX,
         "min_angle": MIN_ANGLE,
         "max_angle": MAX_ANGLE,
@@ -130,15 +158,22 @@ def straighten_config_digest() -> str:
         "support_samples": SUPPORT_SAMPLES,
         "support_band_px": SUPPORT_BAND_PX,
         "support_inward_frac": SUPPORT_INWARD_FRAC,
+        "expand_percentile": EXPAND_PERCENTILE,
+        "max_expand_frac": MAX_EXPAND_FRAC,
+        "expand_strength_frac": EXPAND_STRENGTH_FRAC,
+        "expand_min_samples": EXPAND_MIN_SAMPLES,
+        "crop_expansion": "outward_only_per_side",
         "boundary_diagnostics": "only",
         "withhold_on_boundary": False,
         "boundary_by_peak_position": True,
         "proposal_state": "proposed",
-        # The destination follows the measured quad aspect; a wider-than-tall
-        # result is turned 90 degrees as pixels. A derivative from the old
-        # corner-repairing rule must not share this identity.
-        "orientation": "warp_measured_aspect_then_turn_cw",
-        "landscape_turn_cw": 90,
+        # The warp re-sequences the supplied corners when needed so the longer
+        # measured pair is vertical, then warps into that measured short x long
+        # frame. It never turns the pixels afterwards and never forces a
+        # nominal aspect. A derivative from an older orientation rule must not
+        # share this identity.
+        "orientation": "measured_pair_long_axis_vertical",
+        "post_warp_turn_cw": 0,
     }
     body = json.dumps(config, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
@@ -181,6 +216,9 @@ class Straightened:
     warnings: tuple[str, ...]
     support: EdgeSupport | None = None
     turned_cw: int = 0
+    # The outward expansion actually applied to the warp quad, in the manifest's
+    # ``diagnostics.expansion`` shape, or None when the quad was used as claimed.
+    expansion: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -195,6 +233,15 @@ Point = Tuple[float, float]
 
 def _distance(a: Point, b: Point) -> float:
     return math.hypot(b[0] - a[0], b[1] - a[1])
+
+
+def _unit(a: Point, b: Point) -> Point:
+    """Unit vector from ``a`` to ``b``; ``(0, 0)`` for a degenerate edge."""
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    length = math.hypot(dx, dy)
+    if length < 1e-12:
+        return (0.0, 0.0)
+    return (dx / length, dy / length)
 
 
 def _cross(o: Point, a: Point, b: Point) -> float:
@@ -654,6 +701,189 @@ def boundary_diagnostics(support: EdgeSupport) -> dict:
     }
 
 
+def _outboard_candidates(samples: Sequence[dict]) -> list[float]:
+    """Outboard distances (positive px) of one side's real outboard edges.
+
+    Each per-sample entry reports the strongest outboard peak as a negative
+    ``offset`` (negative is outboard of the claim) and its ``strength`` as a
+    central-difference gradient magnitude. A sample with no outboard edge at all
+    reports offset 0. Samples weaker than half the side's strongest outboard
+    peak are dropped: an isolated weak response is noise, while a coherent
+    skewed edge keeps several comparable samples. A peak below ``MIN_STEP`` is
+    never treated as an edge, so a flat background cannot expand anything.
+    """
+    measured: list[tuple[float, float]] = []
+    for sample in samples:
+        offset = float(sample.get("offset", 0.0))
+        strength = float(sample.get("strength", 0.0))
+        if offset < -1e-9:
+            measured.append((-offset, strength))
+    if len(measured) < EXPAND_MIN_SAMPLES:
+        return []
+    floor = max(MIN_STEP, EXPAND_STRENGTH_FRAC * max(value for _, value in measured))
+    return sorted(distance for distance, strength in measured if strength >= floor)
+
+
+def expand_quad_outward(
+    claims: Sequence[Tuple[float, float]],
+    support: "EdgeSupport | None",
+    *,
+    percentile: float = EXPAND_PERCENTILE,
+    max_expand_frac: float = MAX_EXPAND_FRAC,
+    bounds: tuple[float, float] | None = None,
+) -> tuple[list[Point], list[float], list[bool]]:
+    """Grow a claimed quad outward by the outboard edge it demonstrably missed.
+
+    Growing a crop can never remove card, at worst it adds background, so the
+    expansion is **outward only**: every side moves along its own outward normal
+    and never inward. Each side is measured independently from the per-sample
+    outboard evidence ``assess_edge_support`` already recorded:
+
+    * keep the side's per-sample outboard distances whose strength is at least
+      ``EXPAND_STRENGTH_FRAC`` of that side's strongest outboard peak and at
+      least ``MIN_STEP`` grey levels -- this rejects an isolated noise spike
+      without hiding a coherent, possibly skewed, edge;
+    * take ``percentile`` of those distances (default 0.75), so a majority of
+      the tracked edge is covered rather than its most extreme sample;
+    * clamp to ``max_expand_frac`` of that side's length (4 % by default), so a
+      bad track cannot balloon the crop.
+
+    Fewer than ``EXPAND_MIN_SAMPLES`` surviving outboard samples, or no support
+    evidence at all, leaves the side exactly where it was claimed. A side with
+    no outboard evidence therefore cannot move.
+
+    With ``bounds`` (the source raster size) each resulting corner is clamped
+    into the raster, and a side is flagged when either of its corners hit the
+    boundary. The clamp is applied after the outward shift; if it would leave a
+    side inboard of its claim (which a rotation plus a rectangular clamp can in
+    principle do), that side falls back to the claim and is flagged instead. So
+    the returned quad is never smaller than the claimed one on any side.
+
+    Returns ``(quad, expansion_px, clamped)`` with four per-side values in the
+    caller's corner order (side ``i`` runs from corner ``i`` to ``i + 1``).
+    """
+    points = [(float(x), float(y)) for x, y in claims]
+    if len(points) != 4:
+        return points, [0.0] * 4, [False] * 4
+    expansion = [0.0, 0.0, 0.0, 0.0]
+    if support is None or not getattr(support, "side_samples", None):
+        return points, expansion, [False] * 4
+
+    crop = float(percentile)
+    if not math.isfinite(crop):
+        crop = EXPAND_PERCENTILE
+    crop = min(max(crop, 0.0), 1.0)
+
+    samples_per_side = support.side_samples
+    for index in range(4):
+        length = _distance(points[index], points[(index + 1) % 4])
+        if length < 1e-6:
+            continue
+        samples = samples_per_side[index] if index < len(samples_per_side) else ()
+        distances = _outboard_candidates(samples)
+        if len(distances) < EXPAND_MIN_SAMPLES:
+            continue
+        value = float(np.percentile(np.asarray(distances, dtype=float), crop * 100.0))
+        limit = max(0.0, float(max_expand_frac)) * length
+        expansion[index] = max(0.0, min(value, limit))
+
+    centroid = quad_centroid(points)
+    expanded = list(points)
+    for index in range(4):
+        amount = expansion[index]
+        if amount <= 0.0:
+            continue
+        nx, ny = edge_inward_normal(
+            points[index], points[(index + 1) % 4], centroid
+        )
+        # Outward is the negated inward normal.
+        dx, dy = -nx * amount, -ny * amount
+        expanded[index] = (expanded[index][0] + dx, expanded[index][1] + dy)
+        end = (index + 1) % 4
+        expanded[end] = (expanded[end][0] + dx, expanded[end][1] + dy)
+
+    clamped = [False, False, False, False]
+    if bounds is not None:
+        limit_x, limit_y = float(bounds[0]), float(bounds[1])
+        corner_hit = [False, False, False, False]
+        for index, (x, y) in enumerate(expanded):
+            bounded_x = min(max(x, 0.0), limit_x - 1.0)
+            bounded_y = min(max(y, 0.0), limit_y - 1.0)
+            if abs(bounded_x - x) > 1e-9 or abs(bounded_y - y) > 1e-9:
+                corner_hit[index] = True
+                expanded[index] = (bounded_x, bounded_y)
+        for index in range(4):
+            end = (index + 1) % 4
+            if corner_hit[index] or corner_hit[end]:
+                clamped[index] = True
+        # Never let a clamp tuck a side inboard of its claim: a boundary is not
+        # evidence that the card shrank. Fall back to the claimed side instead.
+        for index in range(4):
+            if expansion[index] <= 0.0 or not clamped[index]:
+                continue
+            midpoint = (
+                (points[index][0] + points[(index + 1) % 4][0]) / 2.0,
+                (points[index][1] + points[(index + 1) % 4][1]) / 2.0,
+            )
+            if edge_signed_offset(points, index, midpoint) > 1e-9:
+                continue  # degenerate claim; nothing to compare against
+            end = (index + 1) % 4
+            side_midpoint = (
+                (expanded[index][0] + expanded[end][0]) / 2.0,
+                (expanded[index][1] + expanded[end][1]) / 2.0,
+            )
+            if edge_signed_offset(points, index, side_midpoint) > 1e-9:
+                expanded[index] = points[index]
+                expanded[end] = points[end]
+                expansion[index] = 0.0
+    return expanded, expansion, clamped
+
+
+def expansion_diagnostics(
+    quad: Sequence[Tuple[float, float]],
+    expansion: Sequence[float],
+    clamped: Sequence[bool],
+    *,
+    percentile: float = EXPAND_PERCENTILE,
+) -> dict:
+    """Serialise the outward expansion as diagnostics beside the claimed quad.
+
+    The claimed quad's own numbers (support ratios, verdicts, offsets) are
+    unchanged; this block says only how far each side was grown, whether the
+    source raster stopped it, and the quad the warp actually used. Like the
+    boundary block it is developer diagnostics and has no authority.
+    """
+    sides = []
+    for index in range(4):
+        amount = float(expansion[index]) if index < len(expansion) else 0.0
+        hit = bool(clamped[index]) if index < len(clamped) else False
+        sides.append({"expandPx": round(amount, 2), "expandClamped": hit})
+    return {
+        "percentile": round(float(percentile), 3),
+        "sides": sides,
+        "clamped": [entry["expandClamped"] for entry in sides],
+        "quad": [
+            [round(float(x), 2), round(float(y), 2)] for x, y in quad
+        ],
+    }
+
+
+def output_pixel_size(
+    measured_w: float,
+    measured_h: float,
+    *,
+    margin: float = 0.015,
+    max_edge: int = 2048,
+) -> tuple[int, int]:
+    """Destination size for a card of the measured size, never upscaled."""
+    out_w = float(measured_w) * (1.0 + 2.0 * float(margin))
+    out_h = float(measured_h) * (1.0 + 2.0 * float(margin))
+    limit_w = min(float(measured_w), float(max_edge))
+    limit_h = min(float(measured_h), float(max_edge))
+    scale = min(1.0, limit_w / out_w if out_w else 0.0, limit_h / out_h if out_h else 0.0)
+    return int(round(out_w * scale)), int(round(out_h * scale))
+
+
 def transform_quad_for_storage(
     quad: Sequence[Tuple[float, float]],
     rotation_cw: int,
@@ -709,6 +939,44 @@ def _project(matrix: np.ndarray, x: float, y: float) -> Point:
         (matrix[0] * x + matrix[1] * y + matrix[2]) / denominator,
         (matrix[3] * x + matrix[4] * y + matrix[5]) / denominator,
     )
+
+
+def _usable_warp_quad(
+    candidate: Sequence[Point], claims: Sequence[Point]
+) -> bool:
+    """True when the expanded quad is still a sane, non-folded rectangle.
+
+    Per-side growth can in principle turn a convex claim into a crossed or
+    dented quad (an adjacent side growing much further than its neighbour). The
+    warp is then not usable, so the caller keeps the claim; this never withholds
+    a proposal, it only declines the extra background.
+    """
+    if len(candidate) != 4:
+        return False
+    if not all(math.isfinite(x) and math.isfinite(y) for x, y in candidate):
+        return False
+    signs = [
+        _cross(candidate[i], candidate[(i + 1) % 4], candidate[(i + 2) % 4])
+        for i in range(4)
+    ]
+    if not (all(value > 1e-9 for value in signs) or all(value < -1e-9 for value in signs)):
+        return False
+    for index in range(4):
+        if _distance(candidate[index], candidate[(index + 1) % 4]) < MIN_SIDE_PX:
+            return False
+        angle = _interior_angle(
+            candidate[(index - 1) % 4], candidate[index], candidate[(index + 1) % 4]
+        )
+        if angle < 20.0 or angle > 160.0:
+            return False
+        # Never let the expansion move a side inward versus the claim.
+        midpoint = (
+            (candidate[index][0] + candidate[(index + 1) % 4][0]) / 2.0,
+            (candidate[index][1] + candidate[(index + 1) % 4][1]) / 2.0,
+        )
+        if edge_signed_offset(claims, index, midpoint) > 1e-6:
+            return False
+    return True
 
 
 def try_straighten(
@@ -773,50 +1041,148 @@ def try_straighten(
         return Abstained("bad_shape", f"opposing side ratio {max(opposing):.2f}")
 
     # In-plane tilt is reported, never vetoed: the projective warp levels any
-    # angle, and a card held sideways is fine because the result is turned as
-    # pixels after the warp. Keep the tilt of the quad as detected.
+    # angle, and a card held sideways is fine because the pairing below
+    # re-sequences the warp corners. Keep the tilt of the quad as detected.
     tilt = _normalise_tilt(math.degrees(math.atan2(
         points[1][1] - points[0][1], points[1][0] - points[0][0],
     )))
 
-    # Never re-pair the caller's corners. The destination's inner aspect is the
-    # measured w/h of the quad as supplied, so rectification cannot squeeze the
-    # card. A quad measured wider than tall is a sideways capture: the pixels
-    # are turned a quarter clockwise after the warp, and ``turned_cw`` records
-    # the turn. Which upright (0 vs 180 degrees) is correct still needs content
-    # knowledge, so it is not attempted here.
-    measured_w = min(sides[0], sides[2])
-    measured_h = min(sides[1], sides[3])
-    inner_w = measured_w
-    inner_h = measured_h
-    out_w = inner_w * (1.0 + 2.0 * margin)
-    out_h = inner_h * (1.0 + 2.0 * margin)
+    # Never re-pair the expanded quad for diagnostics or for the expansion
+    # record. The warp's corner order is re-sequenced below when the detector's
+    # first corner put the card's short pair on the horizontal sides; the
+    # expansion itself stays in the caller's order.
+    #
+    # Geometry is satisfied on the claim; read the pixels for the boundary
+    # evidence, then grow the quad outward by the outboard edge it demonstrably
+    # missed. Growing can only add background, never remove card, so a shaved
+    # claim is corrected where the evidence exists. The evidence is recorded,
+    # never a veto: there is no branch below that reads ``support.verdict``.
+    support = assess_edge_support(rgb, points)
+    warp_points, expansion_px, expansion_clamped = expand_quad_outward(
+        points, support, bounds=(float(width), float(height))
+    )
+    if not _usable_warp_quad(warp_points, points):
+        # One side growing far more than its neighbour can fold the quad; keep
+        # the claim rather than abstain or warp a self-crossing shape.
+        warp_points = list(points)
+        expansion_px = [0.0, 0.0, 0.0, 0.0]
+        expansion_clamped = [False, False, False, False]
+    expansion = expansion_diagnostics(
+        warp_points, expansion_px, expansion_clamped
+    )
 
-    limit_w = min(measured_w, float(max_edge))
-    limit_h = min(measured_h, float(max_edge))
-    scale = min(1.0, limit_w / out_w if out_w else 0.0, limit_h / out_h if out_h else 0.0)
-    out_w = int(round(out_w * scale))
-    out_h = int(round(out_h * scale))
+    warp_sides = [
+        _distance(warp_points[i], warp_points[(i + 1) % 4]) for i in range(4)
+    ]
+
+    # A card is portrait in its own hands, so the longer measured side pair must
+    # be the destination's vertical pair (sides 1 and 3). The detector's first
+    # corner can fall on any edge, so the supplied/expanded order may put the
+    # short pair there; one step of corner rotation swaps the pairing. Only the
+    # warp sees this re-sequenced order: boundary diagnostics and the expansion
+    # record above stay exactly as supplied and as expanded. Length alone
+    # decides, so upright versus 180 degrees remains undecidable without content
+    # knowledge.
+    pair_a = (warp_sides[0] + warp_sides[2]) / 2.0
+    pair_b = (warp_sides[1] + warp_sides[3]) / 2.0
+    source_points = list(warp_points)
+    source_claims = list(points)
+    source_clamped = list(expansion_clamped)
+    if pair_b <= pair_a:
+        source_points = list(warp_points[3:]) + list(warp_points[:3])
+        source_claims = list(points[3:]) + list(points[:3])
+        source_clamped = list(expansion_clamped[3:]) + list(expansion_clamped[:3])
+        pair_a, pair_b = pair_b, pair_a
+
+    # The card's footprint in the output is the *claim's* measured short and long
+    # pairs, not the expanded quad's: deriving the destination size from the
+    # grown quad would let an asymmetric expansion change the output aspect,
+    # which is a squeeze by another name. The expansion becomes extra area around
+    # a card footprint of the claimed size. Inner dimensions are the measured
+    # short and long pairs, not a nominal 63:88, so rectification cannot squeeze
+    # and the output is portrait with the card's long axis vertical before any
+    # pixels are turned (none are).
+    claim_sides = [
+        _distance(source_claims[i], source_claims[(i + 1) % 4]) for i in range(4)
+    ]
+    inner_w = (claim_sides[0] + claim_sides[2]) / 2.0
+    inner_h = (claim_sides[1] + claim_sides[3]) / 2.0
+
+    # Margins are per side in the warp's own order (0 top, 1 right, 2 bottom,
+    # 3 left). A side whose expansion ran into the raster boundary has no source
+    # left for a band, so its inset collapses to zero -- otherwise the
+    # extrapolated output corner would map outside the raster and a clamped
+    # expansion would fail the warp.
+    insets = [
+        inner_h * margin,
+        inner_w * margin,
+        inner_h * margin,
+        inner_w * margin,
+    ]
+    for index in range(4):
+        if source_clamped[index]:
+            insets[index] = 0.0
+    inset_left, inset_top = insets[3], insets[0]
+    inset_right, inset_bottom = insets[1], insets[2]
+
+    # Express each corner's growth in the card's own axes (u along side 0, v
+    # along side 1), so a rotated claim grows out of its own sides rather than
+    # out of the raster's. The destination corner is the inner-rect corner plus
+    # that growth: the homography maps the expanded corner there while the claim
+    # itself lands back on the inner rectangle, so the card is neither squeezed
+    # nor moved by the expansion.
+    u = _unit(source_claims[0], source_claims[1])
+    v = _unit(source_claims[1], source_claims[2])
+    determinant = u[0] * v[1] - u[1] * v[0]
+    inner = [
+        (0.0, 0.0),
+        (inner_w, 0.0),
+        (inner_w, inner_h),
+        (0.0, inner_h),
+    ]
+    destination_points: list[Point] = []
+    for index in range(4):
+        dx = source_points[index][0] - source_claims[index][0]
+        dy = source_points[index][1] - source_claims[index][1]
+        if abs(determinant) < 1e-9:
+            du, dv = dx, dy
+        else:
+            du = (dx * v[1] - dy * v[0]) / determinant
+            dv = (u[0] * dy - u[1] * dx) / determinant
+        destination_points.append((inner[index][0] + du, inner[index][1] + dv))
+
+    # The output holds the warp quad and at least the inset band around the card
+    # footprint. A side grown further than its band takes that space instead of
+    # adding a second band on top, so the growth is never double-counted.
+    x_min = min(min(x for x, _ in destination_points), -inset_left)
+    x_max = max(max(x for x, _ in destination_points), inner_w + inset_right)
+    y_min = min(min(y for _, y in destination_points), -inset_top)
+    y_max = max(max(y for _, y in destination_points), inner_h + inset_bottom)
+
+    nominal_w = x_max - x_min
+    nominal_h = y_max - y_min
+    extra_w = max(0.0, nominal_w - (inner_w + inset_left + inset_right))
+    extra_h = max(0.0, nominal_h - (inner_h + inset_top + inset_bottom))
+
+    # No upscaling: the card itself is never enlarged.
+    limit_w = min(inner_w, float(max_edge))
+    limit_h = min(inner_h, float(max_edge))
+    scale = min(
+        1.0,
+        (inner_w + extra_w) / nominal_w if nominal_w else 0.0,
+        (inner_h + extra_h) / nominal_h if nominal_h else 0.0,
+    )
+    out_w = int(round(nominal_w * scale))
+    out_h = int(round(nominal_h * scale))
     if out_w < MIN_OUTPUT_PX or out_h < MIN_OUTPUT_PX:
         return Abstained("too_small", f"output {out_w}x{out_h} below {MIN_OUTPUT_PX}px")
 
-    # Geometry is satisfied; read the pixels for diagnostics. The evidence
-    # reads the caller's own corners, in their order, so it describes exactly
-    # what was supplied. It is recorded, never a veto: a produced warp is a
-    # proposal regardless of the boundary verdict. There is no branch below
-    # that reads ``support.verdict``.
-    support = assess_edge_support(rgb, points)
-
-    inset_x = out_w * margin
-    inset_y = out_h * margin
     destination = [
-        (inset_x, inset_y),
-        (out_w - inset_x, inset_y),
-        (out_w - inset_x, out_h - inset_y),
-        (inset_x, out_h - inset_y),
+        ((x - x_min) * scale, (y - y_min) * scale)
+        for x, y in destination_points
     ]
     try:
-        coefficients = _homography(destination, points)
+        coefficients = _homography(destination, source_points)
     except np.linalg.LinAlgError:
         return Abstained("bad_quad", "degenerate homography")
 
@@ -835,15 +1201,10 @@ def try_straighten(
         resample=Image.Resampling.BICUBIC,
     ).convert("RGB")
 
-    # A sideways capture warps into its measured landscape frame first (so no
-    # squeeze) and is then turned a quarter clockwise as pixels, keeping the
-    # card's own proportions. PIL's ROTATE_270 is 270 degrees counter-clockwise,
-    # i.e. 90 degrees clockwise.
+    # The destination is already portrait with the card's long pair vertical,
+    # so no post-warp turn is applied. ``turned_cw`` stays 0 for manifest
+    # compatibility; nothing rotates the pixels here.
     turned_cw = 0
-    if out_w > out_h:
-        image = image.transpose(Image.Transpose.ROTATE_270).convert("RGB")
-        out_w, out_h = out_h, out_w
-        turned_cw = 90
 
     warnings: tuple[str, ...] = ()
     if min(opposing) > 1.4:
@@ -857,4 +1218,5 @@ def try_straighten(
         warnings=warnings,
         support=support,
         turned_cw=turned_cw,
+        expansion=expansion,
     )

@@ -20,6 +20,8 @@ try:
         classify_edge_offset,
         edge_inward_normal,
         edge_signed_offset,
+        expand_quad_outward,
+        expansion_diagnostics,
         quad_centroid,
         transform_quad_for_storage,
         try_straighten,
@@ -244,15 +246,23 @@ class StraightenTests(unittest.TestCase):
         self.assertGreater(np.var(gray.mean(axis=1)), np.var(gray.mean(axis=0)))
 
     @unittest.skipUnless(DEPS_AVAILABLE, "Pillow/numpy unavailable")
-    def test_quarter_turns_keep_corner_order(self):
+    def test_quarter_turns_are_upright_portrait(self):
+        """A quarter-turned capture is re-sequenced into the same portrait frame.
+
+        The measured short/long pair -- not the detector's corner order -- sets
+        the destination, and no post-warp turn is applied.
+        """
         card = make_card()
         for angle in (90, 180, 270):
             with self.subTest(angle=angle):
                 canvas, quad = render_rotated(card, angle)
                 result = try_straighten(canvas, quad)
                 self.assertIsInstance(result, Straightened)
-                self.assertAlmostEqual(result.width / result.height, 63 / 88,
-                                       delta=0.02 * (63 / 88))
+                self.assertAlmostEqual(
+                    result.width / result.height, 215 / 300,
+                    delta=0.02 * (215 / 300),
+                )
+                self.assertEqual(result.turned_cw, 0)
                 top, bottom, left, right, centre = edge_means(result.image)
                 for edge in (top, bottom, left, right):
                     self.assertLess(edge, centre)
@@ -331,9 +341,12 @@ class StraightenTests(unittest.TestCase):
         canvas, quad = render_rotated(make_landscape_card(), 5)
         result = try_straighten(canvas, quad)
         self.assertIsInstance(result, Straightened)
+        self.assertEqual(result.turned_cw, 0)
         self.assertGreater(result.height, result.width)
-        self.assertAlmostEqual(result.width / result.height, 63 / 88,
-                               delta=0.02 * (63 / 88))
+        # The destination is the measured short x long pair (215 x 300), not a
+        # forced 63:88: the card's long axis is vertical and nothing squeezed.
+        self.assertAlmostEqual(result.width / result.height, 215 / 300,
+                               delta=0.01 * (215 / 300))
         top, bottom, left, right, centre = edge_means(result.image)
         for edge in (top, bottom, left, right):
             self.assertLess(edge, centre)
@@ -368,8 +381,8 @@ class StraightenTests(unittest.TestCase):
         )
 
     @unittest.skipUnless(DEPS_AVAILABLE, "Pillow/numpy unavailable")
-    def test_landscape_capture_turns_pixels_without_squeezing(self):
-        """A sideways capture is turned as pixels, never squeezed or re-paired.
+    def test_landscape_capture_reorders_without_squeezing(self):
+        """A sideways capture is re-sequenced as corners, never squeezed.
 
         The equal-spacing grid is the distortion check: horizontal and vertical
         spacings must stay equal in the portrait output.
@@ -377,7 +390,7 @@ class StraightenTests(unittest.TestCase):
         canvas, quad = make_grid_capture()
         result = try_straighten(canvas, quad)
         self.assertIsInstance(result, Straightened)
-        self.assertEqual(result.turned_cw, 90)
+        self.assertEqual(result.turned_cw, 0)
         self.assertGreater(result.height, result.width)
         gray = np.asarray(result.image.convert("L"), dtype=float)
         rows = line_centres(gray.mean(axis=1))
@@ -408,6 +421,66 @@ class StraightenTests(unittest.TestCase):
         corner = arr[int(h * 0.10):int(h * 0.25), int(w * 0.10):int(w * 0.30)]
         self.assertGreater(float(corner[..., 0].mean()), 120.0)
         self.assertLess(float(corner[..., 2].mean()), 120.0)
+
+    @unittest.skipUnless(DEPS_AVAILABLE, "Pillow/numpy unavailable")
+    def test_portrait_quad_starting_on_a_long_edge_matches_a_short_edge_start(self):
+        """Corner order is not orientation: one step must not turn the content.
+
+        The detector's first corner can fall on any edge. Starting the same
+        portrait quad on a long edge puts the short pair in sides 1/3, which a
+        naive pair measure misreads. Re-sequencing the warp must produce the
+        same portrait output and the same upright content as a short-edge
+        start, not a portrait frame with sideways content.
+        """
+        canvas, base = render_rotated(make_card(), 4)
+        long_edge_start = base[1:] + base[:1]  # side 0 is now a long edge
+        short_result = try_straighten(canvas, base)
+        long_result = try_straighten(canvas, long_edge_start)
+        for result in (short_result, long_result):
+            self.assertIsInstance(result, Straightened)
+            self.assertEqual(result.turned_cw, 0)
+            self.assertGreater(result.height, result.width)
+        self.assertEqual(
+            (short_result.width, short_result.height),
+            (long_result.width, long_result.height),
+        )
+        self.assertTrue(
+            np.array_equal(
+                np.asarray(short_result.image), np.asarray(long_result.image)
+            )
+        )
+        for result in (short_result, long_result):
+            gray = np.asarray(result.image.convert("L"), dtype=float)
+            self.assertGreater(
+                np.var(gray.mean(axis=1)), np.var(gray.mean(axis=0))
+            )
+
+    @unittest.skipUnless(DEPS_AVAILABLE, "Pillow/numpy unavailable")
+    def test_resequencing_leaves_diagnostics_on_the_supplied_order(self):
+        """Boundary and expansion diagnostics describe the caller's own corners.
+
+        The warp may rotate its copy of the corners by one step, but the
+        evidence recorded beside the proposal must still be measured on the
+        supplied quad and on the quad expanded from it, in that same order.
+        """
+        canvas, base = render_rotated(make_bordered_card(), 4)
+        supplied = base[1:] + base[:1]  # forces a warp re-sequence
+        expected_support = assess_edge_support(canvas, supplied)
+        expanded, expansion_px, clamped = expand_quad_outward(
+            supplied,
+            expected_support,
+            bounds=(float(canvas.width), float(canvas.height)),
+        )
+        result = try_straighten(canvas, supplied)
+        self.assertIsInstance(result, Straightened)
+        self.assertGreater(result.height, result.width)  # the warp re-sequenced
+        self.assertEqual(result.support.sides, expected_support.sides)
+        self.assertEqual(result.support.side_verdicts, expected_support.side_verdicts)
+        self.assertEqual(result.support.side_samples, expected_support.side_samples)
+        self.assertEqual(
+            result.expansion,
+            expansion_diagnostics(expanded, expansion_px, clamped),
+        )
 
     @unittest.skipUnless(DEPS_AVAILABLE, "Pillow/numpy unavailable")
     def test_never_upscales_beyond_card(self):

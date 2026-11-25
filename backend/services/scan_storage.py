@@ -371,7 +371,8 @@ def derive_straight_image(
     A proposal is withheld only when the transform is technically unusable:
     invalid or self-crossing geometry, a degenerate or unstable transform,
     insufficient source pixels, or a failed decode. Boundary diagnostics live
-    under ``diagnostics.boundary`` and cannot approve or withhold anything.
+    under ``diagnostics.boundary`` and the outward crop growth under
+    ``diagnostics.expansion``; neither can approve or withhold anything.
 
     A manifest is written for **every** attempt, including a disabled pipeline
     or unusable geometry, so a stale ``proposed`` cannot outlive a later run.
@@ -437,7 +438,7 @@ def derive_straight_image(
             "rotationCw": rotation,
         },
         "description": None,
-        "diagnostics": {"boundary": None},
+        "diagnostics": {"boundary": None, "expansion": None},
         "turnedCw": 0,
         "outputWidth": None,
         "outputHeight": None,
@@ -483,6 +484,12 @@ def derive_straight_image(
                             exc_info=True,
                         )
                 if isinstance(result, helper.Straightened):
+                    # The outward expansion is developer diagnostics beside the
+                    # claim's own numbers; it explains the crop's geometry and
+                    # has no authority over state either.
+                    expansion = getattr(result, "expansion", None)
+                    if isinstance(expansion, dict):
+                        manifest["diagnostics"]["expansion"] = expansion
                     output = io.BytesIO()
                     result.image.save(
                         output,

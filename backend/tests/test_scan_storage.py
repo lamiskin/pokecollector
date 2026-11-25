@@ -569,7 +569,7 @@ class ScanJobStorageTests(unittest.IsolatedAsyncioTestCase):
                 (payload["outputWidth"], payload["outputHeight"]), output.size
             )
 
-    async def test_shadow_landscape_capture_manifests_the_quarter_turn(self):
+    async def test_shadow_landscape_capture_proposes_portrait_without_turning(self):
         size = (600, 420)
         rect = (20, 20, 579, 399)
         with patch.dict(os.environ, {"SCAN_STRAIGHTEN": "shadow"}):
@@ -587,7 +587,9 @@ class ScanJobStorageTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(payload["state"], "proposed", payload)
         self.assertEqual(payload["description"], "Unverified crop")
-        self.assertEqual(payload["turnedCw"], 90)
+        # The warp re-sequences the corners so the card's long pair is vertical,
+        # so the destination is portrait before anything is turned.
+        self.assertEqual(payload["turnedCw"], 0)
         self.assertGreater(payload["outputHeight"], payload["outputWidth"])
 
     async def test_shadow_shaved_diagnostics_never_withhold_the_proposal(self):
