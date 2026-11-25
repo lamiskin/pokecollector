@@ -12,6 +12,12 @@
 // unfiltered. That is the whole point of it over a fixed low-pass, which would
 // have to choose between visible lag and visible jitter.
 //
+// A discontinuity - the card re-anchored, was swapped, or the model re-locked
+// somewhere else - is not filtered; the outline travels to the new quad over a
+// short eased glide instead of teleporting. The first quad of a session (and
+// the first after the tracker drops the card) still appears where it is, so
+// nothing ever sweeps across the preview on acquisition.
+//
 // It is a *rendering* filter only. The raw quad keeps going to capture, hold
 // decisions, corroboration and diagnostics; nothing here may feed a decision.
 //
@@ -30,7 +36,7 @@ export const QUAD_BETA = 22
 export const QUAD_DERIVATIVE_CUTOFF_HZ = 3.0
 // A corner that moves further than this share of the card's own diagonal in a
 // single sample is not the same card moving: it re-anchored, was swapped, or
-// the model re-locked somewhere else. Snap instead of dragging the old position.
+// the model re-locked somewhere else.
 export const QUAD_JUMP_FRACTION = 0.3
 // Likewise for a sudden change of card size: a different card, or the same one
 // at a different distance after a re-lock.
@@ -39,6 +45,10 @@ export const QUAD_AREA_JUMP_RATIO = 1.6
 // update at all: this is the tracker's noise floor, and repainting it is what the
 // eye reads as "skittish". 0.012 is about 12 px on a 1080 px frame.
 export const QUAD_STILL_FRACTION = 0.012
+// How long a discontinuity takes to travel to the new quad. Long enough to read
+// as movement rather than a cut, short enough that the outline is back on the
+// card before the eye has finished following it.
+export const QUAD_GLIDE_MS = 160
 
 // Sampling gaps outside this range are either a clock hiccup or an idle pause;
 // clamping keeps alpha meaningful without a special case for either.
@@ -58,6 +68,12 @@ function distance(ax, ay, bx, by) {
   const dx = ax - bx
   const dy = ay - by
   return Math.sqrt(dx * dx + dy * dy)
+}
+
+// Fast start, gentle landing: the outline covers most of the gap early and
+// settles onto the new quad without a kick at the end.
+function easeOutCubic(t) {
+  return 1 - (1 - t) ** 3
 }
 
 function areaOfFlat(flat) {
@@ -82,23 +98,31 @@ function areaOf(quad) {
 }
 
 /**
- * @param {object} [options] Overrides for the four constants above, for tuning
- *   without touching the defaults the overlay ships with.
+ * @param {object} [options] Overrides for the constants above, for tuning
+ *   without touching the defaults the overlay ships with. `glideMs: 0` turns
+ *   the discontinuity glide off, so a re-lock snaps; the overlay uses that for
+ *   `prefers-reduced-motion`.
  * @returns {{
- *   sample: (quad: number[][], dtMs?: number) => number[][],
+ *   sample: (quad: number[][], dtMs?: number, nowMs?: number) => number[][],
+ *   tick: (nowMs?: number) => number[][],
  *   reset: () => void,
+ *   setGlideMs: (ms: number) => void,
  *   corners: number[][],
  *   readonly ready: boolean,
+ *   readonly gliding: boolean,
  * }}
  */
-export function createQuadSmoother({
-  minCutoff = QUAD_MIN_CUTOFF_HZ,
-  beta = QUAD_BETA,
-  derivativeCutoff = QUAD_DERIVATIVE_CUTOFF_HZ,
-  jumpFraction = QUAD_JUMP_FRACTION,
-  areaJumpRatio = QUAD_AREA_JUMP_RATIO,
-  stillFraction = QUAD_STILL_FRACTION,
-} = {}) {
+export function createQuadSmoother(options = {}) {
+  const {
+    minCutoff = QUAD_MIN_CUTOFF_HZ,
+    beta = QUAD_BETA,
+    derivativeCutoff = QUAD_DERIVATIVE_CUTOFF_HZ,
+    jumpFraction = QUAD_JUMP_FRACTION,
+    areaJumpRatio = QUAD_AREA_JUMP_RATIO,
+    stillFraction = QUAD_STILL_FRACTION,
+  } = options
+  let glideMs = Number.isFinite(options.glideMs) ? Math.max(0, options.glideMs) : QUAD_GLIDE_MS
+
   // [x0, y0, x1, y1, x2, y2, x3, y3]
   const last = new Float64Array(8) // newest raw sample
   const value = new Float64Array(8) // filtered position, what gets drawn
@@ -108,6 +132,16 @@ export function createQuadSmoother({
   const corners = [[0, 0], [0, 0], [0, 0], [0, 0]]
   let ready = false
 
+  // The glide: `from` is whatever the outline was drawing when the jump was
+  // seen, `to` is the new raw quad. It owns `value` until it lands.
+  const glideFrom = new Float64Array(8)
+  const glideTo = new Float64Array(8)
+  let glideStart = 0
+  let gliding = false
+  // A caller that passes no timestamp still needs a monotonic clock for the
+  // glide, so the sample intervals stand in for one.
+  let clock = 0
+
   const publish = () => {
     for (let i = 0; i < 4; i += 1) {
       corners[i][0] = value[i * 2]
@@ -116,9 +150,47 @@ export function createQuadSmoother({
     return corners
   }
 
-  // First sample, or one that cannot be a continuation: start from it directly
-  // so a discontinuity never animates across the screen.
+  // Land exactly on the destination rather than one eased step short of it.
+  const land = () => {
+    for (let i = 0; i < 8; i += 1) value[i] = glideTo[i]
+    gliding = false
+    return publish()
+  }
+
+  const advanceGlide = now => {
+    if (!gliding) return corners
+    // Reduced motion switched on mid-flight: stop where the card is.
+    if (!(glideMs > 0)) return land()
+    const ratio = (now - glideStart) / glideMs
+    if (!(ratio < 1)) return land()
+    const eased = easeOutCubic(ratio < 0 ? 0 : ratio)
+    for (let i = 0; i < 8; i += 1) {
+      value[i] = glideFrom[i] + (glideTo[i] - glideFrom[i]) * eased
+    }
+    return publish()
+  }
+
+  // Start a glide from the outline's current position. Any glide already in
+  // flight is simply abandoned there: no queue, and no overshoot past either
+  // end.
+  const startGlide = (quad, now) => {
+    for (let i = 0; i < 8; i += 1) {
+      glideFrom[i] = value[i]
+      const next = quad[i >> 1][i & 1]
+      glideTo[i] = next
+      last[i] = next
+      speed[i] = 0
+    }
+    glideStart = now
+    gliding = true
+    ready = true
+    return advanceGlide(now)
+  }
+
+  // No previous position to travel from (first sample, or the first one after
+  // the card was dropped): show it where it is.
   const seed = quad => {
+    gliding = false
     for (let i = 0; i < 8; i += 1) {
       const next = quad[i >> 1][i & 1]
       last[i] = next
@@ -131,17 +203,28 @@ export function createQuadSmoother({
 
   const reset = () => {
     ready = false
+    gliding = false
   }
 
-  const sample = (quad, dtMs) => {
+  const sample = (quad, dtMs, nowMs) => {
     if (!quad || quad.length !== 4) {
-      ready = false
+      reset()
       return corners
+    }
+    const rawDt = Number.isFinite(dtMs) && dtMs > 0 ? dtMs : FALLBACK_DT_MS
+    let now
+    if (Number.isFinite(nowMs)) now = nowMs
+    else {
+      clock += rawDt
+      now = clock
     }
     if (!ready) return seed(quad)
 
-    const raw = Number.isFinite(dtMs) && dtMs > 0 ? dtMs : FALLBACK_DT_MS
-    const dt = Math.min(DT_MAX_S, Math.max(DT_MIN_S, raw / 1000))
+    // Move any glide that is already running to this instant first, so an
+    // interrupted glide restarts from what is actually on screen.
+    advanceGlide(now)
+
+    const dt = Math.min(DT_MAX_S, Math.max(DT_MIN_S, rawDt / 1000))
 
     // Discontinuity guards, before any filtering happens.
     let jump = 0
@@ -157,7 +240,21 @@ export function createQuadSmoother({
     const nextArea = areaOf(quad)
     const areaRatio = previousArea > 0 && nextArea > 0 ? nextArea / previousArea : 1
     if (jump > diagonal * jumpFraction || areaRatio > areaJumpRatio || areaRatio < 1 / areaJumpRatio) {
-      return seed(quad)
+      return glideMs > 0 ? startGlide(quad, now) : seed(quad)
+    }
+
+    // A glide owns the drawn position until it lands. Samples in the meantime
+    // only prime the filter (newest raw sample and its speed) so that filtering
+    // resumes from the right velocity the moment it does.
+    if (gliding) {
+      const alphaSpeed = alphaFor(derivativeCutoff, dt)
+      for (let i = 0; i < 8; i += 1) {
+        const next = quad[i >> 1][i & 1]
+        const observed = (next - last[i]) / dt
+        last[i] = next
+        speed[i] += alphaSpeed * (observed - speed[i])
+      }
+      return corners
     }
 
     const alphaSpeed = alphaFor(derivativeCutoff, dt)
@@ -184,12 +281,34 @@ export function createQuadSmoother({
     return publish()
   }
 
+  // Advance a glide on frames where the tracker produced nothing new. Cheap
+  // enough to call every frame: it is a boolean check when nothing is moving.
+  const tick = nowMs => {
+    if (!gliding) return corners
+    let now
+    if (Number.isFinite(nowMs)) now = nowMs
+    else {
+      clock += FALLBACK_DT_MS
+      now = clock
+    }
+    return advanceGlide(now)
+  }
+
+  const setGlideMs = ms => {
+    glideMs = Number.isFinite(ms) ? Math.max(0, ms) : 0
+  }
+
   return {
     sample,
+    tick,
     reset,
+    setGlideMs,
     corners,
     get ready() {
       return ready
+    },
+    get gliding() {
+      return gliding
     },
   }
 }

@@ -1,5 +1,5 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react'
-import { createQuadSmoother } from '../utils/quadSmoothing'
+import { createQuadSmoother, QUAD_GLIDE_MS } from '../utils/quadSmoothing'
 
 /**
  * Capture overlay for the live view: the corner ring, its hold progress and the
@@ -20,9 +20,15 @@ import { createQuadSmoother } from '../utils/quadSmoothing'
  *
  * Draw-time adjustments live in here and nowhere else: the quad passes through
  * an adaptive low-pass (utils/quadSmoothing) so tracker noise does not shiver
- * on screen, and while a hold is running the video outside the card is blurred
- * behind a mask that is the inverse of the quad. Both are presentation only —
- * the raw quad is what the page captures, corroborates and records.
+ * on screen and a re-locked card glides instead of teleporting, and the rest of
+ * the picture is blurred behind a mask that is the inverse of the quad once the
+ * detector has settled on the card. Both are presentation only — the raw quad
+ * is what the page captures, corroborates and records.
+ *
+ * The confirmation pulse from the page is a confidence signal, not a state: it
+ * feeds one eased `lockStrength` that the ring's appearance follows, so the
+ * outline settles onto the card and stays settled instead of alternating
+ * between the solid and dashed styles at the detection rate.
  */
 
 // Mirrors frontend/tailwind.config.js so the ring paints with the app palette.
@@ -33,17 +39,23 @@ const TRACK = '#a0a0b8'
 const TICK_MS = 200
 const CONFIRM_MS = 380
 const DRAIN_MS = 220
+// How long the ring takes to settle onto a confirmed card, and to relax off it
+// again. Rising is quicker than relaxing so a detection reads as a decision and
+// a missed confirmation reads as a release, not a snap.
+const LOCK_RISE_MS = 180
+const LOCK_RELAX_MS = 400
 // The ring is pushed this far outside the detected edge so it never paints over
 // the card's own artwork or text, which the user is still judging.
 const OUTSET = 3.4
 const MIN_CARD_AREA = 0.12
 
-// While the hold is running the video outside the card is blurred instead of
-// merely darkened, so the card is the only thing in focus. The layer is a
-// backdrop filter over the video, masked and clipped by the inverse of the quad.
+// Once the detector has settled on the card the picture outside it is blurred
+// instead of merely darkened, so the card is the only thing in focus; the blur
+// means "I have your card" and holds for as long as that is true. The layer is
+// a backdrop filter over the video, masked and clipped by the inverse of the quad.
 const BLUR_PX = 7
 // Long enough to read as a deliberate change of focus, short enough that it has
-// settled before the progress line has gone far.
+// landed by the time the ring has finished settling.
 const BLUR_FADE_IN_MS = 170
 const BLUR_FADE_OUT_MS = 130
 // Kept sharp outside the detected edge so the card's own border is not eaten by
@@ -72,7 +84,6 @@ function supportsBlurHole() {
 const COPY = {
   none: 'Point the camera at a card',
   tracking: 'Hold the card steady',
-  locked: 'Hold steady',
   holding: 'Hold steady',
   lost: 'Hold the card steady',
   tooSmall: 'Move closer',
@@ -83,14 +94,13 @@ const COPY = {
 const TONE = {
   none: { color: '#a0a0b8', border: 'rgba(255,255,255,.10)', bg: 'rgba(9,9,16,.74)', opacity: 0.42 },
   tracking: { color: '#a0a0b8', border: 'rgba(255,255,255,.10)', bg: 'rgba(9,9,16,.74)', opacity: 1 },
-  locked: { color: '#ffffff', border: 'rgba(245,200,66,.35)', bg: 'rgba(9,9,16,.74)', opacity: 1 },
   holding: { color: GOLD, border: 'rgba(245,200,66,.35)', bg: 'rgba(18,14,6,.82)', opacity: 1 },
   lost: { color: '#a0a0b8', border: 'rgba(255,255,255,.10)', bg: 'rgba(9,9,16,.74)', opacity: 1 },
   tooSmall: { color: GOLD, border: 'rgba(245,200,66,.22)', bg: 'rgba(9,9,16,.74)', opacity: 1 },
   captured: { color: GREEN, border: 'rgba(34,197,94,.45)', bg: 'rgba(5,20,10,.82)', opacity: 1 },
 }
 
-const SHOW_BAR = { locked: true, holding: true, lost: true }
+const SHOW_BAR = { holding: true, lost: true }
 
 const ANNOUNCE = {
   locked: 'Card detected. Hold steady.',
@@ -211,6 +221,14 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
     beatStart: 0,
     drainFrom: 0,
     drainStart: 0,
+    // 0 = dashed and following, 1 = settled on the card, in between = moving
+    // between the two. This is the only thing that decides the ring's style.
+    lock: 0,
+    lockFrom: 0,
+    lockTo: 0,
+    lockStart: 0,
+    // The blur latches on a confirmation and stays while the card is followed.
+    blurWanted: false,
     blur: 0,
     blurShown: -1,
   })
@@ -223,6 +241,9 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
     const sync = event => {
       reducedRef.current = event.matches
       setReducedMotion(event.matches)
+      // The quad still smooths, it just stops gliding: a re-lock lands where
+      // the new geometry is.
+      smootherRef.current?.setGlideMs(event.matches ? 0 : QUAD_GLIDE_MS)
     }
     reducedRef.current = media.matches
     setReducedMotion(media.matches)
@@ -343,6 +364,10 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
   useEffect(() => {
     let frame = 0
     let lastUiStep = -1
+    // The blur layer is a fresh node whenever soft focus is switched back on,
+    // and its mask is an inline style: a cached "hole has not moved" answer
+    // would leave the new node unmasked and blur the card too.
+    blurMaskRef.current = { corners: null, width: 0, height: 0 }
 
     // The sharp island is the quad plus a margin, punched out of everything
     // else. One inverse path serves both the mask and the clip path.
@@ -402,9 +427,14 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
         smootherRef.current?.reset()
         paintedStampRef.current = -1
         lastArrivalRef.current = 0
-        if (anim.blur !== 0 || anim.blurShown !== 0) {
+        // A card that comes back must not come back already settled.
+        anim.lock = 0
+        anim.lockFrom = 0
+        anim.lockTo = 0
+        anim.blurWanted = false
+        anim.blurShown = -1
+        if (anim.blur !== 0) {
           anim.blur = 0
-          anim.blurShown = 0
           if (blurRef.current) {
             blurRef.current.style.opacity = '0'
             blurRef.current.style.display = 'none'
@@ -430,16 +460,18 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
       // Displayed geometry only: the raw quad in quadRef is never rewritten, so
       // capture, the hold rule and diagnostics keep reading it. A new sample is
       // filtered once, when it arrives; frames in between reuse the value the
-      // smoother already holds.
-      const smoother = smootherRef.current || (smootherRef.current = createQuadSmoother())
+      // smoother already holds - or, while a re-lock glides, advance the glide.
+      const smoother = smootherRef.current || (smootherRef.current = createQuadSmoother({
+        glideMs: reduced ? 0 : QUAD_GLIDE_MS,
+      }))
       let points
       if (paintedStampRef.current !== quadStampRef.current) {
         const gap = lastArrivalRef.current ? quadArrivalRef.current - lastArrivalRef.current : 0
         lastArrivalRef.current = quadArrivalRef.current
         paintedStampRef.current = quadStampRef.current
-        points = smoother.sample(raw, gap)
+        points = smoother.sample(raw, gap, now)
       } else {
-        points = smoother.corners
+        points = smoother.tick(now)
       }
 
       // progress clock
@@ -475,11 +507,23 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
       const inverse = `M0 0 H${width} V${height} H0 Z ${cardPath}`
       dimRef.current?.setAttribute('d', inverse)
 
-      // ── blur outside the card while it is being circled ─────────────────
-      // Only while the hold is actually running: a lost card, a card that is
-      // too far away and an idle camera all keep the plain video.
-      if (blurRef.current) {
-        const target = current === 'holding' ? 1 : 0
+      // ── blur outside the card: "I have your card" ───────────────────────
+      // A confirmation latches the blur on and it stays for as long as the card
+      // is still being followed - not just for the 800 ms hold, which is far
+      // too short to read. Losing the card, capturing it, finding it too small
+      // or having nothing at all releases it.
+      if (current === 'locked' || current === 'holding') {
+        anim.blurWanted = true
+      } else if (current === 'lost' || current === 'captured' || current === 'tooSmall' || current === 'none') {
+        anim.blurWanted = false
+      }
+      if (!blurRef.current) {
+        // Soft focus is off, so nothing is composited: restart the fade from
+        // zero if it is switched back on.
+        anim.blur = 0
+        anim.blurShown = -1
+      } else {
+        const target = softFocus && anim.blurWanted ? 1 : 0
         if (reduced) {
           anim.blur = target
         } else if (anim.blur !== target) {
@@ -504,22 +548,57 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
       glowRef.current?.setAttribute('stroke-dasharray', `${total} ${total}`)
       glowRef.current?.setAttribute('stroke-dashoffset', String(total * (1 - shown)))
 
-      // the resting ring starts confident and yields to the bright trace
-      let baseOpacity = 0
-      if (current === 'locked' || current === 'holding' || current === 'lost') {
-        baseOpacity = 0.6 - 0.3 * shown
-      } else if (current === 'captured') {
-        baseOpacity = 0.22
+      // ── lock strength: the ring settling, never a style swap ────────────
+      // The confirmation pulse lasts 300 ms and repeats at the detection rate,
+      // so following it with a solid/dashed swap reads as the outline flickering
+      // back and forth. One eased 0..1 value carries it instead: the solid ring
+      // fades up and the dashed one fades out as it rises, and back as it
+      // relaxes. A reversal restarts from the current value, so there is never a
+      // jump, a queue or an overshoot.
+      const settledRing = current === 'locked' || current === 'holding' || current === 'captured'
+      const lockTarget = settledRing ? 1 : 0
+      if (reduced) {
+        anim.lock = lockTarget
+        anim.lockTo = lockTarget
+      } else {
+        if (anim.lockTo !== lockTarget) {
+          anim.lockFrom = anim.lock
+          anim.lockTo = lockTarget
+          anim.lockStart = now
+        }
+        if (anim.lock !== anim.lockTo) {
+          const span = anim.lockTo > anim.lockFrom ? LOCK_RISE_MS : LOCK_RELAX_MS
+          const ratio = clamp01((now - anim.lockStart) / span)
+          // Land exactly on the target so the tween actually finishes.
+          anim.lock = ratio >= 1
+            ? anim.lockTo
+            : anim.lockFrom + (anim.lockTo - anim.lockFrom) * easeOutCubic(ratio)
+        }
       }
+      const lock = anim.lock
+
+      // the resting ring starts confident and yields to the bright trace
+      const baseOpacity = (current === 'captured' ? 0.22 : 0.6 - 0.3 * shown) * lock
       baseRef.current?.setAttribute('opacity', baseOpacity.toFixed(2))
       // the dark backing only exists to separate a coloured ring from a light card
-      underRef.current?.setAttribute('opacity', baseOpacity > 0 ? '0.9' : '0')
+      underRef.current?.setAttribute('opacity', (0.9 * lock).toFixed(2))
 
-      trackRef.current?.setAttribute('opacity', current === 'tracking' ? '0.78'
-        : current === 'lost' ? '0.5'
-          : current === 'tooSmall' ? '0.55'
-            : '0')
-      trackRef.current?.setAttribute('stroke', current === 'tracking' ? TRACK : GOLD)
+      // The dashed outline is the resting state: it is there while a card is
+      // followed and yields to the solid ring as `lock` rises, so `locked` is a
+      // blend of the two rather than a third style.
+      let dashedBase = 0
+      let dashedStroke = TRACK
+      if (current === 'tracking' || settledRing) {
+        dashedBase = 0.78
+      } else if (current === 'lost') {
+        dashedBase = 0.5
+        dashedStroke = GOLD
+      } else if (current === 'tooSmall') {
+        dashedBase = 0.55
+        dashedStroke = GOLD
+      }
+      trackRef.current?.setAttribute('opacity', (dashedBase * (1 - lock)).toFixed(2))
+      trackRef.current?.setAttribute('stroke', dashedStroke)
 
       const traceOn = current === 'locked' || current === 'holding' || current === 'lost' || current === 'captured'
       progRef.current?.setAttribute('opacity', traceOn ? '1' : '0')
@@ -643,14 +722,20 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
     return () => observer.disconnect()
   }, [])
 
-  const tone = TONE[visual] || TONE.tracking
-  const showBar = Boolean(SHOW_BAR[visual])
+  // The confirmation pulse is confidence, not a state: the pill keeps the
+  // resting "card followed" presentation instead of changing its wording and
+  // its progress track at the detection rate. The ring is what shows the
+  // confirmation, continuously.
+  const chromeVisual = visual === 'locked' ? 'tracking' : visual
+  const tone = TONE[chromeVisual] || TONE.tracking
+  const showBar = Boolean(SHOW_BAR[chromeVisual])
 
   return (
     <div className="pointer-events-none absolute inset-0 select-none">
       {/* Blurs everything behind the overlay's own chrome but inside the clip,
-          which is the inverse of the card quad: the card stays sharp. Off (and
-          not composited) unless the hold is running. */}
+          which is the inverse of the card quad: the card stays sharp. It is
+          composited only once a card has been confirmed, and it stays while
+          that card is still followed. Soft focus off means it never mounts. */}
       {blurSupported && softFocus ? (
         <div
           ref={blurRef}
@@ -788,7 +873,7 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
             opacity: tone.opacity,
           }}
         >
-          {visual === 'captured' ? (
+          {chromeVisual === 'captured' ? (
             <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
               <path
                 d="M2 6.4 4.6 9 10 3.2"
@@ -798,7 +883,7 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
                 strokeLinejoin="round"
               />
             </svg>
-          ) : visual === 'tooSmall' ? (
+          ) : chromeVisual === 'tooSmall' ? (
             <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
               <path
                 d="M6 1.6v8.8M1.6 6h8.8M4.3 3.3 6 1.6l1.7 1.7M4.3 8.7 6 10.4l1.7-1.7M3.3 4.3 1.6 6l1.7 1.7M8.7 4.3 10.4 6 8.7 7.7"
@@ -808,17 +893,17 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
                 strokeLinejoin="round"
               />
             </svg>
-          ) : visual === 'none' ? null : (
+          ) : chromeVisual === 'none' ? null : (
             <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-current opacity-90" />
           )}
 
-          <span>{COPY[visual]}</span>
+          <span>{COPY[chromeVisual]}</span>
 
           <span
             className="relative h-[3px] shrink-0 overflow-hidden rounded-[2px] bg-white/15"
             style={{
               width: showBar ? 74 : 0,
-              opacity: showBar ? (visual === 'lost' ? 0.7 : 1) : 0,
+              opacity: showBar ? (chromeVisual === 'lost' ? 0.7 : 1) : 0,
               transition: reducedMotion ? 'none' : 'width .2s ease, opacity .16s ease',
             }}
           >
