@@ -4,9 +4,15 @@
 // The rail, the sheet and the camera loop consume exactly these helpers, so a
 // failure here is a rotation or payload bug even when the UI looks plausible.
 import {
+  CAPTURE_GEOMETRY_SPACE,
+  CAPTURE_GEOMETRY_VERSION,
   TRAY_CAPACITY,
+  buildCaptureGeometry,
   buildTraySubmission,
   containedRotatedBox,
+  cropQuadFromFrame,
+  frameQuadFromCrop,
+  geometryPayload,
   isQuarterTurn,
   isRailAtEnd,
   latestUnsentItem,
@@ -146,6 +152,113 @@ const equal = (name, actual, expected) => {
   equal('unknown dimensions have no geometry', containedRotatedBox({
     width: 0, height: 0, rotationCW: 90, maxWidth: 360, maxHeight: 400,
   }), null)
+}
+
+// ── Capture geometry provenance ────────────────────────────────────────────
+// The crop-relative quad must survive the frozen submission in file order, and
+// the payload rule must stay exactly as conservative as rotations: null entries
+// align, and an all-null batch sends no field at all.
+{
+  const trackedRect = { x: 150, y: 250, width: 600, height: 700 }
+  const trackedQuad = [
+    [200.4, 300.7],
+    [700.2, 310.1],
+    [690.9, 900.3],
+    [210.6, 890.8],
+  ]
+  const trackedGeometry = buildCaptureGeometry({
+    quad: trackedQuad,
+    cropRect: trackedRect,
+    encodedWidth: 600,
+    encodedHeight: 700,
+    source: 'same-frame-track',
+    modelScore: 0.061,
+    modelAgeMs: 12,
+    agreement: 0.02,
+    pendingReanchor: false,
+    frameEdgeMargin: 0.18,
+    quadAspect: 0.716,
+    paddingClipped: false,
+  })
+
+  check('geometry records its version and space',
+    trackedGeometry.v === CAPTURE_GEOMETRY_VERSION
+    && trackedGeometry.space === CAPTURE_GEOMETRY_SPACE)
+  check('geometry is immutable once captured',
+    Object.isFrozen(trackedGeometry) && Object.isFrozen(trackedGeometry.quad))
+  equal('geometry keeps the encoded dimensions', [trackedGeometry.width, trackedGeometry.height], [600, 700])
+  equal('geometry keeps the capture decision evidence', {
+    source: trackedGeometry.source,
+    modelScore: trackedGeometry.modelScore,
+    modelAgeMs: trackedGeometry.modelAgeMs,
+    agreement: trackedGeometry.agreement,
+    pendingReanchor: trackedGeometry.pendingReanchor,
+    frameEdgeMargin: trackedGeometry.frameEdgeMargin,
+    quadAspect: trackedGeometry.quadAspect,
+    paddingClipped: trackedGeometry.paddingClipped,
+  }, {
+    source: 'same-frame-track',
+    modelScore: 0.061,
+    modelAgeMs: 12,
+    agreement: 0.02,
+    pendingReanchor: false,
+    frameEdgeMargin: 0.18,
+    quadAspect: 0.716,
+    paddingClipped: false,
+  })
+  check('the crop quad stays in 0..1', trackedGeometry.quad.every(
+    ([u, v]) => u >= 0 && u <= 1 && v >= 0 && v <= 1,
+  ))
+
+  // The crop rect is integer and clamped to the frame exactly as acquireVideoFrame
+  // returns it, including an edge-clamped box.
+  const clampedRect = { x: 0, y: 0, width: 502, height: 705 }
+  const clampedQuad = [[2, 3], [500, 5], [498, 700], [4, 690]]
+  const clampedCrop = cropQuadFromFrame(clampedQuad, clampedRect)
+  check('a frame-clamped rect still yields crop coords in 0..1', clampedCrop.every(
+    ([u, v]) => u >= 0 && u <= 1 && v >= 0 && v <= 1,
+  ))
+
+  // Mapping the crop quad back into frame pixels must reproduce the exact quad
+  // the capture used (within 1e-6), for both an interior and an edge-clamped rect.
+  const roundTrip = (quad, rect) => {
+    const crop = cropQuadFromFrame(quad, rect)
+    const back = frameQuadFromCrop(crop, rect)
+    return back.every(([x, y], index) => (
+      Math.abs(x - quad[index][0]) <= 1e-6 && Math.abs(y - quad[index][1]) <= 1e-6
+    ))
+  }
+  check('crop-relative mapping round-trips an interior quad', roundTrip(trackedQuad, trackedRect))
+  check('crop-relative mapping round-trips an edge-clamped quad', roundTrip(clampedQuad, clampedRect))
+
+  const submission = buildTraySubmission([
+    { id: 'c', sequence: 3, rotationCW: 90, geometry: null, file: { name: 'c.jpg' } },
+    { id: 'a', sequence: 1, rotationCW: null, geometry: trackedGeometry, file: { name: 'a.jpg' } },
+    { id: 'b', sequence: 2, rotationCW: 0, geometry: null, file: { name: 'b.jpg' } },
+  ])
+  equal('geometry survives in the frozen file order', submission.geometries, [trackedGeometry, null, null])
+  equal('geometries align with files', submission.geometries.length, submission.files.length)
+  check('a null-geometry item keeps its null slot', submission.geometries[2] === null)
+  check('the submission flags geometry only when one exists', submission.hasGeometry === true)
+
+  const noGeometry = buildTraySubmission([
+    { id: 'b', sequence: 2, geometry: null, file: { name: 'b.jpg' } },
+    { id: 'a', sequence: 1, file: { name: 'a.jpg' } },
+  ])
+  equal('an unset or null geometry stages as null', noGeometry.geometries, [null, null])
+  check('a batch with no frozen crop reports no geometry', noGeometry.hasGeometry === false)
+}
+
+// ── Capture geometry multipart field rules ────────────────
+{
+  const entry = { v: 1, space: 'crop-normalized', width: 10, height: 10, quad: [[0, 0], [1, 0], [1, 1], [0, 1]] }
+  equal('an all-null batch omits the field', geometryPayload([null, null]), null)
+  equal('undefined omits the field', geometryPayload([undefined]), null)
+  equal('a non-array omits the field', geometryPayload(entry), null)
+  equal('length mismatch omits the field', geometryPayload([entry], 2), null)
+  equal('a single entry still sends its array', geometryPayload([entry], 1), [entry])
+  equal('null slots align with their files', geometryPayload([null, entry], 2), [null, entry])
+  equal('JSON shape is a plain aligned array', JSON.stringify(geometryPayload([null, entry], 2)).startsWith('[null,{'), true)
 }
 
 if (failures) {

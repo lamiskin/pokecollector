@@ -1,5 +1,6 @@
 import datetime
 import io
+import json
 import os
 import tempfile
 import unittest
@@ -56,6 +57,27 @@ def _marker_image_bytes(size=(90, 130)):
 
 def _decoded(data):
     return Image.open(io.BytesIO(data)).convert("RGB")
+
+
+def _geometry(**overrides):
+    """A client geometry object matching the capture contract."""
+    geometry = {
+        "v": 1,
+        "space": "crop-normalized",
+        "width": 800,
+        "height": 1100,
+        "quad": [[0.1, 0.05], [0.9, 0.06], [0.92, 0.95], [0.08, 0.94]],
+        "source": "same-frame-model",
+        "modelScore": 0.061,
+        "modelAgeMs": 12,
+        "agreement": 0.02,
+        "pendingReanchor": False,
+        "frameEdgeMargin": 0.18,
+        "quadAspect": 0.716,
+        "paddingClipped": False,
+    }
+    geometry.update(overrides)
+    return geometry
 
 
 def _is_red(pixel):
@@ -203,6 +225,117 @@ class ScanJobStorageTests(unittest.IsolatedAsyncioTestCase):
                 self.user.id,
                 [_upload(_image_bytes(size=(8, 8)))],
                 rotations=[90, 180],
+            )
+        self.assertEqual(list(scan_storage.scan_upload_root().iterdir()), [])
+
+    async def test_job_writes_the_client_geometry_beside_the_stored_image(self):
+        job = await create_scan_job(
+            self.db,
+            self.user.id,
+            [_upload(_image_bytes())],
+            capture_geometry=[_geometry()],
+        )
+        item = self.db.query(ScanJobItem).filter(ScanJobItem.job_id == job.id).one()
+        image_path = scan_storage.resolve_scan_path(item.image_path)
+        sidecar = scan_storage.geometry_sidecar_path(image_path)
+
+        self.assertEqual(sidecar.name, f"{image_path.stem}.geometry.json")
+        self.assertEqual(sidecar.parent, image_path.parent)
+        self.assertTrue(sidecar.is_file())
+        self.assertEqual(sidecar.stat().st_mode & 0o777, 0o600)
+        payload = json.loads(sidecar.read_text())
+        with Image.open(image_path) as stored:
+            expected_size = stored.size
+        self.assertEqual(
+            payload,
+            {
+                **_geometry(),
+                "storedWidth": expected_size[0],
+                "storedHeight": expected_size[1],
+                "storedRotationCw": 0,
+            },
+        )
+
+    async def test_geometry_sidecar_records_stored_dimensions_after_rotation(self):
+        job = await create_scan_job(
+            self.db,
+            self.user.id,
+            [_upload(_image_bytes())],
+            rotations=[90],
+            capture_geometry=[_geometry()],
+        )
+        item = self.db.query(ScanJobItem).filter(ScanJobItem.job_id == job.id).one()
+        image_path = scan_storage.resolve_scan_path(item.image_path)
+        payload = json.loads(scan_storage.geometry_sidecar_path(image_path).read_text())
+
+        with Image.open(image_path) as stored:
+            self.assertEqual((payload["storedWidth"], payload["storedHeight"]), stored.size)
+        # The encoded upload's own dimensions are untouched by the rotation
+        # baked into the stored pixels.
+        self.assertEqual((payload["width"], payload["height"]), (800, 1100))
+        self.assertEqual(payload["storedRotationCw"], 90)
+
+    async def test_absent_or_abstained_geometry_writes_no_sidecar(self):
+        for geometry in (None, [None]):
+            with self.subTest(geometry=geometry):
+                kwargs = {} if geometry is None else {"capture_geometry": geometry}
+                job = await create_scan_job(
+                    self.db, self.user.id, [_upload(_image_bytes())], **kwargs
+                )
+                item = self.db.query(ScanJobItem).filter(ScanJobItem.job_id == job.id).one()
+                image_path = scan_storage.resolve_scan_path(item.image_path)
+                self.assertEqual(
+                    list(image_path.parent.glob(f"*{scan_storage.GEOMETRY_SIDECAR_SUFFIX}")),
+                    [],
+                )
+
+    async def test_sidecar_failure_never_fails_the_scan(self):
+        class _FailingJson:
+            @staticmethod
+            def dump(*_args, **_kwargs):
+                raise OSError("disk full")
+
+        with patch.object(scan_storage, "json", _FailingJson()), self.assertLogs(
+            "services.scan_storage", level="WARNING"
+        ) as logs:
+            job = await create_scan_job(
+                self.db,
+                self.user.id,
+                [_upload(_image_bytes())],
+                capture_geometry=[_geometry()],
+            )
+
+        item = self.db.query(ScanJobItem).filter(ScanJobItem.job_id == job.id).one()
+        image_path = scan_storage.resolve_scan_path(item.image_path)
+        self.assertTrue(image_path.is_file())
+        self.assertFalse(scan_storage.geometry_sidecar_path(image_path).exists())
+        self.assertIn("scan geometry sidecar not written", "\n".join(logs.output))
+
+    async def test_deleting_the_image_removes_its_geometry_sidecar(self):
+        job = await create_scan_job(
+            self.db,
+            self.user.id,
+            [_upload(_image_bytes())],
+            capture_geometry=[_geometry()],
+        )
+        item = self.db.query(ScanJobItem).filter(ScanJobItem.job_id == job.id).one()
+        image_path = scan_storage.resolve_scan_path(item.image_path)
+        sidecar = scan_storage.geometry_sidecar_path(image_path)
+        self.assertTrue(sidecar.is_file())
+
+        scan_storage.delete_scan_image(item.image_path)
+
+        self.assertFalse(image_path.exists())
+        self.assertFalse(sidecar.exists())
+        self.assertFalse(image_path.parent.exists())
+
+    async def test_job_rejects_geometry_that_does_not_match_the_photos(self):
+        with self.assertRaises(ScanUploadError):
+            await create_scan_job(
+                self.db,
+                self.user.id,
+                [_upload(_image_bytes(size=(8, 8)))],
+                capture_geometry=[_geometry(), None],
             )
         self.assertEqual(list(scan_storage.scan_upload_root().iterdir()), [])
 

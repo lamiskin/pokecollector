@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import datetime
 import json
+import logging
+import math
 from typing import List
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, UploadFile
@@ -46,9 +48,19 @@ from services.scan_storage import (
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 # Card List types that hold exact owned copies and can be fed by a scan.
 ALLOCATABLE_SCAN_BINDER_TYPES = frozenset({"collection", "physical_deck"})
+
+# The client's per-photo crop geometry contract. A version/space mismatch is
+# not something the collector can act on, so that photo simply abstains.
+CAPTURE_GEOMETRY_VERSION = 1
+CAPTURE_GEOMETRY_SPACE = "crop-normalized"
+CAPTURE_GEOMETRY_SOURCES = frozenset({"same-frame-model", "same-frame-track"})
+# Geometry describes the encoded upload, so its dimensions are bounded by what
+# the scanner would accept rather than by the resized stored image.
+MAX_CAPTURE_GEOMETRY_EDGE = 100_000
 
 
 class ResolveScanItemRequest(BaseModel):
@@ -300,12 +312,131 @@ def _requested_rotations(raw: str | None, file_count: int) -> list[int | None]:
     return requested
 
 
+def _is_finite_number(value) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
+
+
+def _capture_geometry_point(raw) -> list[float]:
+    if not isinstance(raw, (list, tuple)) or len(raw) != 2:
+        raise ValueError("quad point is not a [u, v] pair")
+    u, v = raw
+    if not (_is_finite_number(u) and _is_finite_number(v)):
+        raise ValueError("quad point is not finite")
+    if not (0.0 <= u <= 1.0 and 0.0 <= v <= 1.0):
+        raise ValueError("quad point is outside 0..1")
+    return [float(u), float(v)]
+
+
+def _normalise_capture_geometry(raw) -> dict | None:
+    """Validate one client geometry object, raising ValueError when unusable.
+
+    ``None`` stays ``None`` (the client abstained for this photo). Unknown keys
+    are dropped rather than rejected, so a newer client can add metadata
+    without invalidating the geometry this server understands.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("entry is not an object")
+
+    version = raw.get("v")
+    if type(version) is not int or version != CAPTURE_GEOMETRY_VERSION:
+        raise ValueError("unsupported version")
+    if raw.get("space") != CAPTURE_GEOMETRY_SPACE:
+        raise ValueError("unsupported coordinate space")
+    width = raw.get("width")
+    height = raw.get("height")
+    if not (type(width) is int and 0 < width <= MAX_CAPTURE_GEOMETRY_EDGE):
+        raise ValueError("invalid encoded width")
+    if not (type(height) is int and 0 < height <= MAX_CAPTURE_GEOMETRY_EDGE):
+        raise ValueError("invalid encoded height")
+    quad = raw.get("quad")
+    if not isinstance(quad, (list, tuple)) or len(quad) != 4:
+        raise ValueError("quad does not have four points")
+    points = [_capture_geometry_point(point) for point in quad]
+    source = raw.get("source")
+    if source not in CAPTURE_GEOMETRY_SOURCES:
+        raise ValueError("unsupported source")
+
+    normalised = {
+        "v": CAPTURE_GEOMETRY_VERSION,
+        "space": CAPTURE_GEOMETRY_SPACE,
+        "width": width,
+        "height": height,
+        "quad": points,
+        "source": source,
+    }
+    for key in ("modelScore", "agreement", "frameEdgeMargin"):
+        value = raw.get(key)
+        if value is None:
+            continue
+        if not _is_finite_number(value) or value < 0:
+            raise ValueError(f"invalid {key}")
+        normalised[key] = value
+    model_age = raw.get("modelAgeMs")
+    if model_age is not None:
+        if type(model_age) is not int or model_age < 0:
+            raise ValueError("invalid modelAgeMs")
+        normalised["modelAgeMs"] = model_age
+    quad_aspect = raw.get("quadAspect")
+    if quad_aspect is not None:
+        if not _is_finite_number(quad_aspect) or quad_aspect <= 0:
+            raise ValueError("invalid quadAspect")
+        normalised["quadAspect"] = quad_aspect
+    for key in ("pendingReanchor", "paddingClipped"):
+        value = raw.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, bool):
+            raise ValueError(f"invalid {key}")
+        normalised[key] = value
+    return normalised
+
+
+def _requested_capture_geometry(
+    raw: str | None, file_count: int
+) -> list[dict | None] | None:
+    """Parse the client's per-photo crop geometry, aligned with the uploads.
+
+    ``None`` means the field was omitted or blank, so an old client behaves
+    exactly as before (no fingerprint field, no sidecars). A malformed envelope
+    rejects the batch because the client is out of step with the photos; a
+    single unusable entry only abstains for that photo, since geometry is an
+    optimisation and never a reason to fail a scan.
+    """
+    if raw is None or not raw.strip():
+        return None
+    try:
+        supplied = json.loads(raw)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="Invalid capture geometry.")
+    if not isinstance(supplied, list) or len(supplied) != file_count:
+        raise HTTPException(status_code=422, detail="Invalid capture geometry.")
+    normalised: list[dict | None] = []
+    for position, entry in enumerate(supplied):
+        try:
+            normalised.append(_normalise_capture_geometry(entry))
+        except (TypeError, ValueError) as exc:
+            logger.info(
+                "scan capture geometry ignored position=%s reason=%s",
+                position,
+                exc,
+            )
+            normalised.append(None)
+    return normalised
+
+
 @router.post("/recognize/jobs")
 async def enqueue_scan_job(
     background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(...),
     individual_positions: str | None = Form(None),
     rotations: str | None = Form(None),
+    capture_geometry: str | None = Form(None),
     binder_id: str | None = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -323,6 +454,9 @@ async def enqueue_scan_job(
     # Validate every per-photo choice before any upload bytes are read or a job
     # row exists, so a rejected request leaves no trace.
     requested_rotations = _requested_rotations(rotations, len(files))
+    # Geometry is parsed here too: a rejected request must leave no job row,
+    # and a per-photo abstention must not depend on anything read later.
+    requested_geometry = _requested_capture_geometry(capture_geometry, len(files))
     # Validate the optional destination before any upload bytes are read or a
     # job row exists, so a rejected list leaves no trace.
     destination_id: int | None = None
@@ -349,6 +483,10 @@ async def enqueue_scan_job(
         # Old clients send no rotations; leave their fingerprint byte-identical.
         if rotations is not None and rotations.strip():
             fingerprint_fields["rotations"] = requested_rotations
+        # Same rule for geometry: only a supplied field changes the identity of
+        # an old client's request.
+        if capture_geometry is not None and capture_geometry.strip():
+            fingerprint_fields["capture_geometry"] = requested_geometry
         idem = begin_idempotent(
             db, current_user, headers,
             scope=SCOPE_SCAN_ENQUEUE,
@@ -402,6 +540,7 @@ async def enqueue_scan_job(
             files,
             batch_modes=batch_modes,
             rotations=requested_rotations,
+            capture_geometry=requested_geometry,
             binder_id=destination_id,
             before_commit=before_commit,
         )

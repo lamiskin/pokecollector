@@ -1,6 +1,6 @@
 import axios from 'axios'
 import { prepareImageForUpload, prepareImagesForUpload } from '../utils/photoCompression'
-import { rotationPayload } from '../utils/captureTray'
+import { geometryPayload, rotationPayload } from '../utils/captureTray'
 import { isPublicSharePath } from '../utils/publicRoutes'
 import { prepareUploadPart } from '../utils/memoryBlob'
 import { readPwaFlags } from '../pwa/flags'
@@ -197,7 +197,7 @@ export const enqueueScanJob = async (
   files = [],
   individualPositions = [],
   binderId = null,
-  { onProgress, rotations } = {},
+  { onProgress, rotations, geometries } = {},
 ) => {
   const formData = new FormData()
   const uploads = await prepareImagesForUpload(files, {
@@ -212,6 +212,11 @@ export const enqueueScanJob = async (
   // batch from the existing path sends exactly the same fields as before.
   const rotationValues = rotationPayload(rotations, uploads.length)
   if (rotationValues) formData.append('rotations', JSON.stringify(rotationValues))
+  // Per-file capture geometry, aligned with the same uploads and in the same
+  // frozen order: null (no frozen crop) or a crop-normalized quad with its
+  // evidence. Omitted entirely when every entry is null.
+  const geometryValues = geometryPayload(geometries, uploads.length)
+  if (geometryValues) formData.append('capture_geometry', JSON.stringify(geometryValues))
   // Optional destination card list. Omitted entirely when unset, so a batch
   // that was not given a destination behaves exactly as before.
   if (binderId !== null && binderId !== undefined && binderId !== '') {

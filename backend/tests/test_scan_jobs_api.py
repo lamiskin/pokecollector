@@ -1,5 +1,6 @@
 import io
 import datetime
+import json
 import os
 import tempfile
 import unittest
@@ -47,6 +48,31 @@ def _decoded(data):
     return Image.open(io.BytesIO(data)).convert("RGB")
 
 
+def _geometry(**overrides):
+    """A client geometry object matching the capture contract."""
+    geometry = {
+        "v": 1,
+        "space": "crop-normalized",
+        "width": 80,
+        "height": 112,
+        "quad": [[0.1, 0.05], [0.9, 0.06], [0.92, 0.95], [0.08, 0.94]],
+        "source": "same-frame-model",
+        "modelScore": 0.061,
+        "modelAgeMs": 12,
+        "agreement": 0.02,
+        "pendingReanchor": False,
+        "frameEdgeMargin": 0.18,
+        "quadAspect": 0.716,
+        "paddingClipped": False,
+    }
+    geometry.update(overrides)
+    return geometry
+
+
+def _geometry_field(*entries):
+    return json.dumps(list(entries))
+
+
 @unittest.skipUnless(DEPS_AVAILABLE, "Scanner API dependencies are not installed")
 class ScanJobsApiTests(unittest.TestCase):
     def setUp(self):
@@ -84,7 +110,7 @@ class ScanJobsApiTests(unittest.TestCase):
         self.env.stop()
         self.temp_dir.cleanup()
 
-    def _post_job(self, binder_id=None, data=None, files=None):
+    def _post_job(self, binder_id=None, data=None, files=None, headers=None):
         payload = dict(data or {})
         if binder_id is not None:
             payload["binder_id"] = str(binder_id)
@@ -94,6 +120,7 @@ class ScanJobsApiTests(unittest.TestCase):
                 "/api/cards/recognize/jobs",
                 data=payload or None,
                 files=files or {"files": ("private-name.jpg", _jpeg_bytes(), "image/jpeg")},
+                headers=headers,
             )
 
     def _enqueue(self, binder_id=None):
@@ -299,6 +326,176 @@ class ScanJobsApiTests(unittest.TestCase):
             # Clockwise: the original left (red) half becomes the top half.
             self.assertTrue(result.getpixel((5, 5))[0] > 150)
             self.assertTrue(result.getpixel((5, 85))[2] > 150)
+
+    def test_absent_capture_geometry_leaves_the_stored_photo_alone(self):
+        response = self._post_job()
+        self.assertEqual(response.status_code, 200, response.text)
+        created = response.json()
+        item = self.db.query(ScanJobItem).filter(ScanJobItem.job_id == created["id"]).one()
+        image_path = resolve_scan_path(item.image_path)
+
+        self.assertTrue(image_path.is_file())
+        self.assertEqual(
+            list(image_path.parent.glob("*.geometry.json")),
+            [],
+        )
+
+    def test_capture_geometry_is_stored_as_a_sidecar(self):
+        response = self._post_job(
+            data={"capture_geometry": _geometry_field(_geometry(), None)},
+            files=[
+                ("files", ("first.jpg", _jpeg_bytes(), "image/jpeg")),
+                ("files", ("second.jpg", _jpeg_bytes(), "image/jpeg")),
+            ],
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        created = response.json()
+        items = (
+            self.db.query(ScanJobItem)
+            .filter(ScanJobItem.job_id == created["id"])
+            .order_by(ScanJobItem.position)
+            .all()
+        )
+
+        image_path = resolve_scan_path(items[0].image_path)
+        sidecar = image_path.with_name(f"{image_path.stem}.geometry.json")
+        self.assertTrue(sidecar.is_file())
+        with _decoded(image_path.read_bytes()) as stored:
+            expected_size = stored.size
+        self.assertEqual(
+            json.loads(sidecar.read_text()),
+            {
+                **_geometry(),
+                "storedWidth": expected_size[0],
+                "storedHeight": expected_size[1],
+                "storedRotationCw": 0,
+            },
+        )
+        # The second photo abstained, so it has no sidecar of its own.
+        second_path = resolve_scan_path(items[1].image_path)
+        self.assertFalse(
+            second_path.with_name(f"{second_path.stem}.geometry.json").exists()
+        )
+
+    def test_capture_geometry_must_align_with_the_uploaded_photos(self):
+        for raw in ("[]", "[null, null]", "{}", "null", "not-json"):
+            with self.subTest(capture_geometry=raw):
+                response = self._post_job(data={"capture_geometry": raw})
+                self.assertEqual(response.status_code, 422, response.text)
+        self.assertEqual(self.db.query(ScanJob).count(), 0)
+        self.assertEqual(os.listdir(self.temp_dir.name), [])
+
+    def test_invalid_capture_geometry_entries_abstain_for_their_photo_only(self):
+        bad_quads = dict(quad=[[0.1, 0.1], [0.9, 0.1], [0.9, 0.9]])
+        bad_source = dict(source="batch-model")
+        with self.assertLogs("api.scan_jobs", level="INFO") as logs:
+            response = self._post_job(
+                data={
+                    "capture_geometry": _geometry_field(
+                        _geometry(**bad_quads), _geometry(**bad_source)
+                    )
+                },
+                files=[
+                    ("files", ("first.jpg", _jpeg_bytes(), "image/jpeg")),
+                    ("files", ("second.jpg", _jpeg_bytes(), "image/jpeg")),
+                ],
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        created = response.json()
+        items = self.db.query(ScanJobItem).filter(ScanJobItem.job_id == created["id"]).all()
+        self.assertEqual(len(items), 2)
+        for item in items:
+            image_path = resolve_scan_path(item.image_path)
+            self.assertTrue(image_path.is_file())
+            self.assertFalse(
+                image_path.with_name(f"{image_path.stem}.geometry.json").exists()
+            )
+        logged = "\n".join(logs.output)
+        self.assertIn("position=0", logged)
+        self.assertIn("quad does not have four points", logged)
+        self.assertIn("position=1", logged)
+        self.assertIn("unsupported source", logged)
+
+    def test_capture_geometry_entries_must_be_in_range_and_finite(self):
+        invalid_entries = {
+            "non-finite": dict(quad=[[0.1, 0.1], [float("nan"), 0.1], [0.9, 0.9], [0.1, 0.9]]),
+            "out-of-range": dict(quad=[[0.1, 0.1], [1.5, 0.1], [0.9, 0.9], [0.1, 0.9]]),
+            "bad-version": dict(v=2),
+            "bad-space": dict(space="pixels"),
+            "bad-width": dict(width=0),
+            "bad-height": dict(height="1100"),
+        }
+        for reason, overrides in invalid_entries.items():
+            with self.subTest(reason=reason):
+                response = self._post_job(
+                    data={"capture_geometry": _geometry_field(_geometry(**overrides))}
+                )
+                self.assertEqual(response.status_code, 200, response.text)
+                created = response.json()
+                item = (
+                    self.db.query(ScanJobItem)
+                    .filter(ScanJobItem.job_id == created["id"])
+                    .one()
+                )
+                image_path = resolve_scan_path(item.image_path)
+                self.assertFalse(
+                    image_path.with_name(f"{image_path.stem}.geometry.json").exists()
+                )
+
+    def test_deleting_the_job_removes_geometry_sidecars(self):
+        created = self._post_job(
+            data={"capture_geometry": _geometry_field(_geometry())}
+        ).json()
+        item = self.db.query(ScanJobItem).filter(ScanJobItem.job_id == created["id"]).one()
+        image_path = resolve_scan_path(item.image_path)
+        sidecar = image_path.with_name(f"{image_path.stem}.geometry.json")
+        self.assertTrue(sidecar.is_file())
+
+        deleted = self.client.delete(f"/api/cards/recognize/jobs/{created['id']}")
+
+        self.assertEqual(deleted.status_code, 200, deleted.text)
+        self.assertFalse(image_path.exists())
+        self.assertFalse(sidecar.exists())
+        self.assertFalse(image_path.parent.exists())
+
+    def test_capture_geometry_is_part_of_the_idempotency_fingerprint(self):
+        key = "capture-geometry-key-01"
+        first = self._post_job(
+            data={"capture_geometry": _geometry_field(_geometry())},
+            headers={"Idempotency-Key": key},
+        )
+        self.assertEqual(first.status_code, 200, first.text)
+
+        replay = self._post_job(
+            data={"capture_geometry": _geometry_field(_geometry())},
+            headers={"Idempotency-Key": key},
+        )
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertEqual(replay.headers["Idempotent-Replayed"], "true")
+
+        moved = _geometry(
+            quad=[[0.2, 0.05], [0.9, 0.06], [0.92, 0.95], [0.08, 0.94]]
+        )
+        changed = self._post_job(
+            data={"capture_geometry": _geometry_field(moved)},
+            headers={"Idempotency-Key": key},
+        )
+        self.assertEqual(changed.status_code, 422, changed.text)
+        self.assertEqual(changed.json()["detail"]["code"], "idempotency_key_reused")
+        self.assertEqual(self.db.query(ScanJob).count(), 1)
+
+    def test_omitted_capture_geometry_leaves_the_fingerprint_unchanged(self):
+        key = "capture-geometry-key-02"
+        first = self._post_job(headers={"Idempotency-Key": key})
+        self.assertEqual(first.status_code, 200, first.text)
+
+        blank = self._post_job(
+            data={"capture_geometry": ""}, headers={"Idempotency-Key": key}
+        )
+        self.assertEqual(blank.status_code, 200, blank.text)
+        self.assertEqual(blank.headers["Idempotent-Replayed"], "true")
+        self.assertEqual(self.db.query(ScanJob).count(), 1)
 
     def test_degraded_capability_forces_every_photo_individual(self):
         # A composite needs the same multi-image capability visual

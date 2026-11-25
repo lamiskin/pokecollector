@@ -8,7 +8,31 @@
 // can degrade to "unverified" without stopping detection. Wasm modes keep
 // numThreads at 1 so no SharedArrayBuffer / COOP+COEP is needed.
 
-import { cropQuadToFrame } from '../utils/refineCrop'
+// Deliberately no relative imports: this worker is started from a blob whose
+// specifier has no relative base, so Vite leaves relative imports verbatim and
+// the built chunk fails to evaluate. Keep this helper local; src/utils/refineCrop.js
+// is the page-side copy.
+function cropPointToFrame(point, cropRect) {
+  return [
+    (cropRect.x + point[0] * cropRect.width) / cropRect.frameWidth,
+    (cropRect.y + point[1] * cropRect.height) / cropRect.frameHeight,
+  ]
+}
+
+function cropQuadToFrame(quad, cropRect) {
+  return quad.map(point => cropPointToFrame(point, cropRect))
+}
+
+// One ORT session cannot be run concurrently under asyncify. Chain every
+// detect, refine and verification through this serial queue.
+function createSerialQueue() {
+  let tail = Promise.resolve()
+  return task => {
+    const next = tail.then(task, task)
+    tail = next.catch(() => {})
+    return next
+  }
+}
 
 const DETECTOR_SIZE = 384
 const MIN_SHARPNESS = 0.02
@@ -42,6 +66,11 @@ let verificationAttempted = false
 // The tensor, source size and main result of the latest detection, reused by
 // an explicit verify request so both sessions see exactly the same frame.
 let lastDetection = null
+const serialQueue = createSerialQueue()
+const enqueue = task => serialQueue(() => {
+  if (!session) throw new Error('Detector session is not ready')
+  return task()
+})
 let scratch = null
 let scratchCtx = null
 
@@ -378,17 +407,18 @@ self.onmessage = async event => {
       return
     }
     if (message.type === 'detect') {
-      const result = await detect(message.bitmap)
+      const result = await enqueue(() => detect(message.bitmap))
       self.postMessage({ type: 'result', seq: message.seq, ...result })
       return
     }
     if (message.type === 'refine') {
-      const result = await refine(message.bitmap, message.cropRect)
+      const result = await enqueue(() => refine(message.bitmap, message.cropRect))
       self.postMessage({ type: 'refined', seq: message.seq, cropRect: message.cropRect, ...result })
       return
     }
     if (message.type === 'verify') {
-      self.postMessage({ type: 'verification', verification: await verifyWebgpu() })
+      const verification = await enqueue(() => verifyWebgpu())
+      self.postMessage({ type: 'verification', verification })
       return
     }
     throw new Error(`Unknown message type: ${message.type}`)

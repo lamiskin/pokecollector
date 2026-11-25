@@ -55,8 +55,9 @@ export function latestUnsentItem(items) {
   return best
 }
 
-// One frozen snapshot is the only source for files, rotations and item ids in a
-// submission. Callers must not rebuild any of the three from visible indices.
+// One frozen snapshot is the only source for files, rotations, geometry and
+// item ids in a submission. Callers must not rebuild any of them from visible
+// indices.
 export function buildTraySubmission(items) {
   const snapshot = Object.freeze(
     sortTrayItems(items).map(item => Object.freeze({
@@ -64,15 +65,99 @@ export function buildTraySubmission(items) {
       file: item.file,
       sequence: item.sequence,
       rotationCW: normalizeRotation(item.rotationCW),
+      geometry: item.geometry ?? null,
     })),
   )
   const rotations = snapshot.map(item => item.rotationCW)
+  const geometries = snapshot.map(item => item.geometry)
   return {
     items: snapshot,
     files: snapshot.map(item => item.file),
     rotations,
+    geometries,
     hasRotationChoice: rotations.some(value => value !== null),
+    hasGeometry: geometries.some(value => value != null),
   }
+}
+
+// ── Capture geometry provenance ─────────────────────────────────────────────
+// A capture's crop is frozen when the frame is acquired: the padded, integer,
+// frame-clamped source rect and the quad that produced it travel together. The
+// quad is stored relative to that encoded crop, so a later overlay update, a
+// different frame or the tray's visible order can never move it.
+export const CAPTURE_GEOMETRY_VERSION = 1
+export const CAPTURE_GEOMETRY_SPACE = 'crop-normalized'
+
+const clampUnit = value => Math.min(1, Math.max(0, value))
+
+// Frame-normalized quad -> crop-relative quad, using the same integer rect the
+// capture encoded. Points are clamped to the crop so the contract's 0..1 range
+// holds even for a corner the video frame itself cut off.
+export function cropQuadFromFrame(quad, rect) {
+  if (!Array.isArray(quad) || quad.length !== 4) return null
+  if (!rect) return null
+  const { x, y, width, height } = rect
+  if (![x, y, width, height].every(Number.isFinite)) return null
+  if (!(width > 0) || !(height > 0)) return null
+  const points = []
+  for (const point of quad) {
+    if (!Array.isArray(point) || point.length !== 2) return null
+    const [px, py] = point
+    if (!Number.isFinite(px) || !Number.isFinite(py)) return null
+    points.push([
+      clampUnit((px - x) / width),
+      clampUnit((py - y) / height),
+    ])
+  }
+  return points
+}
+
+// Inverse of cropQuadFromFrame, in the crop rect's own pixel space. Exported so
+// the provenance check can prove the mapping round-trips.
+export function frameQuadFromCrop(cropQuad, rect) {
+  if (!Array.isArray(cropQuad) || cropQuad.length !== 4) return null
+  if (!rect) return null
+  const { x, y, width, height } = rect
+  if (![x, y, width, height].every(Number.isFinite)) return null
+  return cropQuad.map(([u, v]) => [x + u * width, y + v * height])
+}
+
+// Evidence comes from the same decision and the same acquisition that produced
+// the capture; a caller must not fill these from the live overlay afterwards.
+export function buildCaptureGeometry({
+  quad,
+  cropRect,
+  encodedWidth,
+  encodedHeight,
+  source,
+  modelScore = null,
+  modelAgeMs = null,
+  agreement = null,
+  pendingReanchor = false,
+  frameEdgeMargin = null,
+  quadAspect = null,
+  paddingClipped = false,
+} = {}) {
+  const cropQuad = cropQuadFromFrame(quad, cropRect)
+  if (!cropQuad) return null
+  const width = Math.round(Number(encodedWidth))
+  const height = Math.round(Number(encodedHeight))
+  if (!(width > 0) || !(height > 0)) return null
+  return Object.freeze({
+    v: CAPTURE_GEOMETRY_VERSION,
+    space: CAPTURE_GEOMETRY_SPACE,
+    width,
+    height,
+    quad: Object.freeze(cropQuad.map(point => Object.freeze(point))),
+    source,
+    modelScore,
+    modelAgeMs,
+    agreement,
+    pendingReanchor: Boolean(pendingReanchor),
+    frameEdgeMargin,
+    quadAspect,
+    paddingClipped: Boolean(paddingClipped),
+  })
 }
 
 // The multipart field is omitted entirely when every item is "no choice", so a
@@ -82,6 +167,16 @@ export function rotationPayload(rotations, expectedLength = null) {
   const normalized = rotations.map(normalizeRotation)
   if (expectedLength != null && normalized.length !== expectedLength) return null
   return normalized.some(value => value !== null) ? normalized : null
+}
+
+// Same rule for `capture_geometry`: aligned with the uploaded files, `null` for
+// a photo without a frozen crop, and the whole field omitted when every entry
+// is null (gallery/manual uploads).
+export function geometryPayload(geometries, expectedLength = null) {
+  if (!Array.isArray(geometries)) return null
+  if (expectedLength != null && geometries.length !== expectedLength) return null
+  if (!geometries.some(entry => entry != null)) return null
+  return geometries.map(entry => entry ?? null)
 }
 
 export function isRailAtEnd({ scrollLeft, clientWidth, scrollWidth }, tolerance = 2) {

@@ -17,6 +17,7 @@ import CaptureDock from '../components/CaptureDock'
 import TrayItemSheet from '../components/TrayItemSheet'
 import {
   TRAY_CAPACITY,
+  buildCaptureGeometry,
   buildTraySubmission,
   latestUnsentItem,
   nextRotationCW,
@@ -391,6 +392,7 @@ export default function CaptureLab() {
   const inFlightRef = useRef(new Set())
   const batchScanRef = useRef(false)
   const detectorWorkerRef = useRef(null)
+  const detectorWorkerUrlRef = useRef('')
   const detectorSeqRef = useRef(0)
   const detectorImageUrlRef = useRef(null)
   const liveCanvasRef = useRef(null)
@@ -1201,6 +1203,7 @@ export default function CaptureLab() {
       // even after the policy was fixed on the server. A blob worker inherits the
       // document's policy instead, and the document is always revalidated.
       const moduleUrl = new URL('../workers/cardDetector.worker.js', import.meta.url)
+      detectorWorkerUrlRef.current = moduleUrl.href
       bootstrapUrl = URL.createObjectURL(
         new Blob([`import ${JSON.stringify(moduleUrl.href)}`], { type: 'text/javascript' }),
       )
@@ -1246,6 +1249,11 @@ export default function CaptureLab() {
         return
       }
       if (message.type === 'error') {
+        recordDiagEvent('worker-error', {
+          message: message.message || 'Detector failed',
+          refineInFlight: refineInFlightRef.current,
+          workerUrl: detectorWorkerUrlRef.current,
+        })
         if (message.seq >= LIVE_SEQ_BASE) {
           liveErrorHandlerRef.current?.(message)
           return
@@ -1259,6 +1267,11 @@ export default function CaptureLab() {
     }
     worker.onerror = event => {
       if (detectorWorkerRef.current !== worker) return
+      recordDiagEvent('worker-error', {
+        message: event.message || 'The detector worker crashed.',
+        refineInFlight: refineInFlightRef.current,
+        workerUrl: detectorWorkerUrlRef.current,
+      })
       setDetectorStatus('error')
       setDetectorError(event.message || 'The detector worker crashed.')
       setWebgpuVerifying(false)
@@ -1293,7 +1306,7 @@ export default function CaptureLab() {
     }
   }
 
-  const addFiles = useCallback((files, defaultRoute = 'Phone browser', { rotationCW = null } = {}) => {
+  const addFiles = useCallback((files, defaultRoute = 'Phone browser', { rotationCW = null, geometry = null } = {}) => {
     const now = Date.now()
     const items = Array.from(files)
       .filter(file => file.type.startsWith('image/') || /\.(heic|heif)$/i.test(file.name))
@@ -1305,6 +1318,9 @@ export default function CaptureLab() {
           id,
           sequence: sequenceRef.current,
           rotationCW: normalizeRotation(rotationCW),
+          // Frozen at capture alongside the rotation: never rebuilt later from
+          // the live overlay or the tray's visible order.
+          geometry: geometry || null,
           file,
           previewUrl,
           width: null,
@@ -1394,7 +1410,15 @@ export default function CaptureLab() {
         }, pendingRef.current.length + 1)
       }
       if (soundOn) playCaptureSuccess()
-      recordDiagEvent('capture', { mode, rectified: false, corners: null, refineCount: refinesSinceCaptureRef.current })
+      recordDiagEvent('capture', {
+        mode,
+        rectified: false,
+        corners: null,
+        // The whole frame is this capture's crop; no card quad was involved.
+        cropRect: { x: 0, y: 0, width: canvas.width, height: canvas.height },
+        cropQuad: null,
+        refineCount: refinesSinceCaptureRef.current,
+      })
       refinesSinceCaptureRef.current = 0
     }, 'image/jpeg', 0.92)
   }
@@ -1431,12 +1455,19 @@ export default function CaptureLab() {
       // the tracker is slightly tight. No rotation or rectification is applied.
       const padX = Math.round(boxWidth * CAPTURE_BOX_PAD_FRACTION)
       const padY = Math.round(boxHeight * CAPTURE_BOX_PAD_FRACTION)
-      const minX = Math.max(0, Math.floor(Math.min(...xs) - padX))
-      const maxX = Math.min(videoWidth, Math.ceil(Math.max(...xs) + padX))
-      const minY = Math.max(0, Math.floor(Math.min(...ys) - padY))
-      const maxY = Math.min(videoHeight, Math.ceil(Math.max(...ys) + padY))
+      const rawMinX = Math.min(...xs) - padX
+      const rawMaxX = Math.max(...xs) + padX
+      const rawMinY = Math.min(...ys) - padY
+      const rawMaxY = Math.max(...ys) + padY
+      const minX = Math.max(0, Math.floor(rawMinX))
+      const maxX = Math.min(videoWidth, Math.ceil(rawMaxX))
+      const minY = Math.max(0, Math.floor(rawMinY))
+      const maxY = Math.min(videoHeight, Math.ceil(rawMaxY))
       const sourceWidth = Math.max(1, maxX - minX)
       const sourceHeight = Math.max(1, maxY - minY)
+      // Whether the frame edge cut the padded box. Provenance, not a decision.
+      const paddingClipped = rawMinX < 0 || rawMaxX > videoWidth
+        || rawMinY < 0 || rawMaxY > videoHeight
       // The box is a fraction of the frame and is capped only as a memory guard.
       const scale = Math.min(1, CAPTURE_SOURCE_MAX_EDGE / Math.max(sourceWidth, sourceHeight))
       const width = Math.max(1, Math.round(sourceWidth * scale))
@@ -1471,6 +1502,9 @@ export default function CaptureLab() {
         // native source pixels.
         sourceLongEdge: Math.max(width, height),
         cardLongEdge: Math.round(cardLongEdge),
+        encodedWidth: width,
+        encodedHeight: height,
+        paddingClipped,
         sourceRect: { x: minX, y: minY, width: sourceWidth, height: sourceHeight },
       })
     }
@@ -1858,9 +1892,27 @@ export default function CaptureLab() {
           if (auto) disarmAutoCapture()
           return false
         }
+        // Geometry provenance for this exact acquisition. The quad is the one
+        // this capture used, mapped into the encoded crop's integer, clamped
+        // rect; the evidence is the same decision that passed the gates above.
+        const geometry = buildCaptureGeometry({
+          quad: corners,
+          cropRect: acquisition.sourceRect,
+          encodedWidth: acquisition.encodedWidth,
+          encodedHeight: acquisition.encodedHeight,
+          source: decision.source === 'tracked' ? 'same-frame-track' : 'same-frame-model',
+          modelScore: captureSharpness,
+          modelAgeMs: modelAgeMs == null ? null : Math.round(modelAgeMs),
+          agreement: decisionAt.agreement ?? null,
+          pendingReanchor: decisionAt.pendingReanchor,
+          frameEdgeMargin: attempt.edgeContainment,
+          quadAspect: attempt.quadAspect,
+          paddingClipped: acquisition.paddingClipped,
+        })
         const file = new File([blob], `card-${Date.now()}.jpg`, { type: 'image/jpeg' })
         const created = addFiles([file], 'Phone browser', {
           rotationCW: sessionRotationRef.current,
+          geometry,
         })
         if (created[0]) {
           stageDock(
@@ -1894,6 +1946,10 @@ export default function CaptureLab() {
           mode,
           rectified: false,
           corners,
+          // Enough to reconstruct the encoded crop without the server: the
+          // integer source rect and the quad relative to it.
+          cropRect: acquisition.sourceRect,
+          cropQuad: geometry ? geometry.quad : null,
           areaFraction: Number(quadAreaFraction(corners).toFixed(4)),
           sourceLongEdge: acquisition.sourceLongEdge,
           cardLongEdge: acquisition.cardLongEdge,
@@ -2201,7 +2257,7 @@ export default function CaptureLab() {
   // more pixels without another detector or a server round trip.
   function maybeRequestRefine(result, now) {
     if (result.refined || result.unusableReason !== 'soft') return
-    if (refineInFlightRef.current || captureInFlightRef.current) return
+    if (refineInFlightRef.current || captureInFlightRef.current || liveInFlightRef.current) return
     if (autoStateRef.current.anchorTs != null) return
     if (now - refineLastAtRef.current < REFINE_INTERVAL_MS) return
     const video = videoRef.current
@@ -2958,8 +3014,12 @@ export default function CaptureLab() {
   }
 
   // A click only queues a scan job; adding to the collection still requires the normal review step.
-  const submitSingleFileScan = (file, onProgress, rotationCW = null) =>
-    enqueueScanJob([file], [], null, { onProgress, rotations: [rotationCW] })
+  const submitSingleFileScan = (file, onProgress, rotationCW = null, geometry = null) =>
+    enqueueScanJob([file], [], null, {
+      onProgress,
+      rotations: [rotationCW],
+      geometries: [geometry],
+    })
 
   const scanPending = async item => {
     updatePending(item.id, {
@@ -2971,7 +3031,7 @@ export default function CaptureLab() {
     try {
       const job = await submitSingleFileScan(item.file, progress => {
         updatePending(item.id, { scanProgress: scanUploadPercent(progress) })
-      }, item.rotationCW)
+      }, item.rotationCW, item.geometry)
       if (!mountedRef.current) return
       updatePending(item.id, { scanStatus: 'done', scanProgress: 100, scanJobId: job.id })
     } catch (error) {
@@ -3016,6 +3076,8 @@ export default function CaptureLab() {
         {
           // Omitted by the client when every item is "no choice".
           rotations: submission.rotations,
+          // Same snapshot and order; omitted when no item has a frozen crop.
+          geometries: submission.geometries,
           onProgress: progress => {
             if (progress.phase === 'prepare') {
               setBatchScanMessage(`Preparing ${progress.done} of ${progress.total}…`)

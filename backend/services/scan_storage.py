@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime
 import io
+import json
 import logging
 import os
 import shutil
@@ -36,6 +37,7 @@ MAX_JOB_BYTES = 200 * 1024 * 1024
 MAX_IMAGE_PIXELS = 50_000_000
 MAX_IMAGE_EDGE = 2048
 JPEG_QUALITY = 90
+GEOMETRY_SIDECAR_SUFFIX = ".geometry.json"
 SCAN_RETENTION_DAYS = 14
 ALLOWED_IMAGE_FORMATS = frozenset({"JPEG", "PNG", "WEBP", "HEIF", "HEIC"})
 # Pillow's ROTATE_* constants are counter-clockwise, so a clockwise quarter
@@ -56,6 +58,11 @@ class SanitizedScanImage:
     data: bytes
     content_type: str = "image/jpeg"
     rotation_cw: int = 0
+    # Dimensions of the stored JPEG, after EXIF orientation, the collector's
+    # explicit rotation and the resize. Recorded for the geometry sidecar so a
+    # later consumer can map client coordinates onto the stored pixels.
+    width: int | None = None
+    height: int | None = None
 
 
 def scan_upload_root() -> Path:
@@ -131,6 +138,7 @@ def sanitize_image_bytes(raw: bytes, rotation_cw: int | None = None) -> Sanitize
                 else:
                     oriented = oriented.convert("RGB")
                 oriented.thumbnail((MAX_IMAGE_EDGE, MAX_IMAGE_EDGE), Image.Resampling.LANCZOS)
+                stored_width, stored_height = oriented.size
                 output = io.BytesIO()
                 oriented.save(
                     output,
@@ -146,7 +154,12 @@ def sanitize_image_bytes(raw: bytes, rotation_cw: int | None = None) -> Sanitize
     except (UnidentifiedImageError, OSError, ValueError):
         raise ScanUploadError("The uploaded file is not a valid supported image.")
 
-    return SanitizedScanImage(output.getvalue(), rotation_cw=rotation)
+    return SanitizedScanImage(
+        output.getvalue(),
+        rotation_cw=rotation,
+        width=stored_width,
+        height=stored_height,
+    )
 
 
 def _job_directory(job_id: int) -> Path:
@@ -173,6 +186,52 @@ def store_sanitized_image(job_id: int, image: SanitizedScanImage) -> tuple[str, 
     return relative_path, len(image.data)
 
 
+def geometry_sidecar_path(image_path: Path) -> Path:
+    """The geometry sidecar stored next to a sanitized scan image."""
+    return image_path.with_name(f"{image_path.stem}{GEOMETRY_SIDECAR_SUFFIX}")
+
+
+def write_geometry_sidecar(
+    relative_path: str | None,
+    geometry: dict | None,
+    *,
+    stored_width: int | None,
+    stored_height: int | None,
+    rotation_cw: int = 0,
+) -> None:
+    """Persist the client's crop geometry beside an already-written image.
+
+    Geometry is an optimisation for later cropping, never a reason to fail a
+    scan, so every problem here is logged and swallowed. The sidecar repeats
+    the stored JPEG's own dimensions (and the rotation baked into it) because
+    the client's ``width``/``height`` describe the upload before sanitizing.
+    """
+    if not relative_path or geometry is None:
+        return
+    try:
+        image_path = resolve_scan_path(relative_path)
+        payload = dict(geometry)
+        payload["storedWidth"] = stored_width
+        payload["storedHeight"] = stored_height
+        payload["storedRotationCw"] = int(rotation_cw or 0)
+        sidecar_path = geometry_sidecar_path(image_path)
+        temporary_path = sidecar_path.with_name(f".{sidecar_path.name}.tmp")
+        try:
+            with temporary_path.open("x", encoding="utf-8") as handle:
+                json.dump(payload, handle, separators=(",", ":"))
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_path, sidecar_path)
+            sidecar_path.chmod(0o600)
+        finally:
+            temporary_path.unlink(missing_ok=True)
+    except Exception:  # noqa: BLE001 - geometry must never fail a scan
+        logger.warning(
+            "scan geometry sidecar not written path=%s", relative_path, exc_info=True
+        )
+
+
 def resolve_scan_path(relative_path: str) -> Path:
     root = scan_upload_root()
     candidate = (root / str(relative_path or "")).resolve()
@@ -189,6 +248,10 @@ def delete_scan_image(relative_path: str | None) -> None:
     except ScanUploadError:
         return
     path.unlink(missing_ok=True)
+    try:
+        geometry_sidecar_path(path).unlink(missing_ok=True)
+    except OSError:
+        logger.warning("scan geometry sidecar not deleted path=%s", relative_path)
     try:
         path.parent.rmdir()
     except OSError:
@@ -230,6 +293,7 @@ async def create_scan_job(
     *,
     batch_modes: list[bool] | None = None,
     rotations: list[int | None] | None = None,
+    capture_geometry: list[dict | None] | None = None,
     binder_id: int | None = None,
     before_commit: Callable[[ScanJob], None] | None = None,
 ) -> ScanJob:
@@ -244,6 +308,8 @@ async def create_scan_job(
         raise ScanUploadError("Scan processing choices do not match the uploaded photos.")
     if rotations is not None and len(rotations) != len(uploads):
         raise ScanUploadError("Photo rotations do not match the uploaded photos.")
+    if capture_geometry is not None and len(capture_geometry) != len(uploads):
+        raise ScanUploadError("Photo geometry does not match the uploaded photos.")
 
     now = datetime.datetime.utcnow()
     job = ScanJob(
@@ -284,6 +350,15 @@ async def create_scan_job(
                 sanitized.rotation_cw,
             )
             relative_path, byte_size = store_sanitized_image(job.id, sanitized)
+            # Only after the image exists, and never fatal: the sidecar is a
+            # recording of the client's crop geometry, not scan data.
+            write_geometry_sidecar(
+                relative_path,
+                capture_geometry[position] if capture_geometry is not None else None,
+                stored_width=sanitized.width,
+                stored_height=sanitized.height,
+                rotation_cw=sanitized.rotation_cw,
+            )
             db.add(
                 ScanJobItem(
                     job_id=job.id,
