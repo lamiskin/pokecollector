@@ -25,9 +25,10 @@ COPY frontend/nginx.conf /etc/nginx/conf.d/default.conf
 COPY frontend/nginx-security-headers.conf /etc/nginx/snippets/pc-security-headers.conf
 COPY frontend/docker-entrypoint.d/40-configure-public-mode.sh /docker-entrypoint.d/40-configure-public-mode.sh
 COPY frontend/docker-entrypoint.d/45-configure-pwa.sh /docker-entrypoint.d/45-configure-pwa.sh
+COPY frontend/docker-entrypoint.d/46-configure-detector-csp.sh /docker-entrypoint.d/46-configure-detector-csp.sh
 
 RUN cp /usr/share/nginx/html/index.html /usr/share/nginx/html/index.html.template \
-    && chmod +x /docker-entrypoint.d/40-configure-public-mode.sh /docker-entrypoint.d/45-configure-pwa.sh \
+    && chmod +x /docker-entrypoint.d/40-configure-public-mode.sh /docker-entrypoint.d/45-configure-pwa.sh /docker-entrypoint.d/46-configure-detector-csp.sh \
     && mkdir -p /var/cache/nginx/images \
     && chown -R nginx:nginx /var/cache/nginx
 
