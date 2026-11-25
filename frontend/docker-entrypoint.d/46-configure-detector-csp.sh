@@ -40,3 +40,17 @@ for file in $csp_files; do
   sed -i "s|script-src 'self';|script-src 'self' 'wasm-unsafe-eval'; worker-src 'self';|g" "$file"
   echo "detector: enabled 'wasm-unsafe-eval' in $file"
 done
+
+# A content-hashed asset is served `immutable` for a year, and a browser reuses
+# the stored response *including its CSP headers*: after the policy changes, an
+# asset already on the device keeps the old policy and a worker started from it
+# is still blocked. Revalidate assets instead while the detector is enabled, so
+# the first load after a policy change replaces those headers (304s are cheap).
+conf=/etc/nginx/conf.d/default.conf
+if grep -q 'Cache-Control "public, immutable"' "$conf"; then
+  sed -i 's|add_header Cache-Control "public, immutable";|add_header Cache-Control "no-cache";|' "$conf"
+  # `expires 1y` also emits Cache-Control: max-age, which would contradict the
+  # no-cache above; drop it so exactly one caching directive remains.
+  sed -i 's|^\s*expires 1y;\s*$||' "$conf"
+  echo "detector: hashed assets revalidate, so their CSP headers cannot go stale"
+fi
