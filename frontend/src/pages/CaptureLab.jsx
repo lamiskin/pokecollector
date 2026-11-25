@@ -13,6 +13,7 @@ import {
 import { useConfirmDialog } from '../contexts/ConfirmDialogContext'
 import { useSettings } from '../contexts/SettingsContext'
 import CaptureOverlay from '../components/CaptureOverlay'
+import CaptureDock from '../components/CaptureDock'
 import {
   isCaptureSoundEnabled,
   playCaptureSuccess,
@@ -493,9 +494,13 @@ export default function CaptureLab() {
   const [captureBeatAt, setCaptureBeatAt] = useState(null)
   const [captureNote, setCaptureNote] = useState('')
   const [soundOn, setSoundOn] = useState(isCaptureSoundEnabled)
-  const [receipt, setReceipt] = useState(null)
   const [receiptCorners, setReceiptCorners] = useState(null)
-  const receiptUrlRef = useRef(null)
+  const [lastStagedId, setLastStagedId] = useState(null)
+  const [lastCaptureIndex, setLastCaptureIndex] = useState(null)
+  const [dockAnnouncement, setDockAnnouncement] = useState('')
+  const [flight, setFlight] = useState(null)
+  const flightTokenRef = useRef(0)
+  const trayRef = useRef(null)
   const capturedSignatureRef = useRef(null)
   const lastRearmCheckAtRef = useRef(0)
   const lastRearmFrameTimeRef = useRef(null)
@@ -537,7 +542,6 @@ export default function CaptureLab() {
       streamRef.current = null
       stream?.getTracks().forEach(track => track.stop())
       pendingRef.current.forEach(item => URL.revokeObjectURL(item.previewUrl))
-      if (receiptUrlRef.current) URL.revokeObjectURL(receiptUrlRef.current)
       window.clearTimeout(liveTimerRef.current)
       window.clearInterval(motionTimerRef.current)
       window.clearInterval(autoFireTimerRef.current)
@@ -1264,28 +1268,40 @@ export default function CaptureLab() {
     return items
   }, [])
 
-  const clearReceipt = useCallback(() => {
-    if (receiptUrlRef.current) {
-      URL.revokeObjectURL(receiptUrlRef.current)
-      receiptUrlRef.current = null
-    }
-    setReceipt(null)
-    setReceiptCorners(null)
-  }, [])
+  const resizeMode = () => streamRef.current?.getVideoTracks?.()[0]?.getSettings?.().resizeMode || 'contain'
 
-  const showReceipt = (item, file, corners, index) => {
-    if (receiptUrlRef.current) URL.revokeObjectURL(receiptUrlRef.current)
-    const thumbnail = URL.createObjectURL(file)
-    receiptUrlRef.current = thumbnail
-    setReceipt({
-      index,
-      thumbnail,
-      undo: () => {
-        removePending(item.id)
-        clearReceipt()
-      },
-    })
+  const stageDock = (item, corners, sourceRect, index, count) => {
+    setLastStagedId(item.id)
+    setLastCaptureIndex(index)
     setReceiptCorners(corners || null)
+    setDockAnnouncement(`Captured #${index} · ${count} in tray`)
+    flightTokenRef.current += 1
+    setFlight({
+      token: flightTokenRef.current,
+      url: item.previewUrl,
+      sourceRect,
+      index,
+      resizeMode: resizeMode(),
+      committedAt: performance.now(),
+    })
+  }
+
+  const undoLastCapture = () => {
+    if (!lastStagedId) return
+    setFlight(null)
+    removePending(lastStagedId)
+    const remaining = Math.max(0, pendingRef.current.length - 1)
+    setLastStagedId(null)
+    setLastCaptureIndex(null)
+    setReceiptCorners(null)
+    setDockAnnouncement(`Removed · ${remaining} in tray`)
+  }
+
+  const openTray = () => {
+    trayRef.current?.scrollIntoView({
+      behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+      block: 'start',
+    })
   }
 
   const captureFullFrame = ({ mode = 'manual' } = {}) => {
@@ -1297,10 +1313,21 @@ export default function CaptureLab() {
     canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height)
     canvas.toBlob(blob => {
       if (!blob) return
+      if (pendingRef.current.length >= 50) {
+        setCaptureNote('Tray full · Review 50 photos')
+        return
+      }
       const file = new File([blob], `capture-${Date.now()}.jpg`, { type: 'image/jpeg' })
       const index = pendingRef.current.length + 1
       const created = addFiles([file])
-      if (created[0]) showReceipt(created[0], file, null, index)
+      if (created[0]) {
+        stageDock(created[0], null, {
+          x: 0,
+          y: 0,
+          width: video.videoWidth,
+          height: video.videoHeight,
+        }, index, index)
+      }
       if (soundOn) playCaptureSuccess()
       recordDiagEvent('capture', { mode, rectified: false, corners: null })
     }, 'image/jpeg', 0.92)
@@ -1378,6 +1405,7 @@ export default function CaptureLab() {
         // native source pixels.
         sourceLongEdge: Math.max(width, height),
         cardLongEdge: Math.round(cardLongEdge),
+        sourceRect: { x: minX, y: minY, width: sourceWidth, height: sourceHeight },
       })
     }
     attempt()
@@ -1753,10 +1781,17 @@ export default function CaptureLab() {
           return false
         }
 
+        if (pendingRef.current.length >= 50) {
+          setCaptureNote('Tray full · Review 50 photos')
+          if (auto) disarmAutoCapture()
+          return false
+        }
         const index = pendingRef.current.length + 1
         const file = new File([blob], `card-${Date.now()}.jpg`, { type: 'image/jpeg' })
         const created = addFiles([file])
-        if (created[0]) showReceipt(created[0], file, corners, index)
+        if (created[0]) {
+          stageDock(created[0], corners, acquisition.sourceRect, index, index)
+        }
         // A capture resets hunting to full speed for the next card.
         lastUsableAtRef.current = performance.now()
         // Remember the captured look so a new card in the same quad can re-arm.
@@ -3048,63 +3083,50 @@ export default function CaptureLab() {
           ) : null}
         </div>
 
-        <div className="mt-3 flex items-start gap-3">
-          <div className="relative min-w-0 flex-1 overflow-hidden rounded">
-            <video
-              ref={videoRef}
-              autoPlay
-              playsInline
-              muted
-              className={`w-full rounded border border-border bg-black ${status === 'live' ? '' : 'hidden'}`}
+        <div className="relative mt-3 overflow-hidden rounded">
+          <video
+            ref={videoRef}
+            autoPlay
+            playsInline
+            muted
+            className={`w-full rounded border border-border bg-black ${status === 'live' ? '' : 'hidden'}`}
+          />
+          {status === 'live' && liveDetection ? (
+            <CaptureOverlay
+              ref={overlayRef}
+              phase={overlayPhase}
+              tracked={quadSource === 'tracked'}
+              confirmed={quadSource === 'model'}
+              holdStartedAt={autoHoldStartTs}
+              holdDurationMs={AUTO_STABLE_MS}
+              tooSmall={overlayTooSmall}
+              cardArea={overlayCardArea}
+              pendingCount={pending.length}
+              softFocus={softFocus}
+              reason={phaseReason}
+              receiptCorners={receiptCorners}
             />
-            {status === 'live' && liveDetection ? (
-              <CaptureOverlay
-                ref={overlayRef}
-                phase={overlayPhase}
-                tracked={quadSource === 'tracked'}
-                confirmed={quadSource === 'model'}
-                holdStartedAt={autoHoldStartTs}
-                holdDurationMs={AUTO_STABLE_MS}
-                tooSmall={overlayTooSmall}
-                cardArea={overlayCardArea}
-                pendingCount={pending.length}
-                softFocus={softFocus}
-                reason={phaseReason}
-                receipt={receipt}
-                receiptCorners={receiptCorners}
-              />
-            ) : null}
-          </div>
-          {receipt ? (
-            <aside
-              className="w-40 shrink-0 cursor-pointer rounded-lg border border-border bg-bg-card p-2 text-xs"
-              onClick={clearReceipt}
-            >
-              <div className="flex gap-2">
-                <img
-                  src={receipt.thumbnail}
-                  alt=""
-                  className="h-12 w-12 rounded border border-border bg-black object-cover"
-                />
-                <div className="min-w-0 flex-1">
-                  <p className="text-text-primary">
-                    Captured #{receipt.index} · Next card
-                  </p>
-                  <button
-                    type="button"
-                    className="btn-ghost-sm mt-1"
-                    onClick={event => {
-                      event.stopPropagation()
-                      receipt.undo()
-                    }}
-                  >
-                    Undo
-                  </button>
-                </div>
-              </div>
-            </aside>
           ) : null}
         </div>
+
+        <CaptureDock
+          count={pending.length}
+          lastIndex={lastCaptureIndex}
+          thumbnail={
+            pending.find(item => item.id === lastStagedId)?.previewUrl
+            || pending[0]?.previewUrl
+            || null
+          }
+          canUndo={Boolean(lastStagedId && pending.some(item => item.id === lastStagedId))}
+          onUndo={undoLastCapture}
+          onOpen={openTray}
+          flight={flight}
+          onFlightDone={token => {
+            setFlight(current => (current && current.token === token ? null : current))
+          }}
+          videoRef={videoRef}
+          announcement={dockAnnouncement}
+        />
 
         {/* Kept directly under the preview so both marks and the sound toggle
             stay in thumb reach while the phone is held in one hand with the
@@ -3437,7 +3459,7 @@ export default function CaptureLab() {
         ) : null}
       </section>
 
-      <section className="rounded-lg border border-border bg-bg-card p-4">
+      <section ref={trayRef} className="rounded-lg border border-border bg-bg-card p-4">
         <div className="flex flex-wrap items-center gap-2">
           <h2 className="mr-auto text-sm font-semibold text-text-primary">
             Pending ({pending.length})

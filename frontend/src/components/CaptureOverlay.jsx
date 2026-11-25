@@ -9,8 +9,8 @@ import { createQuadSmoother, QUAD_GLIDE_MS } from '../utils/quadSmoothing'
  * 250 ms. A discontinuity is a cut, never an interpolation: the ring fades out,
  * the geometry swaps at the trough, and it fades back in.
  *
- * Capture confirmation is a short receipt on the captured quad. There is no
- * countdown or progress trace; the receipt card in the page is the record.
+ * Capture confirmation is a short green settle on the captured quad; the dock
+ * below the preview carries the receipt.
  *
  * Everything here is presentation only. Capture, hold, corroboration,
  * signatures and diagnostics read the raw quad held by the page.
@@ -20,6 +20,7 @@ const GOLD = '#f5c842'
 const GREEN = '#22c55e'
 
 const CAPTURE_BEAT_MS = 230
+const CAPTURE_RING_FADE_MS = 120
 const LOCK_RISE_MS = 120
 const LOCK_RELAX_MS = 250
 const LOST_LATCH_MS = 300
@@ -82,7 +83,6 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
   pendingCount = 0,
   softFocus = true,
   reason = null,
-  receipt = null,
   receiptCorners = null,
 }, ref) {
   const quadRef = useRef(quad)
@@ -404,7 +404,8 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
 
       if (current === 'captured') {
         const beat = clamp01((now - anim.beatStart) / CAPTURE_BEAT_MS)
-        const opacity = (1 - beat) * cutOpacity
+        const ringBeat = clamp01((now - anim.beatStart) / CAPTURE_RING_FADE_MS)
+        const opacity = (1 - ringBeat) * cutOpacity
         baseRef.current?.setAttribute('opacity', opacity.toFixed(3))
         glowRef.current?.setAttribute('opacity', (0.5 * opacity).toFixed(3))
         underRef.current?.setAttribute('opacity', (0.9 * opacity).toFixed(3))
