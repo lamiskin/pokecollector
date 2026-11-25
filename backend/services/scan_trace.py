@@ -237,12 +237,14 @@ class ScanTrace:
     def _sanitize(self, value: Any) -> Any:
         return _redact_value(value, tuple(self._secrets))
 
-    def set_image(self, image_bytes: bytes | None) -> None:
+    def set_image(self, image_bytes: bytes | None, *, rotation_cw: int | None = None) -> None:
         if not self.enabled or not image_bytes:
             return
         self._image = image_bytes
         self.data["image_sha256"] = hashlib.sha256(image_bytes).hexdigest()
         self.data["image_bytes"] = len(image_bytes)
+        if rotation_cw is not None:
+            self.data["sanitize_rotation_cw"] = int(rotation_cw)
 
     def record_extraction(
         self,

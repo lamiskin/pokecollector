@@ -2468,7 +2468,7 @@ async def recognize_card(
         provider=provider.name,
         model=provider.model(),
     )
-    trace.set_image(sanitized.data)
+    trace.set_image(sanitized.data, rotation_cw=sanitized.rotation_cw)
     try:
         return await recognize_sanitized_card(
             db,

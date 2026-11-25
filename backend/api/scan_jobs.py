@@ -279,11 +279,33 @@ def _requested_individual_positions(raw: str | None, file_count: int) -> list[in
     return requested_individual
 
 
+def _requested_rotations(raw: str | None, file_count: int) -> list[int | None]:
+    """Parse and validate the client's per-photo clockwise rotation choices."""
+    if raw is None or not raw.strip():
+        return [None] * file_count
+    try:
+        requested = json.loads(raw)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="Invalid photo rotations.")
+    if (
+        not isinstance(requested, list)
+        or len(requested) != file_count
+        or any(
+            rotation is not None
+            and (type(rotation) is not int or rotation not in (0, 90, 180, 270))
+            for rotation in requested
+        )
+    ):
+        raise HTTPException(status_code=422, detail="Invalid photo rotations.")
+    return requested
+
+
 @router.post("/recognize/jobs")
 async def enqueue_scan_job(
     background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(...),
     individual_positions: str | None = Form(None),
+    rotations: str | None = Form(None),
     binder_id: str | None = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -298,6 +320,9 @@ async def enqueue_scan_job(
 
     headers = request.headers if request is not None else None
     check_expected_user(current_user, headers)
+    # Validate every per-photo choice before any upload bytes are read or a job
+    # row exists, so a rejected request leaves no trace.
+    requested_rotations = _requested_rotations(rotations, len(files))
     # Validate the optional destination before any upload bytes are read or a
     # job row exists, so a rejected list leaves no trace.
     destination_id: int | None = None
@@ -316,6 +341,14 @@ async def enqueue_scan_job(
         # fails because the user removed a key in the meantime.
         requested_individual = _requested_individual_positions(individual_positions, len(files))
         digests = await digest_uploads(files)
+        fingerprint_fields = {
+            "individual_positions": sorted(requested_individual),
+            "files": list(digests),
+            "binder_id": destination_id,
+        }
+        # Old clients send no rotations; leave their fingerprint byte-identical.
+        if rotations is not None and rotations.strip():
+            fingerprint_fields["rotations"] = requested_rotations
         idem = begin_idempotent(
             db, current_user, headers,
             scope=SCOPE_SCAN_ENQUEUE,
@@ -323,11 +356,7 @@ async def enqueue_scan_job(
             # identity: a retry must not replay a job created for another list.
             fingerprint=fingerprint_json(
                 SCOPE_SCAN_ENQUEUE,
-                {
-                    "individual_positions": sorted(requested_individual),
-                    "files": list(digests),
-                    "binder_id": destination_id,
-                },
+                fingerprint_fields,
             ),
         )
         if idem.replay is not None:
@@ -372,6 +401,7 @@ async def enqueue_scan_job(
             current_user.id,
             files,
             batch_modes=batch_modes,
+            rotations=requested_rotations,
             binder_id=destination_id,
             before_commit=before_commit,
         )

@@ -319,6 +319,18 @@ class IdempotencyApiTests(unittest.TestCase):
             self.assertEqual(response.json()["detail"]["code"], "idempotency_key_reused")
         self.assertEqual(self.db.query(ScanJob).count(), 1)
 
+    def test_scan_fingerprint_covers_photo_rotations(self):
+        self._scan(photos=[_jpeg_bytes("#d92828")])
+
+        other_rotation = self._scan(
+            photos=[_jpeg_bytes("#d92828")],
+            data={"rotations": "[90]"},
+        )
+
+        self.assertEqual(other_rotation.status_code, 422, other_rotation.text)
+        self.assertEqual(other_rotation.json()["detail"]["code"], "idempotency_key_reused")
+        self.assertEqual(self.db.query(ScanJob).count(), 1)
+
     def test_scan_without_key_is_unchanged_and_records_nothing(self):
         self.assertEqual(self._scan(key=None).status_code, 200)
         self.assertEqual(self._scan(key=None).status_code, 200)

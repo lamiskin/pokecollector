@@ -1,5 +1,6 @@
 import axios from 'axios'
 import { prepareImageForUpload, prepareImagesForUpload } from '../utils/photoCompression'
+import { rotationPayload } from '../utils/captureTray'
 import { isPublicSharePath } from '../utils/publicRoutes'
 import { prepareUploadPart } from '../utils/memoryBlob'
 import { readPwaFlags } from '../pwa/flags'
@@ -196,7 +197,7 @@ export const enqueueScanJob = async (
   files = [],
   individualPositions = [],
   binderId = null,
-  { onProgress } = {},
+  { onProgress, rotations } = {},
 ) => {
   const formData = new FormData()
   const uploads = await prepareImagesForUpload(files, {
@@ -206,6 +207,11 @@ export const enqueueScanJob = async (
   })
   for (const upload of uploads) await appendUpload(formData, 'files', upload)
   formData.append('individual_positions', JSON.stringify(individualPositions))
+  // Per-file clockwise rotation, aligned with `files`: null (no choice) or an
+  // explicit 0/90/180/270. Omitted entirely when no item has a choice, so a
+  // batch from the existing path sends exactly the same fields as before.
+  const rotationValues = rotationPayload(rotations, uploads.length)
+  if (rotationValues) formData.append('rotations', JSON.stringify(rotationValues))
   // Optional destination card list. Omitted entirely when unset, so a batch
   // that was not given a destination behaves exactly as before.
   if (binderId !== null && binderId !== undefined && binderId !== '') {

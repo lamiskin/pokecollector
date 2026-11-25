@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime
 import io
+import logging
 import os
 import shutil
 import uuid
@@ -17,6 +18,8 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from models import ScanJob, ScanJobItem
+
+logger = logging.getLogger(__name__)
 
 try:
     from pillow_heif import register_heif_opener
@@ -35,6 +38,13 @@ MAX_IMAGE_EDGE = 2048
 JPEG_QUALITY = 90
 SCAN_RETENTION_DAYS = 14
 ALLOWED_IMAGE_FORMATS = frozenset({"JPEG", "PNG", "WEBP", "HEIF", "HEIC"})
+# Pillow's ROTATE_* constants are counter-clockwise, so a clockwise quarter
+# turn maps to the opposite constant.
+CLOCKWISE_ROTATIONS = {
+    90: Image.Transpose.ROTATE_270,
+    180: Image.Transpose.ROTATE_180,
+    270: Image.Transpose.ROTATE_90,
+}
 
 
 class ScanUploadError(ValueError):
@@ -45,6 +55,7 @@ class ScanUploadError(ValueError):
 class SanitizedScanImage:
     data: bytes
     content_type: str = "image/jpeg"
+    rotation_cw: int = 0
 
 
 def scan_upload_root() -> Path:
@@ -78,8 +89,17 @@ async def read_limited_upload(upload, *, remaining_job_bytes: int) -> bytes:
     return b"".join(chunks)
 
 
-def sanitize_image_bytes(raw: bytes) -> SanitizedScanImage:
-    """Decode, verify, orient, resize, and metadata-strip a scan photo."""
+def sanitize_image_bytes(raw: bytes, rotation_cw: int | None = None) -> SanitizedScanImage:
+    """Decode, verify, orient, resize, and metadata-strip a scan photo.
+
+    ``rotation_cw`` is the collector's explicit clockwise quarter-turn. It is
+    applied after EXIF orientation and before the resize, so it is baked into
+    the stored pixels and every later consumer (recognition, review, retained
+    collection photo) sees the same image.
+    """
+    rotation = int(rotation_cw or 0)
+    if rotation not in (0, *CLOCKWISE_ROTATIONS):
+        raise ScanUploadError("Unsupported scan photo rotation.")
     if not raw:
         raise ScanUploadError("An uploaded scan photo is empty.")
 
@@ -99,6 +119,8 @@ def sanitize_image_bytes(raw: bytes) -> SanitizedScanImage:
                     raise ScanUploadError("The scan photo has unsupported dimensions.")
                 source.load()
                 oriented = ImageOps.exif_transpose(source)
+                if rotation:
+                    oriented = oriented.transpose(CLOCKWISE_ROTATIONS[rotation])
                 if oriented.mode in {"RGBA", "LA"} or (
                     oriented.mode == "P" and "transparency" in oriented.info
                 ):
@@ -124,7 +146,7 @@ def sanitize_image_bytes(raw: bytes) -> SanitizedScanImage:
     except (UnidentifiedImageError, OSError, ValueError):
         raise ScanUploadError("The uploaded file is not a valid supported image.")
 
-    return SanitizedScanImage(output.getvalue())
+    return SanitizedScanImage(output.getvalue(), rotation_cw=rotation)
 
 
 def _job_directory(job_id: int) -> Path:
@@ -207,6 +229,7 @@ async def create_scan_job(
     uploads: list,
     *,
     batch_modes: list[bool] | None = None,
+    rotations: list[int | None] | None = None,
     binder_id: int | None = None,
     before_commit: Callable[[ScanJob], None] | None = None,
 ) -> ScanJob:
@@ -219,6 +242,8 @@ async def create_scan_job(
         batch_modes = [len(uploads) > 1] * len(uploads)
     if len(batch_modes) != len(uploads):
         raise ScanUploadError("Scan processing choices do not match the uploaded photos.")
+    if rotations is not None and len(rotations) != len(uploads):
+        raise ScanUploadError("Photo rotations do not match the uploaded photos.")
 
     now = datetime.datetime.utcnow()
     job = ScanJob(
@@ -250,7 +275,14 @@ async def create_scan_job(
                 remaining_job_bytes=MAX_JOB_BYTES - raw_total,
             )
             raw_total += len(raw)
-            sanitized = sanitize_image_bytes(raw)
+            rotation = rotations[position] if rotations is not None else None
+            sanitized = sanitize_image_bytes(raw, rotation_cw=rotation)
+            logger.info(
+                "scan item sanitized job_id=%s position=%s rotation_cw=%s",
+                job.id,
+                position,
+                sanitized.rotation_cw,
+            )
             relative_path, byte_size = store_sanitized_image(job.id, sanitized)
             db.add(
                 ScanJobItem(

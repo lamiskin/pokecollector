@@ -33,6 +33,20 @@ def _jpeg_bytes():
     return output.getvalue()
 
 
+def _marker_jpeg_bytes(size=(90, 130)):
+    """JPEG whose left half is red and right half blue, for rotation checks."""
+    width, height = size
+    image = Image.new("RGB", size, "#2828d9")
+    image.paste("#d92828", (0, 0, width // 2, height))
+    output = io.BytesIO()
+    image.save(output, format="JPEG")
+    return output.getvalue()
+
+
+def _decoded(data):
+    return Image.open(io.BytesIO(data)).convert("RGB")
+
+
 @unittest.skipUnless(DEPS_AVAILABLE, "Scanner API dependencies are not installed")
 class ScanJobsApiTests(unittest.TestCase):
     def setUp(self):
@@ -70,14 +84,16 @@ class ScanJobsApiTests(unittest.TestCase):
         self.env.stop()
         self.temp_dir.cleanup()
 
-    def _post_job(self, binder_id=None):
-        data = {"binder_id": str(binder_id)} if binder_id is not None else None
+    def _post_job(self, binder_id=None, data=None, files=None):
+        payload = dict(data or {})
+        if binder_id is not None:
+            payload["binder_id"] = str(binder_id)
         with patch("api.recognize.get_gemini_key", return_value="secret-key"), \
                 patch("api.scan_jobs.drain_scan_queue", new=AsyncMock(return_value=0)):
             return self.client.post(
                 "/api/cards/recognize/jobs",
-                data=data,
-                files={"files": ("private-name.jpg", _jpeg_bytes(), "image/jpeg")},
+                data=payload or None,
+                files=files or {"files": ("private-name.jpg", _jpeg_bytes(), "image/jpeg")},
             )
 
     def _enqueue(self, binder_id=None):
@@ -237,6 +253,52 @@ class ScanJobsApiTests(unittest.TestCase):
         created = self._enqueue()
         item = self.db.query(ScanJobItem).filter(ScanJobItem.job_id == created["id"]).one()
         self.assertFalse(item.batch_mode)
+
+    def test_rotations_must_align_with_the_uploaded_photos(self):
+        too_few = self._post_job(data={"rotations": "[]"})
+        too_many = self._post_job(data={"rotations": "[90, 180]"})
+
+        self.assertEqual(too_few.status_code, 422)
+        self.assertEqual(too_many.status_code, 422)
+        self.assertEqual(self.db.query(ScanJob).count(), 0)
+        self.assertEqual(os.listdir(self.temp_dir.name), [])
+
+    def test_rotations_must_be_null_or_a_quarter_turn(self):
+        for raw in ('"90"', "[45]", "[true]", "not-json", "null"):
+            with self.subTest(rotations=raw):
+                response = self._post_job(data={"rotations": raw})
+                self.assertEqual(response.status_code, 422, response.text)
+        self.assertEqual(self.db.query(ScanJob).count(), 0)
+
+    def test_absent_rotations_leave_the_stored_photo_unchanged(self):
+        raw = _marker_jpeg_bytes((90, 130))
+        response = self._post_job(
+            files={"files": ("photo.jpg", raw, "image/jpeg")},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        created = response.json()
+        item = self.db.query(ScanJobItem).filter(ScanJobItem.job_id == created["id"]).one()
+
+        stored = resolve_scan_path(item.image_path).read_bytes()
+        with _decoded(stored) as result, _decoded(raw) as source:
+            self.assertEqual(result.size, source.size)
+            self.assertTrue(result.getpixel((5, 5))[0] > 150)
+            self.assertTrue(result.getpixel((85, 5))[2] > 150)
+
+    def test_rotation_90_is_applied_to_the_stored_photo(self):
+        raw = _marker_jpeg_bytes((90, 130))
+        created = self._post_job(
+            data={"rotations": "[90]"},
+            files={"files": ("photo.jpg", raw, "image/jpeg")},
+        ).json()
+        item = self.db.query(ScanJobItem).filter(ScanJobItem.job_id == created["id"]).one()
+
+        stored = resolve_scan_path(item.image_path).read_bytes()
+        with _decoded(stored) as result:
+            self.assertEqual(result.size, (130, 90))
+            # Clockwise: the original left (red) half becomes the top half.
+            self.assertTrue(result.getpixel((5, 5))[0] > 150)
+            self.assertTrue(result.getpixel((5, 85))[2] > 150)
 
     def test_degraded_capability_forces_every_photo_individual(self):
         # A composite needs the same multi-image capability visual

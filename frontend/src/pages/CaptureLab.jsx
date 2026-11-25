@@ -14,6 +14,15 @@ import { useConfirmDialog } from '../contexts/ConfirmDialogContext'
 import { useSettings } from '../contexts/SettingsContext'
 import CaptureOverlay from '../components/CaptureOverlay'
 import CaptureDock from '../components/CaptureDock'
+import TrayItemSheet from '../components/TrayItemSheet'
+import {
+  TRAY_CAPACITY,
+  buildTraySubmission,
+  latestUnsentItem,
+  nextRotationCW,
+  normalizeRotation,
+  sortTrayItems,
+} from '../utils/captureTray'
 import {
   isCaptureSoundEnabled,
   playCaptureSuccess,
@@ -494,11 +503,23 @@ export default function CaptureLab() {
   const [captureNote, setCaptureNote] = useState('')
   const [soundOn, setSoundOn] = useState(isCaptureSoundEnabled)
   const [receiptCorners, setReceiptCorners] = useState(null)
-  const [lastStagedId, setLastStagedId] = useState(null)
-  const [lastCaptureIndex, setLastCaptureIndex] = useState(null)
   const [dockAnnouncement, setDockAnnouncement] = useState('')
   const [flight, setFlight] = useState(null)
   const flightTokenRef = useRef(0)
+  // Sequence is assigned once when an item is staged and never recomputed from
+  // recognition, upload or decode completion. Rotation is snapshotted from the
+  // session default at the same moment, so changing the default later leaves
+  // existing items exactly as they are.
+  const sequenceRef = useRef(0)
+  const [sessionRotation, setSessionRotation] = useState(null)
+  const sessionRotationRef = useRef(sessionRotation)
+  sessionRotationRef.current = sessionRotation
+  const [inspectedId, setInspectedId] = useState(null)
+  const sheetOpenRef = useRef(false)
+  const [removedNotice, setRemovedNotice] = useState(null)
+  const removedNoticeRef = useRef(null)
+  removedNoticeRef.current = removedNotice
+  const removedTimerRef = useRef(null)
   const trayRef = useRef(null)
   const capturedSignatureRef = useRef(null)
   const lastRearmCheckAtRef = useRef(0)
@@ -523,6 +544,28 @@ export default function CaptureLab() {
   pendingRef.current = pending
   liveDetectionRef.current = liveDetection
   autoCaptureRef.current = autoCapture
+  const inspectedItem = inspectedId
+    ? pending.find(item => item.id === inspectedId) || null
+    : null
+  const sheetOpen = inspectedItem != null
+
+  // Inspecting a capture pauses auto-capture without touching the user's mode
+  // or re-arming anything. Closing drops any hold window that elapsed while the
+  // sheet covered the preview, so the same unchanged card is not captured again.
+  useEffect(() => {
+    sheetOpenRef.current = sheetOpen
+    const state = autoStateRef.current
+    state.anchorCorners = null
+    state.anchorTs = null
+    state.lastCorners = null
+    state.lastQualifyingTs = null
+    setAutoHoldStartTs(null)
+    setHoldHint('')
+    if (autoFireTimerRef.current != null) {
+      window.clearInterval(autoFireTimerRef.current)
+      autoFireTimerRef.current = null
+    }
+  }, [sheetOpen])
 
   const {
     data,
@@ -542,6 +585,9 @@ export default function CaptureLab() {
       streamRef.current = null
       stream?.getTracks().forEach(track => track.stop())
       pendingRef.current.forEach(item => URL.revokeObjectURL(item.previewUrl))
+      const removed = removedNoticeRef.current
+      if (removed?.item?.previewUrl) URL.revokeObjectURL(removed.item.previewUrl)
+      window.clearTimeout(removedTimerRef.current)
       window.clearTimeout(liveTimerRef.current)
       window.clearInterval(motionTimerRef.current)
       window.clearInterval(autoFireTimerRef.current)
@@ -1231,15 +1277,18 @@ export default function CaptureLab() {
     }
   }
 
-  const addFiles = useCallback((files, defaultRoute = 'Phone browser') => {
+  const addFiles = useCallback((files, defaultRoute = 'Phone browser', { rotationCW = null } = {}) => {
     const now = Date.now()
     const items = Array.from(files)
       .filter(file => file.type.startsWith('image/') || /\.(heic|heif)$/i.test(file.name))
       .map((file, index) => {
         const id = `${now}-${index}-${Math.random().toString(36).slice(2)}`
         const previewUrl = URL.createObjectURL(file)
+        sequenceRef.current += 1
         const item = {
           id,
+          sequence: sequenceRef.current,
+          rotationCW: normalizeRotation(rotationCW),
           file,
           previewUrl,
           width: null,
@@ -1270,39 +1319,37 @@ export default function CaptureLab() {
 
   const resizeMode = () => streamRef.current?.getVideoTracks?.()[0]?.getSettings?.().resizeMode || 'contain'
 
-  const stageDock = (item, corners, sourceRect, index, count) => {
+  // Capacity is about unsent photos, not everything still listed: once a batch
+  // is on its way the tray can accept more.
+  const trayUnsentCount = () => pendingRef.current.filter(item => (
+    item.scanStatus !== 'done' && item.scanStatus !== 'uploading'
+  )).length
+
+  const stageDock = (item, corners, sourceRect, count) => {
     lastStagedAtRef.current = performance.now()
-    setLastStagedId(item.id)
-    setLastCaptureIndex(index)
     setReceiptCorners(corners || null)
-    setDockAnnouncement(`Captured #${index} · ${count} in tray`)
+    setDockAnnouncement(`Captured #${item.sequence} · ${count} in tray`)
     flightTokenRef.current += 1
     setFlight({
       token: flightTokenRef.current,
+      itemId: item.id,
       url: item.previewUrl,
+      rotationCW: item.rotationCW,
       sourceRect,
-      index,
+      index: item.sequence,
       resizeMode: resizeMode(),
       committedAt: performance.now(),
     })
   }
 
+  // Latest unsent capture by sequence — never the card nearest the viewport.
   const undoLastCapture = () => {
-    if (!lastStagedId) return
+    const target = latestUnsentItem(pendingRef.current)
+    if (!target) return
     setFlight(null)
-    removePending(lastStagedId)
-    const remaining = Math.max(0, pendingRef.current.length - 1)
-    setLastStagedId(null)
-    setLastCaptureIndex(null)
+    removePending(target.id)
     setReceiptCorners(null)
-    setDockAnnouncement(`Removed · ${remaining} in tray`)
-  }
-
-  const openTray = () => {
-    trayRef.current?.scrollIntoView({
-      behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
-      block: 'start',
-    })
+    setDockAnnouncement(`Removed #${target.sequence} · ${Math.max(0, pendingRef.current.length - 1)} in tray`)
   }
 
   const captureFullFrame = ({ mode = 'manual' } = {}) => {
@@ -1314,20 +1361,21 @@ export default function CaptureLab() {
     canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height)
     canvas.toBlob(blob => {
       if (!blob) return
-      if (pendingRef.current.length >= 50) {
-        setCaptureNote('Tray full · Review 50 photos')
+      if (trayUnsentCount() >= TRAY_CAPACITY) {
+        setCaptureNote(`Tray full · Review & send ${TRAY_CAPACITY}`)
         return
       }
       const file = new File([blob], `capture-${Date.now()}.jpg`, { type: 'image/jpeg' })
-      const index = pendingRef.current.length + 1
-      const created = addFiles([file])
+      const created = addFiles([file], 'Phone browser', {
+        rotationCW: sessionRotationRef.current,
+      })
       if (created[0]) {
         stageDock(created[0], null, {
           x: 0,
           y: 0,
           width: video.videoWidth,
           height: video.videoHeight,
-        }, index, index)
+        }, pendingRef.current.length + 1)
       }
       if (soundOn) playCaptureSuccess()
       recordDiagEvent('capture', { mode, rectified: false, corners: null })
@@ -1782,16 +1830,22 @@ export default function CaptureLab() {
           return false
         }
 
-        if (pendingRef.current.length >= 50) {
-          setCaptureNote('Tray full · Review 50 photos')
+        if (trayUnsentCount() >= TRAY_CAPACITY) {
+          setCaptureNote(`Tray full · Review & send ${TRAY_CAPACITY}`)
           if (auto) disarmAutoCapture()
           return false
         }
-        const index = pendingRef.current.length + 1
         const file = new File([blob], `card-${Date.now()}.jpg`, { type: 'image/jpeg' })
-        const created = addFiles([file])
+        const created = addFiles([file], 'Phone browser', {
+          rotationCW: sessionRotationRef.current,
+        })
         if (created[0]) {
-          stageDock(created[0], corners, acquisition.sourceRect, index, index)
+          stageDock(
+            created[0],
+            corners,
+            acquisition.sourceRect,
+            pendingRef.current.length + 1,
+          )
         }
         // A capture resets hunting to full speed for the next card.
         lastUsableAtRef.current = performance.now()
@@ -1899,6 +1953,7 @@ export default function CaptureLab() {
   const fireAutoCaptureIfDue = () => {
     const state = autoStateRef.current
     if (!autoCaptureRef.current || !liveDetectionRef.current) return
+    if (sheetOpenRef.current) return
     if (captureInFlightRef.current) return
     if (state.disarmed || state.anchorTs == null) return
     const now = performance.now()
@@ -1943,7 +1998,7 @@ export default function CaptureLab() {
   // is free because the warp uses the same frame's geometry.
   const noteAutoObservation = (corners, now, source = 'tracked') => {
     const state = autoStateRef.current
-    if (!autoCaptureRef.current || state.disarmed || !corners) return
+    if (sheetOpenRef.current || !autoCaptureRef.current || state.disarmed || !corners) return
     const decision = autoHoldDecision({
       anchorCorners: state.anchorCorners,
       lastCorners: state.lastCorners,
@@ -2041,6 +2096,9 @@ export default function CaptureLab() {
   // copies in a row still require the card to be removed and replaced.
   const evaluateAutoCapture = result => {
     if (captureInFlightRef.current) return
+    // The inspection sheet is an explicit pause: it neither accumulates nor
+    // re-arms a hold while the collector is looking at a capture.
+    if (sheetOpenRef.current) return
     const state = autoStateRef.current
     const now = performance.now()
     const qualifies = result.usable && result.area >= MIN_CARD_AREA
@@ -2717,17 +2775,81 @@ export default function CaptureLab() {
     setPending(prev => prev.map(item => (item.id === id ? { ...item, ...patch } : item)))
   }
 
-  const removePending = id => {
+  // Removal is shared by the pending list and the inspection sheet. The sheet
+  // keeps the item alive for "Removed #4 · Undo" with its sequence, position
+  // and rotation intact; the preview URL is revoked only when that offer
+  // expires or is replaced.
+  const dismissRemovedNotice = useCallback(() => {
+    window.clearTimeout(removedTimerRef.current)
+    removedTimerRef.current = null
+    const current = removedNoticeRef.current
+    if (current?.item?.previewUrl) URL.revokeObjectURL(current.item.previewUrl)
+    removedNoticeRef.current = null
+    setRemovedNotice(null)
+  }, [])
+
+  const removePending = useCallback((id, { undoable = false } = {}) => {
+    const current = pendingRef.current
+    const index = current.findIndex(item => item.id === id)
+    if (index < 0) return
+    const target = current[index]
+    setPending(prev => prev.filter(item => item.id !== id))
+    if (!undoable) {
+      if (target.previewUrl) URL.revokeObjectURL(target.previewUrl)
+      return
+    }
+    dismissRemovedNotice()
+    const notice = { item: target, index }
+    removedNoticeRef.current = notice
+    setRemovedNotice(notice)
+    setDockAnnouncement(`Removed #${target.sequence}`)
+    removedTimerRef.current = window.setTimeout(() => dismissRemovedNotice(), 8000)
+  }, [dismissRemovedNotice])
+
+  const undoRemoved = () => {
+    const notice = removedNoticeRef.current
+    if (!notice) return
+    const { item, index } = notice
+    removedNoticeRef.current = null
+    window.clearTimeout(removedTimerRef.current)
+    removedTimerRef.current = null
+    setRemovedNotice(null)
     setPending(prev => {
-      const target = prev.find(item => item.id === id)
-      if (target) URL.revokeObjectURL(target.previewUrl)
-      return prev.filter(item => item.id !== id)
+      if (prev.some(entry => entry.id === item.id)) return prev
+      const next = [...prev]
+      next.splice(Math.min(index, next.length), 0, item)
+      return next
+    })
+    setDockAnnouncement(`Restored #${item.sequence} · ${pendingRef.current.length + 1} in tray`)
+  }
+
+  const openInspector = id => {
+    // Set synchronously: the fire timer ticks every 100 ms and must not squeeze
+    // a capture in between the tap and the effect that pauses it.
+    sheetOpenRef.current = true
+    setInspectedId(id)
+  }
+
+  const closeInspector = () => {
+    sheetOpenRef.current = false
+    setInspectedId(null)
+  }
+
+  const rotateInspected = () => {
+    if (!inspectedItem) return
+    updatePending(inspectedItem.id, {
+      rotationCW: nextRotationCW(inspectedItem.rotationCW),
     })
   }
 
+  const useInspectedRotation = () => {
+    if (!inspectedItem) return
+    setSessionRotation(normalizeRotation(inspectedItem.rotationCW) ?? 0)
+  }
+
   // A click only queues a scan job; adding to the collection still requires the normal review step.
-  const submitSingleFileScan = (file, onProgress) =>
-    enqueueScanJob([file], [], null, { onProgress })
+  const submitSingleFileScan = (file, onProgress, rotationCW = null) =>
+    enqueueScanJob([file], [], null, { onProgress, rotations: [rotationCW] })
 
   const scanPending = async item => {
     updatePending(item.id, {
@@ -2739,7 +2861,7 @@ export default function CaptureLab() {
     try {
       const job = await submitSingleFileScan(item.file, progress => {
         updatePending(item.id, { scanProgress: scanUploadPercent(progress) })
-      })
+      }, item.rotationCW)
       if (!mountedRef.current) return
       updatePending(item.id, { scanStatus: 'done', scanProgress: 100, scanJobId: job.id })
     } catch (error) {
@@ -2752,11 +2874,15 @@ export default function CaptureLab() {
   // card. The list stays in place so the user can see what was sent and remove
   // it themselves; already-sent items are excluded so a second press cannot
   // submit the same images again.
+  //
+  // Files, rotations and ids all come from one frozen snapshot in sequence
+  // order. Nothing here derives from the rail's visible order.
   const scanAllPending = async () => {
     if (batchScanRef.current) return
-    const items = pending.filter(item => (
+    const submission = buildTraySubmission(pending.filter(item => (
       item.scanStatus !== 'done' && item.scanStatus !== 'uploading'
-    ))
+    )))
+    const { items, files } = submission
     if (items.length === 0) {
       setBatchScanMessage('All pending captures have already been scanned.')
       setBatchScanError('')
@@ -2774,10 +2900,12 @@ export default function CaptureLab() {
     }))
     try {
       const job = await enqueueScanJob(
-        items.map(item => item.file),
-        items.map((_, index) => index),
+        files,
+        files.map((_, index) => index),
         null,
         {
+          // Omitted by the client when every item is "no choice".
+          rotations: submission.rotations,
           onProgress: progress => {
             if (progress.phase === 'prepare') {
               setBatchScanMessage(`Preparing ${progress.done} of ${progress.total}…`)
@@ -3116,16 +3244,21 @@ export default function CaptureLab() {
         </div>
 
         <CaptureDock
+          items={sortTrayItems(pending)}
           count={pending.length}
-          lastIndex={lastCaptureIndex}
-          thumbnail={
-            pending.find(item => item.id === lastStagedId)?.previewUrl
-            || pending[0]?.previewUrl
-            || null
-          }
-          canUndo={Boolean(lastStagedId && pending.some(item => item.id === lastStagedId))}
+          full={scannablePending.length >= TRAY_CAPACITY}
+          canUndo={Boolean(latestUnsentItem(pending))}
+          canReview={scannablePending.length > 0}
+          reviewBusy={batchScanning}
           onUndo={undoLastCapture}
-          onOpen={openTray}
+          onReview={scanAllPending}
+          onInspect={openInspector}
+          sessionRotation={sessionRotation}
+          onResetSessionRotation={() => setSessionRotation(null)}
+          removedNotice={removedNotice ? {
+            sequence: removedNotice.item.sequence,
+            onUndo: undoRemoved,
+          } : null}
           flight={flight}
           onFlightDone={token => {
             setFlight(current => (current && current.token === token ? null : current))
@@ -3133,6 +3266,20 @@ export default function CaptureLab() {
           videoRef={videoRef}
           announcement={dockAnnouncement}
         />
+
+        {inspectedItem ? (
+          <TrayItemSheet
+            item={inspectedItem}
+            sessionRotation={sessionRotation}
+            onClose={closeInspector}
+            onRotate={rotateInspected}
+            onUseRotation={useInspectedRotation}
+            onRemove={() => {
+              closeInspector()
+              removePending(inspectedItem.id, { undoable: true })
+            }}
+          />
+        ) : null}
 
         {/* Kept directly under the preview so both marks and the sound toggle
             stay in thumb reach while the phone is held in one hand with the

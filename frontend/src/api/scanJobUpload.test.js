@@ -76,4 +76,27 @@ describe('enqueueScanJob', () => {
 
     expect(progress).toContainEqual({ phase: 'upload', loaded: 25, total: 100 })
   })
+
+  it('omits rotations when no capture has a choice', async () => {
+    await enqueueScanJob([photo('a.jpg'), photo('b.jpg')], [], null, {
+      rotations: [null, null],
+    })
+    const [, body] = post.mock.calls[0]
+    expect(body.get('rotations')).toBeNull()
+  })
+
+  it('sends rotations aligned with the files, keeping an explicit 0', async () => {
+    await enqueueScanJob([photo('a.jpg'), photo('b.jpg'), photo('c.jpg')], [], null, {
+      rotations: [0, null, 270],
+    })
+    const [, body] = post.mock.calls[0]
+    expect(body.getAll('files')).toHaveLength(3)
+    expect(body.get('rotations')).toBe('[0,null,270]')
+  })
+
+  it('drops a rotation array that does not line up with the files', async () => {
+    await enqueueScanJob([photo('a.jpg')], [], null, { rotations: [90, 180] })
+    const [, body] = post.mock.calls[0]
+    expect(body.get('rotations')).toBeNull()
+  })
 })
