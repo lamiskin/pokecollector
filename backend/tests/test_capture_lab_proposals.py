@@ -83,11 +83,60 @@ def _write_proposal(
     return image_path, geometry
 
 
+def _write_cv(root: Path, stem: str, *, entry=None, data=None):
+    """Write one comparison crop and merge its row into ``index.json``.
+
+    The comparison directory is a sibling of the scan-upload root, matching
+    what the offline job writes on the host.
+    """
+    cv_dir = root.parent / "cv-compare"
+    cv_dir.mkdir(parents=True, exist_ok=True)
+    payload = data if data is not None else _card_jpeg((120, 160))
+    image_path = cv_dir / f"{stem}.jpg"
+    image_path.write_bytes(payload)
+    index_path = cv_dir / "index.json"
+    try:
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        index = {}
+    if not isinstance(index, dict):
+        index = {}
+    if entry is not None:
+        index[stem] = entry
+    index_path.write_text(json.dumps(index), encoding="utf-8")
+    return image_path, payload
+
+
+CV_ENTRY = {
+    "ok": True,
+    "score": 0.91,
+    "top1": {"id": "sv1", "name": "Charizard", "score": 0.88},
+    "top3": [
+        {"id": "sv1", "name": "Charizard", "score": 0.88},
+        {"id": "sv2", "name": "Charmeleon", "score": 0.07},
+    ],
+    "detection": "auto",
+    "turnedCw": 90,
+    "ms": 321,
+}
+CV_ENTRY_TRIMMED = {
+    "score": 0.91,
+    "top1": {"id": "sv1", "name": "Charizard", "score": 0.88},
+    "detection": "auto",
+    "turnedCw": 90,
+}
+
+
 @unittest.skipUnless(DEPS_AVAILABLE, "Proposal API dependencies are not installed")
 class CaptureLabProposalTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp_dir.name)
+        self.base = Path(self.temp_dir.name)
+        # The API treats the comparison directory as a sibling of the upload
+        # root, so keep both inside the temporary directory.
+        self.root = self.base / "scan-uploads"
+        self.root.mkdir()
+        self.cv_dir = self.base / "cv-compare"
         self.user = types.SimpleNamespace(id=11, username="collector")
 
         app = FastAPI()
@@ -123,6 +172,12 @@ class CaptureLabProposalTests(unittest.TestCase):
                 ).status_code,
                 404,
             )
+            self.assertEqual(
+                self.client.get(
+                    f"/api/capture-lab/proposals/{STEM_A}/cv"
+                ).status_code,
+                404,
+            )
 
     def test_bad_stem_is_rejected(self):
         with self._enabled_env():
@@ -132,6 +187,13 @@ class CaptureLabProposalTests(unittest.TestCase):
                 )
                 self.assertEqual(response.status_code, 400, bad)
                 self.assertEqual(response.headers["cache-control"], "no-store")
+                cv_response = self.client.get(
+                    f"/api/capture-lab/proposals/{bad}/cv"
+                )
+                self.assertEqual(cv_response.status_code, 400, bad)
+                self.assertEqual(
+                    cv_response.headers["cache-control"], "no-store"
+                )
 
     def test_listing_finds_geometry_sidecars_newest_job_first(self):
         _write_proposal(self.root, 320, STEM_A)
@@ -276,6 +338,96 @@ class CaptureLabProposalTests(unittest.TestCase):
             )
             self.assertEqual(third.status_code, 200)
             self.assertEqual(builder.call_count, 2)
+
+    def test_listing_includes_cv_url_and_trimmed_row_when_present(self):
+        _write_proposal(self.root, 320, STEM_A)
+        _write_proposal(self.root, 321, STEM_B)
+        _write_cv(self.root, STEM_A, entry=CV_ENTRY)
+        with self._enabled_env():
+            body = self.client.get("/api/capture-lab/proposals").json()
+
+        by_stem = {item["stem"]: item for item in body["items"]}
+        compared = by_stem[STEM_A]
+        self.assertEqual(
+            compared["cvUrl"], f"/api/capture-lab/proposals/{STEM_A}/cv"
+        )
+        self.assertEqual(compared["cv"], CV_ENTRY_TRIMMED)
+        self.assertEqual(
+            set(compared["cv"]), {"score", "top1", "detection", "turnedCw"}
+        )
+
+        # A proposal without a comparison keeps the same item shape minus
+        # ``cvUrl``, with ``cv`` explicitly null.
+        plain = by_stem[STEM_B]
+        self.assertNotIn("cvUrl", plain)
+        self.assertIsNone(plain["cv"])
+
+    def test_cv_serves_the_comparison_jpeg_or_409_when_missing(self):
+        _write_proposal(self.root, 320, STEM_A)
+        image_path, payload = _write_cv(self.root, STEM_A, entry=CV_ENTRY)
+        with self._enabled_env():
+            found = self.client.get(
+                f"/api/capture-lab/proposals/{STEM_A}/cv"
+            )
+            missing = self.client.get(
+                f"/api/capture-lab/proposals/{STEM_B}/cv"
+            )
+
+        self.assertEqual(found.status_code, 200)
+        self.assertEqual(found.headers["content-type"], "image/jpeg")
+        self.assertEqual(found.headers["cache-control"], "no-store")
+        self.assertEqual(found.content, payload)
+        self.assertEqual(found.content, image_path.read_bytes())
+
+        self.assertEqual(missing.status_code, 409)
+        self.assertEqual(missing.headers["cache-control"], "no-store")
+        self.assertEqual(missing.json(), {"detail": "no comparison"})
+
+    def test_missing_comparison_directory_still_lists_normally(self):
+        _write_proposal(self.root, 320, STEM_A)
+        self.assertFalse(self.cv_dir.exists())
+        with self._enabled_env():
+            response = self.client.get("/api/capture-lab/proposals")
+            missing = self.client.get(
+                f"/api/capture-lab/proposals/{STEM_A}/cv"
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        body = response.json()
+        self.assertEqual(body["total"], 1)
+        self.assertNotIn("cvUrl", body["items"][0])
+        self.assertIsNone(body["items"][0]["cv"])
+        self.assertEqual(missing.status_code, 409)
+
+    def test_cv_index_is_cached_by_mtime_and_reread_after_a_change(self):
+        _write_proposal(self.root, 320, STEM_A)
+        _write_cv(self.root, STEM_A, entry=CV_ENTRY)
+        index_path = self.cv_dir / "index.json"
+        real_read = capture_lab_proposals._read_cv_index
+        with self._enabled_env(), patch.object(
+            capture_lab_proposals, "_read_cv_index", wraps=real_read
+        ) as reader:
+            first = self.client.get("/api/capture-lab/proposals").json()
+            second = self.client.get("/api/capture-lab/proposals").json()
+            self.assertEqual(reader.call_count, 1)
+            self.assertEqual(
+                first["items"][0]["cv"], second["items"][0]["cv"]
+            )
+
+            updated = dict(CV_ENTRY, score=0.42)
+            index_path.write_text(
+                json.dumps({STEM_A: updated}), encoding="utf-8"
+            )
+            stat = index_path.stat()
+            os.utime(
+                index_path,
+                ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000),
+            )
+            third = self.client.get("/api/capture-lab/proposals").json()
+
+        self.assertGreaterEqual(reader.call_count, 2)
+        self.assertEqual(third["items"][0]["cv"]["score"], 0.42)
 
 
 if __name__ == "__main__":

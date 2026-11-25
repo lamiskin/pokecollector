@@ -87,9 +87,10 @@ def _cache_put(key: tuple, value: _Proposal) -> None:
 
 
 def _clear_cache() -> None:
-    """Test hook; also the way an operator would drop every entry."""
+    """Test hook; also the way an operator would drop every cached value."""
     with _cache_lock:
         _cache.clear()
+    _clear_cv_index()
 
 
 def _upload_root() -> Path:
@@ -105,6 +106,69 @@ def _upload_root() -> Path:
         else Path(__file__).resolve().parent.parent / "data" / "scan-uploads"
     )
     return root.resolve()
+
+
+def _cv_compare_dir() -> Path:
+    """The offline CollectorVision comparison directory, a sibling of uploads.
+
+    The comparison job writes ``<stem>.jpg`` plus ``index.json`` there. This is
+    read-only: a missing directory is simply treated as "no comparisons".
+    """
+    return _upload_root().parent / "cv-compare"
+
+
+# Parsed ``index.json`` keyed on its resolved path and mtime so the listing
+# never re-reads it per request. ``None`` means "not loaded (or file gone)".
+_cv_index_cache: tuple[str, int, dict] | None = None
+_cv_index_lock = threading.Lock()
+
+
+def _clear_cv_index() -> None:
+    global _cv_index_cache
+    with _cv_index_lock:
+        _cv_index_cache = None
+
+
+def _read_cv_index(path: Path) -> dict:
+    """Parse one ``index.json``; anything unusable reads as empty."""
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _cv_index() -> dict:
+    """The comparison index, re-parsed only when its mtime changes."""
+    global _cv_index_cache
+    path = _cv_compare_dir() / "index.json"
+    try:
+        mtime_ns = path.stat().st_mtime_ns
+    except OSError:
+        _clear_cv_index()
+        return {}
+    signature = (str(path), mtime_ns)
+    with _cv_index_lock:
+        cached = _cv_index_cache
+        if cached is not None and cached[:2] == signature:
+            return cached[2]
+    index = _read_cv_index(path)
+    with _cv_index_lock:
+        _cv_index_cache = (*signature, index)
+    return index
+
+
+def _cv_entry(stem: str, index: dict) -> dict | None:
+    """One index entry trimmed to the review-relevant fields."""
+    entry = index.get(stem)
+    if not isinstance(entry, dict):
+        return None
+    return {
+        "score": entry.get("score"),
+        "top1": entry.get("top1"),
+        "detection": entry.get("detection"),
+        "turnedCw": entry.get("turnedCw"),
+    }
 
 
 def _job_directories() -> list[Path]:
@@ -293,6 +357,8 @@ def list_proposals(user: User = Depends(get_current_user)):
     technically invalid, has no proposal to review and is omitted; asking for
     its crop directly still answers 409 with the reason.
     """
+    cv_dir = _cv_compare_dir()
+    cv_index = _cv_index()
     items = []
     for job_dir in _job_directories():
         try:
@@ -340,7 +406,7 @@ def list_proposals(user: User = Depends(get_current_user)):
                     raise
                 continue
 
-            items.append({
+            item = {
                 "stem": stem,
                 "jobId": job_id,
                 "label": PROPOSAL_LABEL,
@@ -354,7 +420,11 @@ def list_proposals(user: User = Depends(get_current_user)):
                 "originalUrl": f"/api/capture-lab/proposals/{stem}/original",
                 "cropUrl": f"/api/capture-lab/proposals/{stem}/crop",
                 "rotatedUrl": f"/api/capture-lab/proposals/{stem}/turned",
-            })
+                "cv": _cv_entry(stem, cv_index),
+            }
+            if (cv_dir / f"{stem}.jpg").is_file():
+                item["cvUrl"] = f"/api/capture-lab/proposals/{stem}/cv"
+            items.append(item)
     return JSONResponse(
         content={"total": len(items), "items": items}, headers=NO_STORE
     )
@@ -383,6 +453,16 @@ def proposal_crop(stem: str, user: User = Depends(get_current_user)):
     return Response(
         content=proposal.crop, media_type="image/jpeg", headers=NO_STORE
     )
+
+
+@router.get("/proposals/{stem}/cv")
+def proposal_cv(stem: str, user: User = Depends(get_current_user)):
+    """The offline CollectorVision comparison crop for one proposal, if any."""
+    _check_stem(stem)
+    path = _cv_compare_dir() / f"{stem}.jpg"
+    if not path.is_file():
+        raise HTTPException(status_code=409, detail="no comparison", headers=NO_STORE)
+    return FileResponse(path, media_type="image/jpeg", headers=NO_STORE)
 
 
 @router.get("/proposals/{stem}/turned")
