@@ -3223,30 +3223,32 @@ export default function CaptureLab() {
           ) : null}
         </div>
 
-        <div className="capture-preview-box relative mt-3 overflow-hidden rounded">
-          <video
-            ref={videoRef}
-            autoPlay
-            playsInline
-            muted
-            className={`h-full w-full rounded border border-border bg-black object-contain ${status === 'live' ? '' : 'invisible'}`}
-          />
-          {status === 'live' && liveDetection ? (
-            <CaptureOverlay
-              ref={overlayRef}
-              phase={overlayPhase}
-              tracked={quadSource === 'tracked'}
-              confirmed={quadSource === 'model'}
-              holdStartedAt={autoHoldStartTs}
-              holdDurationMs={AUTO_STABLE_MS}
-              tooSmall={overlayTooSmall}
-              cardArea={overlayCardArea}
-              pendingCount={pending.length}
-              softFocus={softFocus}
-              reason={phaseReason}
-              receiptCorners={receiptCorners}
+        <div className="relative mt-3 flex justify-center overflow-hidden rounded">
+          <div className="relative inline-block max-w-full">
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              muted
+              className={`block h-auto w-auto max-h-[38vh] max-w-full rounded bg-black object-contain ${status === 'live' ? '' : 'invisible'}`}
             />
-          ) : null}
+            {status === 'live' && liveDetection ? (
+              <CaptureOverlay
+                ref={overlayRef}
+                phase={overlayPhase}
+                tracked={quadSource === 'tracked'}
+                confirmed={quadSource === 'model'}
+                holdStartedAt={autoHoldStartTs}
+                holdDurationMs={AUTO_STABLE_MS}
+                tooSmall={overlayTooSmall}
+                cardArea={overlayCardArea}
+                pendingCount={pending.length}
+                softFocus={softFocus}
+                reason={phaseReason}
+                receiptCorners={receiptCorners}
+              />
+            ) : null}
+          </div>
         </div>
 
         <CaptureDock

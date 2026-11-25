@@ -963,16 +963,6 @@ body {
   animation: capture-dock-thumb-in 100ms ease-out;
 }
 
-/* Reserve a camera-shaped frame before permission is granted. The capped
-   16:9 box leaves the dock in the same first-screen composition. */
-.capture-preview-box {
-  aspect-ratio: 16 / 9;
-  width: min(100%, calc(38vh * 16 / 9));
-  max-height: 38vh;
-  background: #000;
-}
-.capture-preview-box video { aspect-ratio: 16 / 9; object-fit: contain; }
-
 .capture-tray-rail { perspective: 900px; }
 .capture-tray-slot {
   transform: perspective(900px) rotateY(calc(clamp(-11deg, var(--fan-offset) * -0.75deg, 11deg))) translateZ(calc(clamp(-18px, var(--fan-offset) * -1.2px, 18px)));
