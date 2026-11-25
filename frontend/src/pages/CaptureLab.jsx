@@ -29,6 +29,7 @@ import {
   FIRST_TRACK_RADIUS,
   isCorroborated,
   CAPTURE_QUAD_MAX_AGE_MS,
+  isContainableQuad,
   MAX_AREA_RATIO,
   MAX_FRAME_MOVE,
   MAX_PATCH_MSE_FLOOR,
@@ -38,6 +39,7 @@ import {
   SEARCH_RADIUS,
   shouldAcceptCapture,
   shouldKeepTracking,
+  trackerFallbackEligible,
   TENTATIVE_CONFIRM_TRACKS,
   TENTATIVE_MAX_MISSES,
   TRACK_AGREE_MAX,
@@ -104,6 +106,15 @@ const CAPTURE_BOX_PAD_FRACTION = 0.12
 // One bounded retry after a stale geometry result: request a fresh detection
 // and try the capture again when it lands.
 const CAPTURE_RETRY_MS = 900
+// A tracker fallback must be backed by a recent agreeing detector result and no
+// recent dispute; these are deliberately tighter than "last usable".
+const CAPTURE_DISAGREE_MS = 1500
+const CAPTURE_AGREE_MS = 3000
+// Candidate validation for automatic captures.
+const CAPTURE_EDGE_MIN = 0.015
+const CAPTURE_ASPECT_MIN = 0.55
+const CAPTURE_ASPECT_MAX = 0.85
+const CAPTURE_LOW_DETAIL = 200
 // Confidence pulse after an accepted model result. The overlay turns the pulse
 // into one eased lock strength for the ring, so this only has to be long enough
 // for consecutive detections to overlap, not a visible state of its own.
@@ -407,6 +418,11 @@ export default function CaptureLab() {
   const lastConfirmTsRef = useRef(null)
   const lastConfirmCornersRef = useRef(null)
   const lastConfirmSharpnessRef = useRef(null)
+  const lastDisagreementAtRef = useRef(null)
+  const lastAgreementAtRef = useRef(null)
+  const lastAgreementRef = useRef(null)
+  const lastDecisionRef = useRef(null)
+  const lastAttemptFieldsRef = useRef(null)
   const trackerStatsRef = useRef({ hits: 0, attempts: 0, reason: 'frame' })
   const lastTrackFrameTimeRef = useRef(null)
   const lastUsableModelAtRef = useRef(null)
@@ -942,6 +958,10 @@ export default function CaptureLab() {
     lastConfirmTsRef.current = null
     lastConfirmCornersRef.current = null
     lastConfirmSharpnessRef.current = null
+    lastDisagreementAtRef.current = null
+    lastAgreementAtRef.current = null
+    lastAgreementRef.current = null
+    lastDecisionRef.current = null
     lastHoldDriftRef.current = null
     autoStateRef.current = newAutoState()
     stopAutoFireTimer()
@@ -1421,6 +1441,29 @@ export default function CaptureLab() {
       for (let pass = 0; pass < 2; pass += 1) {
         const retry = pass > 0
         const now = performance.now()
+        const sinceDisagreementMs = lastDisagreementAtRef.current == null
+          ? null
+          : Math.round(now - lastDisagreementAtRef.current)
+        const sinceAgreementMs = lastAgreementAtRef.current == null
+          ? null
+          : Math.round(now - lastAgreementAtRef.current)
+        const decisionAt = {
+          trackerHits: trackerStatsRef.current.hits,
+          trackerFailures: trackerFailuresRef.current,
+          agreement: lastAgreementRef.current,
+          pendingReanchor: lastDecisionRef.current === 'reanchor'
+            || tentativeRef.current != null,
+        }
+        const attempt = {
+          edgeContainment: null,
+          quadAspect: null,
+          edgeVariance: null,
+          sinceDisagreementMs,
+          sinceAgreementMs,
+          decisionAt,
+        }
+        const attemptFields = () => ({ ...attempt })
+        lastAttemptFieldsRef.current = attemptFields()
         const hasTracked = trackedQuadRef.current != null
         const trackedAgeMs = hasTracked && trackerLastTsRef.current != null
           ? now - trackerLastTsRef.current
@@ -1453,6 +1496,7 @@ export default function CaptureLab() {
             sourceLongEdge: null,
             cardLongEdge: null,
             corroboration: 'none',
+            ...attemptFields(),
           })
           if (!retry && liveDetectionRef.current) {
             setCaptureNote('Getting a fresh look at the card…')
@@ -1471,6 +1515,7 @@ export default function CaptureLab() {
               sourceLongEdge: null,
               cardLongEdge: null,
               corroboration: 'none',
+              ...attemptFields(),
             })
           }
           setCaptureNote('Waiting for a fresh look at the card; nothing captured.')
@@ -1494,15 +1539,13 @@ export default function CaptureLab() {
             sourceLongEdge: null,
             cardLongEdge: null,
             corroboration: 'none',
+            ...attemptFields(),
           })
           // The held quad disappeared before the frame could be cropped.
           if (auto) rearmAutoCapture()
           return false
         }
 
-        // Automatic capture needs the detector itself to have confirmed this
-        // geometry recently; a quad carried only by the tracker may be a wrong
-        // region, so it must not auto-capture.
         const confirmAgeMs = lastConfirmTsRef.current == null
           ? null
           : performance.now() - lastConfirmTsRef.current
@@ -1512,6 +1555,35 @@ export default function CaptureLab() {
         const corroborateAgeMs = decision.source === 'model'
           ? 0
           : (confirmAgeMs == null ? null : Math.round(confirmAgeMs))
+          const contain = isContainableQuad(corners, {
+            minEdge: CAPTURE_EDGE_MIN,
+            minAspect: CAPTURE_ASPECT_MIN,
+            maxAspect: CAPTURE_ASPECT_MAX,
+          })
+          attempt.edgeContainment = Number(contain.edgeContainment.toFixed(4))
+          attempt.quadAspect = Number(contain.quadAspect.toFixed(4))
+          lastAttemptFieldsRef.current = attemptFields()
+          if (auto && !contain.ok) {
+            const check = contain.edgeContainment < CAPTURE_EDGE_MIN ? 'edge' : 'aspect'
+            recordDiagEvent('capture-attempt', {
+              ok: false,
+              retry,
+              reason: 'not-containable',
+              check,
+              waitedMs: null,
+              quadAgeMs,
+              frameTime: null,
+              sharpness: captureSharpness,
+              corroborateAgeMs,
+              sourceLongEdge: null,
+              cardLongEdge: null,
+              corroboration: 'none',
+              ...attemptFields(),
+            })
+            liveScheduleRef.current?.(0)
+            return false
+          }
+
         const corroborated = decision.source === 'model' || isCorroborated({
           lastConfirmTs: lastConfirmTsRef.current,
           now: performance.now(),
@@ -1523,11 +1595,17 @@ export default function CaptureLab() {
         // A tracker that has followed this quad for a dozen consecutive frames
         // is strong evidence of a card even while the detector's confidence is
         // too soft. It is a fallback, not a replacement for a fresh model result.
-        const trackerCorroborated = decision.source === 'tracked'
-          && trackerFailuresRef.current === 0
-          && trackerStatsRef.current.hits >= 12
-          && quadAgeMs != null
-          && quadAgeMs <= CAPTURE_QUAD_MAX_AGE_MS
+        const trackerCorroborated = trackerFallbackEligible({
+          source: decision.source,
+          hits: trackerStatsRef.current.hits,
+          failures: trackerFailuresRef.current,
+          quadAgeMs,
+          sinceDisagreementMs,
+          sinceAgreementMs,
+          maxQuadAgeMs: CAPTURE_QUAD_MAX_AGE_MS,
+          disagreementWindowMs: CAPTURE_DISAGREE_MS,
+          agreementWindowMs: CAPTURE_AGREE_MS,
+        })
         const corroborationSource = corroborated
           ? 'model'
           : (trackerCorroborated ? 'tracker' : 'none')
@@ -1544,6 +1622,7 @@ export default function CaptureLab() {
             sourceLongEdge: null,
             cardLongEdge: null,
             corroboration: 'none',
+            ...attemptFields(),
           })
           if (!retry && liveDetectionRef.current) {
             setCaptureNote('Checking the card with the detector…')
@@ -1562,6 +1641,7 @@ export default function CaptureLab() {
               sourceLongEdge: null,
               cardLongEdge: null,
               corroboration: 'none',
+              ...attemptFields(),
             })
           }
           setCaptureNote('Waiting for the detector to confirm the card; nothing captured.')
@@ -1593,6 +1673,7 @@ export default function CaptureLab() {
             sourceLongEdge: null,
             cardLongEdge: null,
             corroboration: corroborationSource,
+            ...attemptFields(),
           })
           // A completed hold ended with nothing captured: the camera never
           // produced a fresh frame, which the user cannot see.
@@ -1621,18 +1702,15 @@ export default function CaptureLab() {
             sourceLongEdge: acquisition.sourceLongEdge,
             cardLongEdge: acquisition.cardLongEdge,
             corroboration: corroborationSource,
+            ...attemptFields(),
           })
           if (auto) rearmAutoCapture()
           return false
         }
 
-        const index = pendingRef.current.length + 1
-        const file = new File([blob], `card-${Date.now()}.jpg`, { type: 'image/jpeg' })
-        const created = addFiles([file])
-        if (created[0]) showReceipt(created[0], file, corners, index)
-        // Annotation only: a live focus proxy, not a gate. The backend's 500
-        // threshold is on sanitized 2048 px images, so this number is not directly
-        // comparable until it has itself been measured.
+        // Focus proxy: annotation for manual captures, and a low-detail skip for
+        // automatic ones. The backend's 500 threshold is on sanitized 2048 px
+        // images, so this live number is not directly comparable to it.
         let focusVariance = null
         try {
           const focusScale = Math.min(
@@ -1653,6 +1731,32 @@ export default function CaptureLab() {
         } catch {
           focusVariance = null
         }
+        attempt.edgeVariance = focusVariance
+        if (auto && focusVariance != null && focusVariance < CAPTURE_LOW_DETAIL) {
+          recordDiagEvent('capture-attempt', {
+            ok: false,
+            retry,
+            reason: 'low-detail',
+            check: 'edge-variance',
+            waitedMs: acquisition.waitedMs,
+            quadAgeMs,
+            frameTime: acquisition.frameTime,
+            sharpness: captureSharpness,
+            corroborateAgeMs,
+            sourceLongEdge: acquisition.sourceLongEdge,
+            cardLongEdge: acquisition.cardLongEdge,
+            corroboration: corroborationSource,
+            ...attemptFields(),
+          })
+          lastAttemptFieldsRef.current = attemptFields()
+          liveScheduleRef.current?.(0)
+          return false
+        }
+
+        const index = pendingRef.current.length + 1
+        const file = new File([blob], `card-${Date.now()}.jpg`, { type: 'image/jpeg' })
+        const created = addFiles([file])
+        if (created[0]) showReceipt(created[0], file, corners, index)
         // A capture resets hunting to full speed for the next card.
         lastUsableAtRef.current = performance.now()
         // Remember the captured look so a new card in the same quad can re-arm.
@@ -1706,7 +1810,9 @@ export default function CaptureLab() {
           sourceLongEdge: acquisition.sourceLongEdge,
           cardLongEdge: acquisition.cardLongEdge,
           corroboration: corroborationSource,
+          ...attemptFields(),
         })
+        lastAttemptFieldsRef.current = attemptFields()
         // Start hunting for the next card while the user is still panning.
         liveScheduleRef.current?.(CAPTURE_HUNT_DELAY_MS)
         if (auto) disarmAutoCapture()
@@ -1738,6 +1844,7 @@ export default function CaptureLab() {
           sourceLongEdge: null,
           cardLongEdge: null,
           corroboration: 'none',
+          ...(lastAttemptFieldsRef.current || {}),
         })
         captureFullFrame()
       })
@@ -2040,6 +2147,10 @@ export default function CaptureLab() {
       agreement: agreement == null ? null : Number(agreement.toFixed(4)),
       threshold: TRACK_AGREE_MAX,
     })
+    lastDecisionRef.current = decision
+    lastAgreementRef.current = agreement == null ? null : Number(agreement.toFixed(4))
+    if (result.usable && decision === 'keep') lastAgreementAtRef.current = now
+    if (result.usable && decision === 'reanchor') lastDisagreementAtRef.current = now
 
     if (decision === 'keep') {
       // Geometry and patches stay with the tracker; the model only refreshes
@@ -2098,6 +2209,7 @@ export default function CaptureLab() {
           const sample = consumeDetectionFrame(message.seq)
           if (sample) {
             tracker.setReference(sample.gray, sample.width, sample.height, result.corners)
+            lastAgreementAtRef.current = now
             startTrackerLoop()
           }
         } catch {
@@ -2331,6 +2443,7 @@ export default function CaptureLab() {
             lastConfirmTsRef.current = performance.now()
             lastConfirmCornersRef.current = tentative.modelCorners
             lastConfirmSharpnessRef.current = tentative.sharpness
+            lastAgreementAtRef.current = performance.now()
             tentativeRef.current = null
             trackedQuadRef.current = tentativeQuad
             trackerFailuresRef.current = 0

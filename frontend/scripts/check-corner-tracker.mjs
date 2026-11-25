@@ -11,9 +11,11 @@ import {
   derivePhase,
   evaluateTentative,
   isCorroborated,
+  isContainableQuad,
   isPatchMatchAcceptable,
   shouldAcceptCapture,
   shouldKeepTracking,
+  trackerFallbackEligible,
   TRACK_LOST_AFTER,
 } from '../src/utils/cornerTracker.js'
 import { autoHoldDecision, AUTO_STEP_DT_MAX_MS, AUTO_STEP_SPEED, AUTO_TOTAL_MOVE } from '../src/utils/autoHold.js'
@@ -380,6 +382,28 @@ assert.equal(isPatchMatchAcceptable(676, 300), false)
     shouldAcceptCapture({ hasTracked: false, modelAgeMs: 10, modelUsable: false }),
     { ok: false, reason: 'model-unusable', source: 'model' },
   )
+}
+
+// Tracker fallback needs continuity plus recent agreement and no recent dispute.
+{
+  const eligible = {
+    source: 'tracked', hits: 12, failures: 0, quadAgeMs: 50,
+    sinceDisagreementMs: null, sinceAgreementMs: 100,
+  }
+  assert.equal(trackerFallbackEligible(eligible), true)
+  assert.equal(trackerFallbackEligible({ ...eligible, sinceDisagreementMs: 100 }), false)
+  assert.equal(trackerFallbackEligible({ ...eligible, sinceAgreementMs: 4000 }), false)
+  assert.equal(trackerFallbackEligible({ ...eligible, quadAgeMs: 400 }), false)
+}
+
+// Candidate containment and card aspect.
+{
+  const portrait = [[0.3, 0.3], [0.57, 0.3], [0.57, 0.7], [0.3, 0.7]]
+  assert.equal(isContainableQuad(portrait).ok, true)
+  const touching = [[0.3, 0.3], [0.6, 0.3], [0.6, 1], [0.3, 1]]
+  assert.equal(isContainableQuad(touching).ok, false)
+  const wide = [[0.2, 0.3], [0.62, 0.3], [0.62, 0.6], [0.2, 0.6]]
+  assert.equal(isContainableQuad(wide).ok, false)
 }
 
 // Automatic capture requires recent detector corroboration of the geometry.

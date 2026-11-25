@@ -178,6 +178,68 @@ export function shouldAcceptCapture({
   return { ok: true, reason: 'ok', source: 'model' }
 }
 
+// True when a tracked quad may stand in for a detector confirmation: enough
+// consecutive fresh exposures, no recent dispute, and a recent agreement/seed.
+export function trackerFallbackEligible({
+  source = 'tracked',
+  hits = 0,
+  failures = 0,
+  quadAgeMs = null,
+  sinceDisagreementMs = null,
+  sinceAgreementMs = null,
+  maxQuadAgeMs = CAPTURE_QUAD_MAX_AGE_MS,
+  disagreementWindowMs = 1500,
+  agreementWindowMs = 3000,
+} = {}) {
+  return source === 'tracked'
+    && failures === 0
+    && hits >= 12
+    && quadAgeMs != null
+    && quadAgeMs <= maxQuadAgeMs
+    && (sinceDisagreementMs == null || sinceDisagreementMs > disagreementWindowMs)
+    && sinceAgreementMs != null
+    && sinceAgreementMs <= agreementWindowMs
+}
+
+// True when a detected geometry looks like a fully-in-frame card region.
+export function minEdgeMargin(corners) {
+  if (!corners || corners.length !== 4) return 0
+  let margin = Infinity
+  for (const [x, y] of corners) {
+    margin = Math.min(margin, x, 1 - x, y, 1 - y)
+  }
+  return Number.isFinite(margin) ? margin : 0
+}
+
+// Width/height of the ordered quad (TL, TR, BR, BL). 63:88 cards sit near 0.7.
+export function quadAspect(corners) {
+  if (!corners || corners.length !== 4) return 0
+  const width = (
+    Math.hypot(corners[1][0] - corners[0][0], corners[1][1] - corners[0][1])
+    + Math.hypot(corners[2][0] - corners[3][0], corners[2][1] - corners[3][1])
+  ) / 2
+  const height = (
+    Math.hypot(corners[3][0] - corners[0][0], corners[3][1] - corners[0][1])
+    + Math.hypot(corners[2][0] - corners[1][0], corners[2][1] - corners[1][1])
+  ) / 2
+  return height > 0 ? width / height : 0
+}
+
+// True when the geometry looks like a fully-in-frame card region.
+export function isContainableQuad(corners, {
+  minEdge = 0.015,
+  minAspect = 0.55,
+  maxAspect = 0.85,
+} = {}) {
+  const margin = minEdgeMargin(corners)
+  const aspect = quadAspect(corners)
+  return {
+    ok: margin >= minEdge && aspect >= minAspect && aspect <= maxAspect,
+    edgeContainment: margin,
+    quadAspect: aspect,
+  }
+}
+
 // True when the detector confirmed a geometry recently and that confirmation
 // still agrees with the quad about to be captured.
 export function isCorroborated({
