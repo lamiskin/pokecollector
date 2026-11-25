@@ -56,8 +56,11 @@ const MIN_CARD_AREA = 0.12
 const BLUR_PX = 7
 // Long enough to read as a deliberate change of focus, short enough that it has
 // landed by the time the ring has finished settling.
-const BLUR_FADE_IN_MS = 170
-const BLUR_FADE_OUT_MS = 130
+const BLUR_FADE_IN_MS = 260
+const BLUR_FADE_OUT_MS = 320
+// A lost/none phase must persist this long before the blur releases, so a
+// one-frame blip cannot toggle it. captured/tooSmall release immediately.
+const BLUR_RELEASE_HOLD_MS = 350
 // Kept sharp outside the detected edge so the card's own border is not eaten by
 // the blur boundary. The ring sits at OUTSET, inside this margin.
 const BLUR_HOLE_MARGIN = 9
@@ -67,7 +70,7 @@ const BLUR_CLIP_ID = 'capture-overlay-blur-hole'
 // box, which is exactly the video wrapper, so the mask is what actually paints;
 // the clip-path is kept for engines that do honour it. Rebuilding the mask is
 // only worth it once the hole has visibly moved.
-const BLUR_MASK_STEP_PX = 0.6
+const BLUR_MASK_STEP_PX = 0.35
 
 function supportsBlurHole() {
   if (typeof CSS === 'undefined' || typeof CSS.supports !== 'function') return false
@@ -208,7 +211,6 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
   const quadArrivalRef = useRef(0)
   const paintedStampRef = useRef(-1)
   const lastArrivalRef = useRef(0)
-  const lastPaintRef = useRef(0)
   const [blurSupported] = useState(supportsBlurHole)
   const blankRef = useRef(false)
   const reducedRef = useRef(false)
@@ -231,6 +233,10 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
     // The blur latches on a confirmation and stays while the card is followed.
     blurWanted: false,
     blur: 0,
+    blurFrom: 0,
+    blurTo: 0,
+    blurStart: 0,
+    blurReleaseAt: 0,
     blurShown: -1,
   })
 
@@ -416,10 +422,6 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
       const reduced = reducedRef.current
       const current = anim.phase
       const raw = quadRef.current
-      // Frame interval for the blur fade; clamped so a backgrounded tab does not
-      // finish the fade in one jump.
-      const dt = lastPaintRef.current ? Math.min(64, Math.max(0, now - lastPaintRef.current)) : 16
-      lastPaintRef.current = now
 
       if (!raw) {
         // Nothing to draw: blank the paint once, then leave the DOM alone so an
@@ -433,6 +435,10 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
         anim.lockFrom = 0
         anim.lockTo = 0
         anim.blurWanted = false
+        anim.blurReleaseAt = 0
+        anim.blurFrom = 0
+        anim.blurTo = 0
+        anim.blurStart = 0
         anim.blurShown = -1
         if (anim.blur !== 0) {
           anim.blur = 0
@@ -512,27 +518,51 @@ const CaptureOverlay = forwardRef(function CaptureOverlay({
       // ── blur outside the card: "I have your card" ───────────────────────
       // A confirmation latches the blur on and it stays for as long as the card
       // is still being followed - not just for the 800 ms hold, which is far
-      // too short to read. Losing the card, capturing it, finding it too small
-      // or having nothing at all releases it.
+      // too short to read. A lost/none phase releases after a short grace so a
+      // one-frame blip cannot toggle it; captured and too-small release at once.
       if (current === 'locked' || current === 'holding') {
         anim.blurWanted = true
-      } else if (current === 'lost' || current === 'captured' || current === 'tooSmall' || current === 'none') {
+        anim.blurReleaseAt = 0
+      } else if (current === 'captured' || current === 'tooSmall') {
+        // A real state change releases at once; only ambiguous blips wait.
         anim.blurWanted = false
+        anim.blurReleaseAt = 0
+      } else if (anim.blurWanted) {
+        if (!anim.blurReleaseAt) anim.blurReleaseAt = now + BLUR_RELEASE_HOLD_MS
+        if (now >= anim.blurReleaseAt) {
+          anim.blurWanted = false
+          anim.blurReleaseAt = 0
+        }
+      } else {
+        anim.blurReleaseAt = 0
       }
       if (!blurRef.current) {
         // Soft focus is off, so nothing is composited: restart the fade from
         // zero if it is switched back on.
         anim.blur = 0
+        anim.blurFrom = 0
+        anim.blurTo = 0
+        anim.blurStart = 0
         anim.blurShown = -1
       } else {
         const target = softFocus && anim.blurWanted ? 1 : 0
         if (reduced) {
           anim.blur = target
-        } else if (anim.blur !== target) {
-          const span = target > anim.blur ? BLUR_FADE_IN_MS : BLUR_FADE_OUT_MS
-          anim.blur = target > anim.blur
-            ? Math.min(target, anim.blur + dt / span)
-            : Math.max(target, anim.blur - dt / span)
+          anim.blurFrom = target
+          anim.blurTo = target
+        } else {
+          if (anim.blurTo !== target) {
+            anim.blurFrom = anim.blur
+            anim.blurTo = target
+            anim.blurStart = now
+          }
+          if (anim.blur !== target) {
+            const span = target === 1 ? BLUR_FADE_IN_MS : BLUR_FADE_OUT_MS
+            const ratio = clamp01((now - anim.blurStart) / span)
+            anim.blur = ratio >= 1
+              ? target
+              : anim.blurFrom + (target - anim.blurFrom) * easeOutCubic(ratio)
+          }
         }
         if (softFocus && anim.blur > 0) paintBlurHole(px, width, height)
         const shownBlur = Math.round(anim.blur * 100) / 100

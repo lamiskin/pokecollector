@@ -28,6 +28,7 @@ import {
   evaluateTentative,
   FIRST_TRACK_RADIUS,
   isCorroborated,
+  CAPTURE_QUAD_MAX_AGE_MS,
   MAX_AREA_RATIO,
   MAX_FRAME_MOVE,
   MAX_PATCH_MSE_FLOOR,
@@ -1397,6 +1398,7 @@ export default function CaptureLab() {
             corroborateAgeMs: null,
             sourceLongEdge: null,
             cardLongEdge: null,
+            corroboration: 'none',
           })
           if (!retry && liveDetectionRef.current) {
             setCaptureNote('Getting a fresh look at the card…')
@@ -1414,6 +1416,7 @@ export default function CaptureLab() {
               corroborateAgeMs: null,
               sourceLongEdge: null,
               cardLongEdge: null,
+              corroboration: 'none',
             })
           }
           setCaptureNote('Waiting for a fresh look at the card; nothing captured.')
@@ -1437,6 +1440,7 @@ export default function CaptureLab() {
             corroborateAgeMs: null,
             sourceLongEdge: null,
             cardLongEdge: null,
+            corroboration: 'none',
           })
           // The held quad disappeared before the frame could be cropped.
           if (auto) playCaptureRefusal()
@@ -1464,7 +1468,17 @@ export default function CaptureLab() {
             modelCorners: lastConfirmCornersRef.current,
           }),
         })
-        if (auto && !corroborated) {
+        // A tracker that has followed this quad for a dozen consecutive frames
+        // is strong evidence of a card even while the detector's confidence is
+        // too soft. It is a fallback, not a replacement for a fresh model result.
+        const trackerCorroborated = decision.source === 'tracked'
+          && trackerStatsRef.current.hits >= 12
+          && quadAgeMs != null
+          && quadAgeMs <= CAPTURE_QUAD_MAX_AGE_MS
+        const corroborationSource = corroborated
+          ? 'model'
+          : (trackerCorroborated ? 'tracker' : 'none')
+        if (auto && !corroborated && !trackerCorroborated) {
           recordDiagEvent('capture-attempt', {
             ok: false,
             retry,
@@ -1476,6 +1490,7 @@ export default function CaptureLab() {
             corroborateAgeMs,
             sourceLongEdge: null,
             cardLongEdge: null,
+            corroboration: 'none',
           })
           if (!retry && liveDetectionRef.current) {
             setCaptureNote('Checking the card with the detector…')
@@ -1493,6 +1508,7 @@ export default function CaptureLab() {
               corroborateAgeMs,
               sourceLongEdge: null,
               cardLongEdge: null,
+              corroboration: 'none',
             })
           }
           setCaptureNote('Waiting for the detector to confirm the card; nothing captured.')
@@ -1524,6 +1540,7 @@ export default function CaptureLab() {
             corroborateAgeMs,
             sourceLongEdge: null,
             cardLongEdge: null,
+            corroboration: corroborationSource,
           })
           // A completed hold ended with nothing captured: the camera never
           // produced a fresh frame, which the user cannot see.
@@ -1552,6 +1569,7 @@ export default function CaptureLab() {
             corroborateAgeMs,
             sourceLongEdge: acquisition.sourceLongEdge,
             cardLongEdge: acquisition.cardLongEdge,
+            corroboration: corroborationSource,
           })
           if (auto) rearmAutoCapture()
           return false
@@ -1596,6 +1614,7 @@ export default function CaptureLab() {
           jpegBytes: blob.size,
           quadSource: decision.source,
           edgeVariance: focusVariance,
+          corroboration: corroborationSource,
         })
         recordDiagEvent('capture-attempt', {
           ok: true,
@@ -1608,6 +1627,7 @@ export default function CaptureLab() {
           corroborateAgeMs,
           sourceLongEdge: acquisition.sourceLongEdge,
           cardLongEdge: acquisition.cardLongEdge,
+          corroboration: corroborationSource,
         })
         // Start hunting for the next card while the user is still panning.
         liveScheduleRef.current?.(CAPTURE_HUNT_DELAY_MS)
