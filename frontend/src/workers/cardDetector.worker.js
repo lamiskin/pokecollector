@@ -8,23 +8,8 @@
 // can degrade to "unverified" without stopping detection. Wasm modes keep
 // numThreads at 1 so no SharedArrayBuffer / COOP+COEP is needed.
 
-// Deliberately no relative imports: this worker is started from a blob whose
-// specifier has no relative base, so Vite leaves relative imports verbatim and
-// the built chunk fails to evaluate. Keep this helper local; src/utils/refineCrop.js
-// is the page-side copy.
-function cropPointToFrame(point, cropRect) {
-  return [
-    (cropRect.x + point[0] * cropRect.width) / cropRect.frameWidth,
-    (cropRect.y + point[1] * cropRect.height) / cropRect.frameHeight,
-  ]
-}
-
-function cropQuadToFrame(quad, cropRect) {
-  return quad.map(point => cropPointToFrame(point, cropRect))
-}
-
 // One ORT session cannot be run concurrently under asyncify. Chain every
-// detect, refine and verification through this serial queue.
+// detect and verification through this serial queue.
 function createSerialQueue() {
   let tail = Promise.resolve()
   return task => {
@@ -380,23 +365,6 @@ async function detect(bitmap) {
   }
 }
 
-async function refine(bitmap, cropRect) {
-  if (!bitmap || bitmap.width < 24 || bitmap.height < 24) {
-    return { corners: null, sharpness: null, usable: false, reason: 'bad-crop' }
-  }
-  const aspect = bitmap.width / bitmap.height
-  if (aspect > 4 || aspect < 0.25) {
-    return { corners: null, sharpness: null, usable: false, reason: 'bad-crop' }
-  }
-  const result = await detect(bitmap)
-  return {
-    corners: cropQuadToFrame(result.corners, cropRect),
-    sharpness: result.sharpness,
-    usable: result.usable,
-    reason: result.unusableReason,
-  }
-}
-
 self.onmessage = async event => {
   const message = event.data || {}
   try {
@@ -409,11 +377,6 @@ self.onmessage = async event => {
     if (message.type === 'detect') {
       const result = await enqueue(() => detect(message.bitmap))
       self.postMessage({ type: 'result', seq: message.seq, ...result })
-      return
-    }
-    if (message.type === 'refine') {
-      const result = await enqueue(() => refine(message.bitmap, message.cropRect))
-      self.postMessage({ type: 'refined', seq: message.seq, cropRect: message.cropRect, ...result })
       return
     }
     if (message.type === 'verify') {
@@ -429,6 +392,6 @@ self.onmessage = async event => {
       message: `${error?.name || 'Error'}: ${error?.message || String(error)}`,
     })
   } finally {
-    if (message.type === 'detect' || message.type === 'refine') message.bitmap?.close()
+    if (message.type === 'detect') message.bitmap?.close()
   }
 }

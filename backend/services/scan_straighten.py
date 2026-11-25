@@ -8,6 +8,12 @@ The warp is a projective destination->source homography solved with numpy.
 ``Image.Transform.QUAD`` is intentionally not used: it interpolates the quad
 bilinearly rather than inverting the projective transform, which bends card
 edges on perspective photographs.
+
+Geometry alone cannot tell whether the supplied quad is the card's boundary.
+``assess_edge_support`` reads a 1-D gradient profile normal to each claimed
+side and vetoes the warp when the claim has no edge of its own (a card cut by
+the frame) or when a stronger parallel edge sits off the claim (a quad locked
+onto a loader lip, a printed inner frame or inner artwork).
 """
 
 from __future__ import annotations
@@ -26,6 +32,12 @@ MAX_ANGLE = 135.0
 MAX_OPPOSING_RATIO = 1.5
 MIN_OUTPUT_PX = 32
 
+# Boundary-support thresholds; see assess_edge_support for the method.
+MIN_STEP = 8.0          # grey levels: minimum contrast across the claimed line
+SUPPORT_RATIO = 1.5     # claimed response / median inward response
+COMPETE_RATIO = 1.5     # parallel response / claimed response
+_RATIO_EPS = 0.5        # keeps a flat profile from dividing by zero
+
 
 @dataclass(frozen=True)
 class Straightened:
@@ -40,6 +52,14 @@ class Straightened:
 @dataclass(frozen=True)
 class Abstained:
     reason: str
+    detail: str
+
+
+@dataclass(frozen=True)
+class EdgeSupport:
+    verdict: str                  # "ok" | "unsupported" | "competing"
+    sides: tuple[float, ...]      # per-side support ratio, 4 values
+    competing_sides: tuple[bool, ...]
     detail: str
 
 
@@ -69,6 +89,173 @@ def _normalise_tilt(angle: float) -> float:
     # A line's direction is modulo 180 degrees; report the smallest signed tilt.
     value = (angle + 90.0) % 180.0 - 90.0
     return value
+
+
+def _bilinear(gray: np.ndarray, x: float, y: float) -> float:
+    height, width = gray.shape
+    x = min(max(x, 0.0), width - 1.0)
+    y = min(max(y, 0.0), height - 1.0)
+    x0 = int(x)
+    y0 = int(y)
+    x1 = min(x0 + 1, width - 1)
+    y1 = min(y0 + 1, height - 1)
+    fx = x - x0
+    fy = y - y0
+    top = gray[y0, x0] * (1.0 - fx) + gray[y0, x1] * fx
+    bottom = gray[y1, x0] * (1.0 - fx) + gray[y1, x1] * fx
+    return float(top * (1.0 - fy) + bottom * fy)
+
+
+def assess_edge_support(
+    rgb: Image.Image,
+    quad: Sequence[Tuple[float, float]],
+    *,
+    samples: int = 7,
+    band_px: int = 6,
+    inward_frac: float = 0.10,
+) -> EdgeSupport:
+    """Decide whether the supplied quad actually sits on the card's boundary.
+
+    Method (pure, numpy only):
+
+    * Convert to greyscale once and take ``samples`` points along each side
+      between 10 % and 90 % of its length, so the rounded corners do not vote.
+    * At each point, sample the image along the side's inward normal (oriented
+      towards the quad centroid) at integer pixel offsets. ``band_px`` is the
+      support band around the claimed line; the competing search reaches
+      ``inward_frac`` of the side length, floored at ``band_px`` and capped at
+      a quarter of the raster, in *both* directions: a quad locked inside the
+      card has the real edge outboard of the claim, while a quad around a
+      loader lip or printed inner frame has it inboard.
+    * Average the per-position profiles and take the absolute central
+      difference; that is the response profile.
+
+    Per side the numbers that matter are the response at the claimed line
+    (offset 0), the median response inside the card, the strongest response
+    anywhere else in the profile, and the step contrast across the claimed
+    line (mean of three pixels either side).
+
+    A side is **supported** when all three hold: the step contrast is at least
+    ``MIN_STEP`` grey levels (a genuinely flat profile is not an edge), the
+    claimed response is a local maximum within +-2 px, and it is at least
+    ``SUPPORT_RATIO`` times the median inward response.
+
+    A side is **competing** when the step contrast is below ``MIN_STEP`` (no
+    edge of its own) and a parallel response elsewhere in the profile exceeds
+    ``COMPETE_RATIO`` times the claimed response: the claim is inside the card
+    and a real edge lies off it.
+
+    Verdict: ``competing`` if any side is competing, else ``unsupported`` if
+    fewer than three sides are supported, else ``ok``.
+
+    Limitation: a quad sitting on a top-loader's *outer* silhouette is
+    pixel-identical to a card with a thick dark border, so this method passes
+    it; catching that case needs material/colour knowledge, not gradients.
+    """
+    try:
+        points = [(float(x), float(y)) for x, y in quad]
+    except (TypeError, ValueError):
+        empty = (0.0, 0.0, 0.0, 0.0)
+        return EdgeSupport("unsupported", empty, (False,) * 4, "quad is not measurable")
+    if len(points) != 4 or not all(
+        math.isfinite(x) and math.isfinite(y) for x, y in points
+    ):
+        empty = (0.0, 0.0, 0.0, 0.0)
+        return EdgeSupport("unsupported", empty, (False,) * 4, "quad is not measurable")
+
+    gray = np.asarray(rgb.convert("L"), dtype=float)
+    height, width = gray.shape
+    if width < 3 or height < 3:
+        empty = (0.0, 0.0, 0.0, 0.0)
+        return EdgeSupport("unsupported", empty, (False,) * 4, f"raster {width}x{height}")
+
+    centroid = (sum(x for x, _ in points) / 4.0, sum(y for _, y in points) / 4.0)
+    reach_cap = max(band_px, int(round(0.25 * min(width, height))))
+    count = max(2, int(samples))
+    step_count = max(1, int(band_px))
+
+    ratios: list[float] = []
+    competing: list[bool] = []
+    notes: list[str] = []
+    supported_count = 0
+
+    for index in range(4):
+        p0 = points[index]
+        p1 = points[(index + 1) % 4]
+        dx, dy = p1[0] - p0[0], p1[1] - p0[1]
+        length = math.hypot(dx, dy)
+        if length < 1e-6:
+            ratios.append(0.0)
+            competing.append(False)
+            notes.append(f"s{index}:degenerate")
+            continue
+        ux, uy = dx / length, dy / length
+        nx, ny = -uy, ux
+        mid = ((p0[0] + p1[0]) / 2.0, (p0[1] + p1[1]) / 2.0)
+        if (centroid[0] - mid[0]) * nx + (centroid[1] - mid[1]) * ny < 0.0:
+            nx, ny = -nx, -ny
+
+        reach = int(min(max(step_count, round(inward_frac * length)), reach_cap))
+        reach = max(1, reach)
+        offsets = np.arange(-reach, reach + 1, dtype=float)
+        profile = np.zeros(offsets.shape, dtype=float)
+        for sample in range(count):
+            fraction = 0.10 + 0.80 * (sample / (count - 1))
+            bx = p0[0] + dx * fraction
+            by = p0[1] + dy * fraction
+            for slot, offset in enumerate(offsets):
+                profile[slot] += _bilinear(gray, bx + nx * offset, by + ny * offset)
+        profile /= float(count)
+
+        response = np.abs(np.gradient(profile, 1.0))
+        zero = reach
+        claimed = float(response[zero])
+        inward = np.abs(response[zero + 1:])
+        outward = np.abs(response[:zero])
+        median_in = float(np.median(inward)) if inward.size else 0.0
+        peak_in = float(np.max(inward)) if inward.size else 0.0
+        peak_out = float(np.max(outward)) if outward.size else 0.0
+
+        window = max(1, min(step_count, 3, reach))
+        before = profile[max(0, zero - window):zero]
+        after = profile[zero + 1:zero + 1 + window]
+        claim_step = (
+            abs(float(before.mean()) - float(after.mean()))
+            if before.size and after.size else 0.0
+        )
+        local = response[max(0, zero - 2):zero + 3]
+        local_max = bool(local.size) and claimed >= 0.9 * float(local.max())
+        ratio = claimed / max(median_in, _RATIO_EPS)
+        supported = claim_step >= MIN_STEP and local_max and ratio >= SUPPORT_RATIO
+        parallel_peak = max(peak_in, peak_out)
+        is_competing = (
+            claim_step < MIN_STEP
+            and parallel_peak > COMPETE_RATIO * max(claimed, MIN_STEP)
+        )
+
+        if supported:
+            supported_count += 1
+        ratios.append(round(ratio, 3))
+        competing.append(bool(is_competing))
+        notes.append(
+            f"s{index}:ratio={ratio:.2f},step={claim_step:.0f},"
+            f"peak={parallel_peak:.0f}"
+        )
+
+    if any(competing):
+        verdict = "competing"
+    elif supported_count < 3:
+        verdict = "unsupported"
+    else:
+        verdict = "ok"
+
+    detail = (
+        f"{verdict}: {supported_count}/4 sides supported; "
+        f"sides={[round(value, 2) for value in ratios]}; "
+        f"competing={[i for i, flag in enumerate(competing) if flag]}; "
+        + "; ".join(notes)
+    )
+    return EdgeSupport(verdict, tuple(ratios), tuple(competing), detail)
 
 
 def _homography(dst: Sequence[Point], src: Sequence[Point]) -> np.ndarray:
@@ -101,6 +288,7 @@ def try_straighten(
     margin: float = 0.015,
     max_edge: int = 2048,
     max_tilt_degrees: float = 45.0,
+    require_boundary: bool = True,
 ) -> Straightened | Abstained:
     if rgb.mode != "RGB":
         rgb = rgb.convert("RGB")
@@ -155,6 +343,15 @@ def try_straighten(
         tilt = raw_tilt
     if abs(tilt) > max_tilt_degrees:
         return Abstained("tilt_exceeded", f"tilt {tilt:.1f} degrees")
+
+    if require_boundary:
+        support = assess_edge_support(rgb, points)
+        if support.verdict != "ok":
+            reason = (
+                "boundary_competing" if support.verdict == "competing"
+                else "boundary_unsupported"
+            )
+            return Abstained(reason, support.detail)
 
     measured_w = min(sides[0], sides[2])
     measured_h = min(sides[1], sides[3])
