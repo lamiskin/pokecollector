@@ -55,3 +55,22 @@ export function signatureDistance(a, b) {
   for (let i = 0; i < a.length; i += 1) total += Math.abs(a[i] - b[i])
   return total / a.length
 }
+
+// Measured clusters: same card on a desktop webcam 0.49–0.62; different cards
+// on a phone 1.03–1.41. 0.75 sits in the gap.
+export const REARM_SIGNATURE_DIFF = 0.75
+export const REARM_CHANGED_STREAK = 3
+export const REARM_CHANGED_COOLDOWN_MS = 1500
+
+// A transient contrast shift must not re-arm: require consecutive checks, and
+// suppress entirely during the cooldown after a staged capture.
+export function nextRearmStreak(distance, streak, suppressed = false,
+  threshold = REARM_SIGNATURE_DIFF) {
+  if (suppressed) return 0
+  return distance > threshold ? streak + 1 : 0
+}
+
+export function shouldRearmByChange(distance, streak, suppressed = false,
+  threshold = REARM_SIGNATURE_DIFF, required = REARM_CHANGED_STREAK) {
+  return !suppressed && distance > threshold && streak >= required
+}

@@ -21,7 +21,7 @@ import {
   setCaptureSoundEnabled,
 } from '../utils/captureSound'
 import { quadAreaFraction } from '../utils/perspectiveWarp'
-import { signatureDistance, signatureOf } from '../utils/patchSignature'
+import { signatureDistance, signatureOf, nextRearmStreak, shouldRearmByChange, REARM_CHANGED_COOLDOWN_MS } from '../utils/patchSignature'
 import {
   cornerAgreement,
   createTracker,
@@ -122,7 +122,6 @@ const CAPTURE_LOW_DETAIL = 200
 const CONFIRM_PULSE_MS = 300
 // A new presentation changes the picture inside the tracked quad even while the
 // geometry barely moves. Two consecutive checks above this difference re-arm.
-const REARM_SIGNATURE_DIFF = 0.12
 const REARM_CHECK_INTERVAL_MS = 250
 // A tracker whose last success is older than this is treated as gone when a
 // usable model result arrives, so it cannot block the model capture path.
@@ -503,6 +502,7 @@ export default function CaptureLab() {
   const trayRef = useRef(null)
   const capturedSignatureRef = useRef(null)
   const lastRearmCheckAtRef = useRef(0)
+  const lastStagedAtRef = useRef(0)
   const lastRearmFrameTimeRef = useRef(null)
   const rearmChangedStreakRef = useRef(0)
   const [softFocus, setSoftFocus] = useState(() => {
@@ -1271,6 +1271,7 @@ export default function CaptureLab() {
   const resizeMode = () => streamRef.current?.getVideoTracks?.()[0]?.getSettings?.().resizeMode || 'contain'
 
   const stageDock = (item, corners, sourceRect, index, count) => {
+    lastStagedAtRef.current = performance.now()
     setLastStagedId(item.id)
     setLastCaptureIndex(index)
     setReceiptCorners(corners || null)
@@ -2013,15 +2014,20 @@ export default function CaptureLab() {
         captured,
         signatureOf(video, minX, minY, width, height),
       )
+      const suppressed = lastStagedAtRef.current > 0
+        && now - lastStagedAtRef.current < REARM_CHANGED_COOLDOWN_MS
       recordDiagEvent('rearm-check', {
         distance: Number.isFinite(distance) ? Number(distance.toFixed(4)) : null,
         trackHits: trackerStatsRef.current.hits,
+        suppressed,
       })
       if (!Number.isFinite(distance)) return
-      rearmChangedStreakRef.current = distance > REARM_SIGNATURE_DIFF
-        ? rearmChangedStreakRef.current + 1
-        : 0
-      if (rearmChangedStreakRef.current >= 2) {
+      rearmChangedStreakRef.current = nextRearmStreak(
+        distance,
+        rearmChangedStreakRef.current,
+        suppressed,
+      )
+      if (shouldRearmByChange(distance, rearmChangedStreakRef.current, suppressed)) {
         recordDiagEvent('auto-rearm', { reason: 'changed' })
         rearmAutoCapture()
       }

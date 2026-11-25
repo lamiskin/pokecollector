@@ -43,8 +43,13 @@ class FakeCanvas {
 
 globalThis.OffscreenCanvas = FakeCanvas
 
-const { signatureDistance, signatureOf } = await import('../src/utils/patchSignature.js')
-const REARM_SIGNATURE_DIFF = 0.12
+const {
+  signatureDistance,
+  signatureOf,
+  shouldRearmByChange,
+  nextRearmStreak,
+  REARM_SIGNATURE_DIFF,
+} = await import('../src/utils/patchSignature.js')
 
 const WIDTH = 24
 const HEIGHT = 24
@@ -83,5 +88,13 @@ assert.ok(
   signatureDistance(baseSignature, signatureOf(noisy, 0, 0, WIDTH, HEIGHT))
     < REARM_SIGNATURE_DIFF,
 )
+
+// Re-arm needs a clear change, three consecutive checks, and no cooldown.
+assert.equal(shouldRearmByChange(0.51, 3), false)
+assert.equal(shouldRearmByChange(1.1, 3), true)
+assert.equal(shouldRearmByChange(1.1, 3, true), false)
+assert.equal(nextRearmStreak(0.51, 2), 0)
+assert.equal(nextRearmStreak(1.1, 2), 3)
+assert.equal(nextRearmStreak(1.1, 2, true), 0)
 
 console.log('patch signature sanity check passed')
