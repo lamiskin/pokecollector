@@ -270,7 +270,7 @@ async def debug_request_logging(request: Request, call_next):
 
 # Include routers
 from api import auth, cards, collection, sets, wishlist, binders, decks, dashboard, analytics, sync, products, trades, export, backup, settings, images, social, pokedex, public, profile, scan_jobs, community, push
-from api import auth, cards, collection, sets, wishlist, binders, decks, dashboard, analytics, sync, products, trades, export, backup, settings, images, social, pokedex, public, profile, scan_jobs, community, dev_capture_lab
+from api import auth, cards, collection, sets, wishlist, binders, decks, dashboard, analytics, sync, products, trades, export, backup, settings, images, social, pokedex, public, profile, scan_jobs, community, dev_capture_lab, capture_lab_proposals
 from api.github import router as github_router
 from api.recognize import router as recognize_router
 
@@ -330,6 +330,11 @@ app.include_router(
     dev_capture_lab.router,
     prefix="/api/dev/capture-lab",
     tags=["dev-capture-lab"],
+)
+app.include_router(
+    capture_lab_proposals.router,
+    prefix="/api/capture-lab",
+    tags=["capture-lab-proposals"],
 )
 
 

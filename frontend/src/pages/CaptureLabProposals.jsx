@@ -1,0 +1,92 @@
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { ChevronLeft, ChevronRight, RotateCcw } from 'lucide-react'
+import api from '../api/client'
+import './CaptureLabProposals.css'
+
+const views = ['Original', 'Crop', 'Turned']
+
+async function fetchProposal(item) {
+  const urls = {}
+  let unavailable = false
+  for (const key of ['original', 'crop', 'turned']) {
+    const path = item[`${key}Url`]?.replace(/^\/api(?=\/)/, '')
+    if (!path) continue
+    try {
+      const response = await api.get(path, { responseType: 'blob' })
+      urls[key] = URL.createObjectURL(response.data)
+    } catch (error) {
+      if (error.response?.status === 409 && key !== 'original') unavailable = true
+      else if (key === 'original') throw error
+    }
+  }
+  return { urls, unavailable }
+}
+
+export default function CaptureLabProposals() {
+  const [items, setItems] = useState([])
+  const [index, setIndex] = useState(0)
+  const [view, setView] = useState('Original')
+  const [votes, setVotes] = useState({})
+  const [assets, setAssets] = useState({})
+  const [loading, setLoading] = useState(true)
+  const [failure, setFailure] = useState(false)
+  const touchStart = useRef(null)
+  const objectUrls = useRef(new Set())
+  const current = items[index]
+
+  const loadList = useCallback(async () => {
+    setLoading(true); setFailure(false)
+    try {
+      const response = await api.get('/capture-lab/proposals')
+      setItems(response.data.items || []); setIndex(0); setAssets({})
+    } catch { setFailure(true) } finally { setLoading(false) }
+  }, [])
+
+  useEffect(() => { loadList() }, [loadList])
+
+  useEffect(() => {
+    let active = true
+    const load = async (item) => {
+      if (!item || assets[item.stem]) return
+      try {
+        const result = await fetchProposal(item)
+        Object.values(result.urls).forEach(url => objectUrls.current.add(url))
+        if (active) setAssets(prev => ({ ...prev, [item.stem]: result }))
+      } catch { if (active) setAssets(prev => ({ ...prev, [item.stem]: { urls: {}, failed: true } })) }
+    }
+    load(current)
+    if (items.length > 1) load(items[(index + 1) % items.length])
+    return () => { active = false }
+    // Assets are deliberately scoped to the current and next proposal.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [current?.stem, index, items])
+
+  useEffect(() => () => objectUrls.current.forEach(URL.revokeObjectURL), [])
+
+  const go = (next) => { setIndex((next + items.length) % items.length); setView('Original') }
+  const verdict = (choice) => setVotes(prev => ({ ...prev, [current.stem]: choice }))
+  const tally = Object.values(votes).reduce((acc, value) => ({ ...acc, [value]: acc[value] + 1 }), { crop: 0, original: 0 })
+  const asset = current && assets[current.stem]
+  const src = asset?.urls?.[{ Original: 'original', Crop: 'crop', Turned: 'turned' }[view]]
+  const noProposal = asset?.unavailable || !current?.cropUrl
+  const onTouchStart = event => { touchStart.current = [event.touches[0].clientX, event.touches[0].clientY] }
+  const onTouchEnd = event => {
+    if (!touchStart.current) return
+    const dx = event.changedTouches[0].clientX - touchStart.current[0]
+    if (Math.abs(dx) > 55) go(index + (dx < 0 ? 1 : -1))
+    touchStart.current = null
+  }
+
+  return <main className="proposal-review" onTouchStart={onTouchStart} onTouchEnd={onTouchEnd}>
+    <header className="proposal-topbar"><a href="/capture-lab" aria-label="Back to capture lab"><ChevronLeft /></a><span>Capture lab</span><span className="proposal-count">{loading ? '…' : `${items.length ? index + 1 : 0} / ${items.length}`}</span></header>
+    {loading ? <section className="proposal-stage"><div className="proposal-skeleton" /></section> : failure ? <section className="proposal-message"><p>Could not load proposals.</p><button onClick={loadList}>Try again</button></section> : !current ? <section className="proposal-message"><p>No proposals yet.</p></section> : <>
+      <section className="proposal-stage">
+        {src ? <div className="proposal-photo"><img src={src} alt={view === 'Original' ? 'Original card photo' : `${view} crop`} />{view === 'Original' && <svg className="proposal-boundary" viewBox="0 0 1 1" preserveAspectRatio="none" aria-label="Proposed crop boundary"><polygon points={current.quad.map(point => point.join(',')).join(' ')} /></svg>}</div> : <div className="proposal-skeleton" />}
+        {noProposal && <div className="proposal-notice">The proposal could not be produced.</div>}
+      </section>
+      <section className="proposal-details"><div><span className="proposal-label">Unverified crop</span><p>{current.outputWidth} × {current.outputHeight}</p></div><span className="proposal-tally">{tally.crop} crop · {tally.original} original</span></section>
+      <nav className="proposal-views" aria-label="Photo view">{views.map(name => <button key={name} className={view === name ? 'selected' : ''} aria-pressed={view === name} onClick={() => setView(name)}>{name}</button>)}</nav>
+      <footer className="proposal-actions"><button className="proposal-original" onClick={() => verdict('original')} aria-pressed={votes[current.stem] === 'original'}><RotateCcw size={18} />Use original</button><button className="proposal-use" disabled={noProposal} onClick={() => verdict('crop')} aria-pressed={votes[current.stem] === 'crop'}>Use this crop</button><div className="proposal-stepper"><button aria-label="Previous proposal" onClick={() => go(index - 1)}><ChevronLeft /></button><button aria-label="Next proposal" onClick={() => go(index + 1)}><ChevronRight /></button></div></footer>
+    </>}
+  </main>
+}
