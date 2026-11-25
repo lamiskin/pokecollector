@@ -106,6 +106,9 @@ const CAPTURE_RETRY_MS = 900
 // into one eased lock strength for the ring, so this only has to be long enough
 // for consecutive detections to overlap, not a visible state of its own.
 const CONFIRM_PULSE_MS = 300
+// A tracker whose last success is older than this is treated as gone when a
+// usable model result arrives, so it cannot block the model capture path.
+const TRACK_STALE_RESET_MS = 2000
 
 // Inference costs ~0.3 s on the target phone, so the loop skips it while the
 // scene is static and no card is tracked. This is about battery and heat, not
@@ -1858,12 +1861,18 @@ export default function CaptureLab() {
     const trackerAge = trackerLastTsRef.current == null
       ? null
       : now - trackerLastTsRef.current
+    const trackerStale = result.usable
+      && trackerAge != null
+      && trackerAge > TRACK_STALE_RESET_MS
+    if (trackerStale) {
+      recordDiagEvent('track-stale', { ageMs: Math.round(trackerAge) })
+    }
     const decision = result.usable
-      ? shouldKeepTracking({
+      ? (trackerStale ? 'reset' : shouldKeepTracking({
         trackedCorners: trackedNow,
         modelCorners: result.corners,
         ageMs: trackerAge,
-      })
+      }))
       : (trackedNow && trackerAge != null && trackerAge <= TRACK_KEEP_MS ? 'keep' : 'reset')
     const agreement = result.usable
       ? cornerAgreement({ trackedCorners: trackedNow, modelCorners: result.corners })

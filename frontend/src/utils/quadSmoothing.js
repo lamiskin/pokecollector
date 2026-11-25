@@ -31,14 +31,14 @@
 
 // Cutoff when the corner is not moving. A low cutoff leaves a still card almost
 // motionless on screen while a slow hand drift still comes through.
-export const QUAD_MIN_CUTOFF_HZ = 0.32
+export const QUAD_MIN_CUTOFF_HZ = 0.18
 // Speed at which the cutoff rises: cutoff = minCutoff + beta * |speed|.
 // A lower beta keeps more smoothing during ordinary movement; the per-frame
 // follower supplies the rest of the responsiveness.
-export const QUAD_BETA = 11
+export const QUAD_BETA = 6
 // The speed estimate is itself low-passed so tracker noise does not masquerade
 // as movement and open the filter on a still card.
-export const QUAD_DERIVATIVE_CUTOFF_HZ = 2.2
+export const QUAD_DERIVATIVE_CUTOFF_HZ = 1.6
 // A corner that moves further than this share of the card's own diagonal in a
 // single sample is not the same card moving: it re-anchored, was swapped, or
 // the model re-locked somewhere else.
@@ -47,12 +47,12 @@ export const QUAD_JUMP_FRACTION = 0.3
 // at a different distance after a re-lock.
 export const QUAD_AREA_JUMP_RATIO = 1.6
 // How long the drawn outline takes to close most of the gap to the filtered
-// target: the per-frame follower's time constant. Larger means smoother and
-// later; 90 ms removes the staircase without reading as lag.
-export const QUAD_FOLLOW_TAU_MS = 90
-// How long a discontinuity takes to travel to the new quad. Longer than a
-// tracker step, with an ease-in-out so it leaves and lands gently.
-export const QUAD_GLIDE_MS = 280
+// target: the per-frame follower's time constant. 200 ms is deliberately slow:
+// delay is acceptable, visible stepping is not.
+export const QUAD_FOLLOW_TAU_MS = 200
+// How long a discontinuity takes to travel to the new quad. 560 ms with an
+// ease-in-out leaves and lands gently rather than snapping.
+export const QUAD_GLIDE_MS = 560
 
 // Sampling gaps outside this range are either a clock hiccup or an idle pause;
 // clamping keeps alpha meaningful without a special case for either.

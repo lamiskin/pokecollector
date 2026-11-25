@@ -37,13 +37,13 @@ const GREEN = '#22c55e'
 const TRACK = '#a0a0b8'
 
 const TICK_MS = 200
-const CONFIRM_MS = 380
-const DRAIN_MS = 220
+const CONFIRM_MS = 520
+const DRAIN_MS = 380
 // How long the ring takes to settle onto a confirmed card, and to relax off it
 // again. Rising is quicker than relaxing so a detection reads as a decision and
 // a missed confirmation reads as a release, not a snap.
-const LOCK_RISE_MS = 180
-const LOCK_RELAX_MS = 400
+const LOCK_RISE_MS = 340
+const LOCK_RELAX_MS = 700
 // The ring is pushed this far outside the detected edge so it never paints over
 // the card's own artwork or text, which the user is still judging.
 const OUTSET = 3.4
@@ -56,8 +56,8 @@ const MIN_CARD_AREA = 0.12
 const BLUR_PX = 7
 // Long enough to read as a deliberate change of focus, short enough that it has
 // landed by the time the ring has finished settling.
-const BLUR_FADE_IN_MS = 260
-const BLUR_FADE_OUT_MS = 320
+const BLUR_FADE_IN_MS = 430
+const BLUR_FADE_OUT_MS = 520
 // A lost/none phase must persist this long before the blur releases, so a
 // one-frame blip cannot toggle it. captured/tooSmall release immediately.
 const BLUR_RELEASE_HOLD_MS = 350

@@ -150,24 +150,30 @@ export function derivePhase({
 }
 
 // Pure decision for the capture path: which quad, if any, is tied closely
-// enough to the frame about to be drawn.
+// enough to the frame about to be drawn. A stale tracked quad must not block a
+// fresh, usable model result: fall through to the model before refusing.
 export function shouldAcceptCapture({
   hasTracked = false,
   trackedAgeMs = null,
   modelAgeMs = null,
   modelUsable = true,
 } = {}) {
-  if (hasTracked) {
-    if (trackedAgeMs == null || trackedAgeMs > CAPTURE_QUAD_MAX_AGE_MS) {
-      return { ok: false, reason: 'stale-tracked', source: 'tracked' }
-    }
+  if (hasTracked && trackedAgeMs != null && trackedAgeMs <= CAPTURE_QUAD_MAX_AGE_MS) {
     return { ok: true, reason: 'ok', source: 'tracked' }
   }
   if (!modelUsable) {
-    return { ok: false, reason: 'model-unusable', source: 'model' }
+    return {
+      ok: false,
+      reason: hasTracked ? 'stale-tracked' : 'model-unusable',
+      source: 'model',
+    }
   }
   if (modelAgeMs == null || modelAgeMs > CAPTURE_MODEL_MAX_AGE_MS) {
-    return { ok: false, reason: 'stale-model', source: 'model' }
+    return {
+      ok: false,
+      reason: hasTracked ? 'stale-tracked' : 'stale-model',
+      source: 'model',
+    }
   }
   return { ok: true, reason: 'ok', source: 'model' }
 }

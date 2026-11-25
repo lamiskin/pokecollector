@@ -322,8 +322,8 @@ assert.equal(isPatchMatchAcceptable(676, 300), false)
 }
 
 // Capture geometry may not outlive the frame it is applied to. A stale tracked
-// quad is a rejection, not a fallback to the model; the model is only usable
-// when no tracked quad exists at all.
+// quad falls through to a fresh model quad; it only refuses when neither is
+// usable.
 {
   assert.deepEqual(
     shouldAcceptCapture({ hasTracked: true, trackedAgeMs: 50, modelAgeMs: 900 }),
@@ -335,11 +335,28 @@ assert.equal(isPatchMatchAcceptable(676, 300), false)
       trackedAgeMs: CAPTURE_QUAD_MAX_AGE_MS + 1,
       modelAgeMs: 50,
     }),
-    { ok: false, reason: 'stale-tracked', source: 'tracked' },
+    { ok: true, reason: 'ok', source: 'model' },
   )
   assert.deepEqual(
     shouldAcceptCapture({ hasTracked: true, trackedAgeMs: null, modelAgeMs: 50 }),
-    { ok: false, reason: 'stale-tracked', source: 'tracked' },
+    { ok: true, reason: 'ok', source: 'model' },
+  )
+  assert.deepEqual(
+    shouldAcceptCapture({
+      hasTracked: true,
+      trackedAgeMs: CAPTURE_QUAD_MAX_AGE_MS + 1,
+      modelAgeMs: CAPTURE_MODEL_MAX_AGE_MS + 1,
+    }),
+    { ok: false, reason: 'stale-tracked', source: 'model' },
+  )
+  assert.deepEqual(
+    shouldAcceptCapture({
+      hasTracked: true,
+      trackedAgeMs: CAPTURE_QUAD_MAX_AGE_MS + 1,
+      modelAgeMs: 10,
+      modelUsable: false,
+    }),
+    { ok: false, reason: 'stale-tracked', source: 'model' },
   )
   assert.deepEqual(
     shouldAcceptCapture({

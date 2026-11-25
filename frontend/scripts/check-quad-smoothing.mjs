@@ -35,20 +35,21 @@ const copy = quad => quad.map(([x, y]) => [x, y])
 }
 
 // Step response: a real but non-discontinuous 0.05 move must be smoothed, not
-// snapped. 90 % should take at least 200 ms.
+// snapped. With the slower follower and low cutoff the 90 % point is about
+// 885 ms on this 60 fps trace.
 {
   const smoother = createQuadSmoother()
   smoother.sample(base, 16.7, 0)
   const target = shift(base, 0.05, 0)
   let reachedAt = null
-  for (let i = 1; i <= 120; i += 1) {
+  for (let i = 1; i <= 160; i += 1) {
     const t = i * 16.7
     smoother.sample(target, 16.7, t)
     if (reachedAt == null && maxMove(smoother.corners, target) <= 0.005) reachedAt = t
   }
-  check('a 0.05 move is not snapped', reachedAt != null && reachedAt >= 200,
+  check('a 0.05 move is not snapped', reachedAt != null && reachedAt >= 500 && reachedAt <= 1000,
     `90 % at ${reachedAt}`)
-  check('the smoothed move eventually arrives', maxMove(smoother.corners, target) < 0.001,
+  check('the smoothed move eventually arrives', maxMove(smoother.corners, target) < 0.002,
     `error ${maxMove(smoother.corners, target).toFixed(5)}`)
 }
 
@@ -66,16 +67,16 @@ const copy = quad => quad.map(([x, y]) => [x, y])
   let previous = copy(smoother.corners)
   let largestStep = 0
   let reachedAt = null
-  for (let t = 33.4; t <= 1200; t += 16.7) {
+  for (let t = 33.4; t <= 3000; t += 16.7) {
     smoother.tick(t)
     largestStep = Math.max(largestStep, maxMove(smoother.corners, previous))
     previous = copy(smoother.corners)
     if (reachedAt == null && maxMove(smoother.corners, far) <= 0.05) reachedAt = t
   }
   check('the glide reaches the new quad around its duration',
-    reachedAt != null && reachedAt >= QUAD_GLIDE_MS * 0.7 && reachedAt <= QUAD_GLIDE_MS + 200,
+    reachedAt != null && reachedAt >= 600 && reachedAt <= QUAD_GLIDE_MS + 300,
     `90 % at ${reachedAt}, glide ${QUAD_GLIDE_MS}`)
-  check('the glide never jumps', largestStep < 0.06, `largest step ${largestStep.toFixed(4)}`)
+  check('the glide never jumps', largestStep < 0.03, `largest step ${largestStep.toFixed(4)}`)
   check('the glide eventually lands exactly', maxMove(smoother.corners, far) < 1e-5,
     `error ${maxMove(smoother.corners, far).toFixed(6)}`)
 }
@@ -117,7 +118,7 @@ const copy = quad => quad.map(([x, y]) => [x, y])
 
   let previousX = smoother.corners[0][0]
   let monotonic = true
-  for (let t = 33 + 96; t <= 1400; t += 16) {
+  for (let t = 33 + 96; t <= 3000; t += 16) {
     smoother.tick(t)
     const x = smoother.corners[0][0]
     if (x > previousX + 1e-12) monotonic = false
