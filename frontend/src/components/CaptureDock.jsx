@@ -13,7 +13,7 @@ import {
 // every card stays 54×60 however many are in the tray.
 const SLOT_WIDTH = 54
 const SLOT_HEIGHT = 60
-const SLOT_OVERLAP = 8
+const SLOT_OVERLAP = 27
 
 function videoContentRect(video, resizeMode) {
   const rect = video.getBoundingClientRect()
@@ -347,7 +347,7 @@ export default function CaptureDock({
         <div
           ref={railRef}
           onScroll={onRailScroll}
-          className="no-scrollbar relative flex h-16 items-center overflow-x-auto overflow-y-hidden"
+          className="no-scrollbar relative flex h-16 items-center overflow-x-auto overflow-y-hidden capture-tray-rail"
           style={{
             scrollSnapType: 'none',
             scrollBehavior: 'auto',
@@ -370,12 +370,13 @@ export default function CaptureDock({
                   type="button"
                   onClick={() => onInspect?.(item.id)}
                   aria-label={`Capture ${item.sequence}${rotation ? `, rotated ${rotation} degrees` : ''}. Tap to inspect.`}
-                  className="relative shrink-0 overflow-hidden rounded-[3px] bg-black shadow-[inset_0_0_0_1px_rgba(255,255,255,0.6)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand-red"
+                  className="capture-tray-slot relative shrink-0 overflow-hidden rounded-[3px] bg-black shadow-[inset_0_0_0_1px_rgba(255,255,255,0.6)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand-red"
                   style={{
                     width: SLOT_WIDTH,
                     height: SLOT_HEIGHT,
                     marginLeft: index === 0 ? 0 : -SLOT_OVERLAP,
                     zIndex: index + 1,
+                    '--fan-offset': `${index - (items.length - 1) / 2}`,
                   }}
                 >
                   <TraySlotThumb item={item} />

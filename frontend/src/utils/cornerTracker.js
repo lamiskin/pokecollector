@@ -211,28 +211,33 @@ export function minEdgeMargin(corners) {
   return Number.isFinite(margin) ? margin : 0
 }
 
-// Width/height of the ordered quad (TL, TR, BR, BL). 63:88 cards sit near 0.7.
-export function quadAspect(corners) {
+// Width/height of the ordered quad (TL, TR, BR, BL). With a frame, distances
+// are measured in pixels; without one, normalised coordinates are used.
+export function quadAspect(corners, frame = null) {
   if (!corners || corners.length !== 4) return 0
+  const fx = frame && frame.width > 0 ? frame.width : 1
+  const fy = frame && frame.height > 0 ? frame.height : 1
+  const px = corners.map(([x, y]) => [x * fx, y * fy])
   const width = (
-    Math.hypot(corners[1][0] - corners[0][0], corners[1][1] - corners[0][1])
-    + Math.hypot(corners[2][0] - corners[3][0], corners[2][1] - corners[3][1])
+    Math.hypot(px[1][0] - px[0][0], px[1][1] - px[0][1])
+    + Math.hypot(px[2][0] - px[3][0], px[2][1] - px[3][1])
   ) / 2
   const height = (
-    Math.hypot(corners[3][0] - corners[0][0], corners[3][1] - corners[0][1])
-    + Math.hypot(corners[2][0] - corners[1][0], corners[2][1] - corners[1][1])
+    Math.hypot(px[3][0] - px[0][0], px[3][1] - px[0][1])
+    + Math.hypot(px[2][0] - px[1][0], px[2][1] - px[1][1])
   ) / 2
   return height > 0 ? width / height : 0
 }
 
 // True when the geometry looks like a fully-in-frame card region.
 export function isContainableQuad(corners, {
+  frame = null,
   minEdge = 0.015,
   minAspect = 0.55,
   maxAspect = 0.85,
 } = {}) {
   const margin = minEdgeMargin(corners)
-  const aspect = quadAspect(corners)
+  const aspect = quadAspect(corners, frame)
   return {
     ok: margin >= minEdge && aspect >= minAspect && aspect <= maxAspect,
     edgeContainment: margin,

@@ -12,6 +12,7 @@ import {
   evaluateTentative,
   isCorroborated,
   isContainableQuad,
+  quadAspect,
   isPatchMatchAcceptable,
   shouldAcceptCapture,
   shouldKeepTracking,
@@ -404,6 +405,24 @@ assert.equal(isPatchMatchAcceptable(676, 300), false)
   assert.equal(isContainableQuad(touching).ok, false)
   const wide = [[0.2, 0.3], [0.62, 0.3], [0.62, 0.6], [0.2, 0.6]]
   assert.equal(isContainableQuad(wide).ok, false)
+
+  // The same normalised geometry means different real aspects per frame; a
+  // 63:88 card must pass on both a portrait phone and a landscape webcam.
+  const cardOn = (frameWidth, frameHeight, left, top, width, height) => [
+    [left / frameWidth, top / frameHeight],
+    [(left + width) / frameWidth, top / frameHeight],
+    [(left + width) / frameWidth, (top + height) / frameHeight],
+    [left / frameWidth, (top + height) / frameHeight],
+  ]
+  const portraitCard = cardOn(1080, 1920, 100, 200, 300, 419)
+  const landscapeCard = cardOn(1920, 1080, 500, 100, 300, 419)
+  assert.equal(isContainableQuad(portraitCard, { frame: { width: 1080, height: 1920 } }).ok, true)
+  assert.equal(isContainableQuad(landscapeCard, { frame: { width: 1920, height: 1080 } }).ok, true)
+  assert.ok(Math.abs(quadAspect(portraitCard) - 1.273) < 0.001)
+  assert.equal(isContainableQuad(portraitCard).ok, false)
+
+  const wideRegion = cardOn(1080, 1920, 100, 500, 864, 768)
+  assert.equal(isContainableQuad(wideRegion, { frame: { width: 1080, height: 1920 } }).ok, false)
 }
 
 // Automatic capture requires recent detector corroboration of the geometry.

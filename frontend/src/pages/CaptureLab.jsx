@@ -1632,7 +1632,12 @@ export default function CaptureLab() {
         const corroborateAgeMs = decision.source === 'model'
           ? 0
           : (confirmAgeMs == null ? null : Math.round(confirmAgeMs))
+          const liveVideo = videoRef.current
+          const frame = liveVideo?.videoWidth && liveVideo?.videoHeight
+            ? { width: liveVideo.videoWidth, height: liveVideo.videoHeight }
+            : null
           const contain = isContainableQuad(corners, {
+            frame,
             minEdge: CAPTURE_EDGE_MIN,
             minAspect: CAPTURE_ASPECT_MIN,
             maxAspect: CAPTURE_ASPECT_MAX,
@@ -1658,6 +1663,7 @@ export default function CaptureLab() {
               ...attemptFields(),
             })
             liveScheduleRef.current?.(0)
+            if (check === 'aspect') setCaptureNote('Show the whole card')
             return false
           }
 
@@ -3217,13 +3223,13 @@ export default function CaptureLab() {
           ) : null}
         </div>
 
-        <div className="relative mt-3 overflow-hidden rounded">
+        <div className="capture-preview-box relative mt-3 overflow-hidden rounded">
           <video
             ref={videoRef}
             autoPlay
             playsInline
             muted
-            className={`w-full rounded border border-border bg-black ${status === 'live' ? '' : 'hidden'}`}
+            className={`h-full w-full rounded border border-border bg-black object-contain ${status === 'live' ? '' : 'invisible'}`}
           />
           {status === 'live' && liveDetection ? (
             <CaptureOverlay

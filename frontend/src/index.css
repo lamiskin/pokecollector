@@ -962,3 +962,37 @@ body {
 .capture-dock-thumb {
   animation: capture-dock-thumb-in 100ms ease-out;
 }
+
+/* Reserve a camera-shaped frame before permission is granted. The capped
+   16:9 box leaves the dock in the same first-screen composition. */
+.capture-preview-box {
+  aspect-ratio: 16 / 9;
+  width: min(100%, calc(38vh * 16 / 9));
+  max-height: 38vh;
+  background: #000;
+}
+.capture-preview-box video { aspect-ratio: 16 / 9; object-fit: contain; }
+
+.capture-tray-rail { perspective: 900px; }
+.capture-tray-slot {
+  transform: perspective(900px) rotateY(calc(clamp(-11deg, var(--fan-offset) * -0.75deg, 11deg))) translateZ(calc(clamp(-18px, var(--fan-offset) * -1.2px, 18px)));
+  transform-origin: center bottom;
+  transition: transform 140ms ease-out, opacity 140ms ease-out, box-shadow 140ms ease-out;
+}
+.capture-tray-slot:hover,
+.capture-tray-slot:focus-visible {
+  z-index: 60 !important;
+  opacity: 1;
+  transform: translateY(-8px) scale(1.12);
+  box-shadow: 0 8px 18px rgb(0 0 0 / 45%);
+}
+@media (prefers-reduced-motion: reduce) {
+  .capture-tray-slot { transform: none; transition: none; }
+  .capture-tray-slot:hover,
+  .capture-tray-slot:focus-visible {
+    transform: none;
+    box-shadow: none;
+    outline: 2px solid var(--color-brand-red);
+    outline-offset: 1px;
+  }
+}
