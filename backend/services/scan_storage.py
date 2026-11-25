@@ -483,8 +483,9 @@ def derive_straight_image(
             manifest.update(state="skipped_disabled", reason=None)
         else:
             # CollectorVision is the proposal source when selected. It locates
-            # the card itself, so it does not need the phone's quad; a failure
-            # of any kind falls through to the unchanged phone path below.
+            # the card itself, so it does not need the phone's quad; only a
+            # detection or dewarp failure falls through to the phone path. A
+            # failed identification still returns the crop, so it does not.
             proposal = None
             if source_pref == "collectorvision" and sanitized.rgb is not None:
                 proposal = cv_crop.propose_with_collectorvision(sanitized.rgb)

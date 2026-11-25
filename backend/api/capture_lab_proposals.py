@@ -54,6 +54,9 @@ _STEM_PATTERN = re.compile(r"[0-9a-fA-F]{32}")
 PROPOSAL_LABEL = "Unverified crop"
 NO_STORE = {"Cache-Control": "no-store"}
 CACHE_LIMIT = 64
+# ``auto`` follows ``SCAN_CROP_SOURCE``; ``phone`` forces the geometry-only
+# path so the review page can show what the fallback would have produced.
+CROP_SOURCES = ("auto", "phone")
 
 
 @dataclass(frozen=True)
@@ -280,7 +283,7 @@ def _jpeg_bytes(image: Image.Image) -> bytes:
 
 
 def _build_proposal(
-    image_path: Path, geometry: dict
+    image_path: Path, geometry: dict, source: str = "auto"
 ) -> _Proposal:
     """Recompute the crop from the stored JPEG with the current rules.
 
@@ -288,16 +291,20 @@ def _build_proposal(
     not need the phone's quad, so it runs before the geometry is parsed; when
     it produces nothing the unchanged phone path runs, and only that path's
     technical failures become a 409. A placeholder is never substituted.
+
+    ``source`` is the request's override: ``auto`` follows
+    ``SCAN_CROP_SOURCE``; ``phone`` skips CollectorVision entirely so the
+    review page can render the fallback for comparison.
     """
     rotation = geometry.get("storedRotationCw", 0) or 0
     try:
-        with Image.open(image_path) as source:
-            source.load()
-            rgb = source.convert("RGB")
+        with Image.open(image_path) as stored:
+            stored.load()
+            rgb = stored.convert("RGB")
     except Exception:  # noqa: BLE001 - an unreadable source is a technical failure
         raise HTTPException(status_code=409, detail="stored image unreadable", headers=NO_STORE)
 
-    if cv_crop.crop_source() == "collectorvision":
+    if source == "auto" and cv_crop.crop_source() == "collectorvision":
         proposal = cv_crop.propose_with_collectorvision(rgb)
         if proposal is not None:
             identity = cv_crop.cv_identity()
@@ -357,6 +364,7 @@ def _proposal_for(
     image_path: Path,
     geometry_path: Path,
     geometry: dict,
+    source: str = "auto",
 ) -> _Proposal:
     try:
         mtime_ns = max(
@@ -365,20 +373,22 @@ def _proposal_for(
     except OSError:
         raise HTTPException(status_code=409, detail="stored proposal unreadable", headers=NO_STORE)
 
-    # The crop source is part of the identity: flipping the flag must never
-    # serve a cached proposal from the other path.
+    # The crop source is part of the identity: flipping the flag, or asking for
+    # the phone fallback explicitly, must never serve a cached proposal from
+    # the other path.
     key = (
         stem,
         mtime_ns,
         STRAIGHTEN_VERSION,
         straighten_config_digest(),
         cv_crop.crop_source(),
+        source,
     )
     cached = _cache_get(key)
     if cached is not None:
         return cached
 
-    proposal = _build_proposal(image_path, geometry)
+    proposal = _build_proposal(image_path, geometry, source=source)
     _cache_put(key, proposal)
     return proposal
 
@@ -478,6 +488,12 @@ def list_proposals(user: User = Depends(get_current_user)):
             }
             if (cv_dir / f"{stem}.jpg").is_file():
                 item["cvUrl"] = f"/api/capture-lab/proposals/{stem}/cv"
+            # Only CollectorVision proposals have a phone fallback worth
+            # comparing; when the phone path made the crop there is none.
+            if proposal.source == "collectorvision":
+                item["phoneUrl"] = (
+                    f"/api/capture-lab/proposals/{stem}/crop?source=phone"
+                )
             items.append(item)
     return JSONResponse(
         content={"total": len(items), "items": items}, headers=NO_STORE
@@ -500,10 +516,24 @@ def proposal_original(stem: str, user: User = Depends(get_current_user)):
 
 
 @router.get("/proposals/{stem}/crop")
-def proposal_crop(stem: str, user: User = Depends(get_current_user)):
-    """The proposal computed now from the stored image and current rules."""
+def proposal_crop(
+    stem: str,
+    source: str = "auto",
+    user: User = Depends(get_current_user),
+):
+    """The proposal computed now from the stored image and current rules.
+
+    ``source=phone`` forces the geometry-only fallback even when CollectorVision
+    is selected, so the page can compare the two; an abstention is still 409.
+    """
+    if source not in CROP_SOURCES:
+        raise HTTPException(
+            status_code=400, detail="Invalid crop source", headers=NO_STORE
+        )
     image_path, geometry_path, geometry = _load_geometry(stem)
-    proposal = _proposal_for(stem, image_path, geometry_path, geometry)
+    proposal = _proposal_for(
+        stem, image_path, geometry_path, geometry, source=source
+    )
     return Response(
         content=proposal.crop, media_type="image/jpeg", headers=NO_STORE
     )

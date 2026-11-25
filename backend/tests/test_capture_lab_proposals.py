@@ -555,6 +555,146 @@ class CaptureLabProposalTests(unittest.TestCase):
 
         self.assertGreaterEqual(reader.call_count, 2)
         self.assertEqual(third["items"][0]["cv"]["score"], 0.42)
+    def test_crop_phone_source_forces_the_phone_path_when_cv_is_selected(self):
+        image_path, _ = _write_proposal(self.root, 320, STEM_A)
+        env = {"SCAN_CROP_SOURCE": "collectorvision"}
+        with self._enabled_env(), patch.dict(os.environ, env), patch.object(
+            capture_lab_proposals.cv_crop,
+            "propose_with_collectorvision",
+            return_value=self._cv_proposal(),
+        ) as proposer:
+            response = self.client.get(
+                f"/api/capture-lab/proposals/{STEM_A}/crop",
+                params={"source": "phone"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["content-type"], "image/jpeg")
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        proposer.assert_not_called()
+
+        with Image.open(image_path) as stored:
+            stored.load()
+            rgb = stored.convert("RGB")
+        quad = transform_quad_for_storage(
+            _normalised_quad(), 0, rgb.width, rgb.height
+        )
+        expected = try_straighten(rgb, quad)
+        self.assertIsInstance(expected, Straightened)
+        with Image.open(io.BytesIO(response.content)) as crop:
+            self.assertEqual(crop.size, (expected.width, expected.height))
+
+    def test_crop_rejects_an_unknown_source(self):
+        _write_proposal(self.root, 320, STEM_A)
+        with self._enabled_env():
+            for bad in ("collectorvision", "cv", "PHONE", ""):
+                response = self.client.get(
+                    f"/api/capture-lab/proposals/{STEM_A}/crop",
+                    params={"source": bad},
+                )
+                self.assertEqual(response.status_code, 400, bad)
+                self.assertEqual(
+                    response.headers["cache-control"], "no-store", bad
+                )
+
+    def test_phone_source_abstention_is_409_with_the_reason(self):
+        _write_proposal(
+            self.root,
+            320,
+            STEM_C,
+            quad=[[0.2, 0.2], [0.2, 0.2], [0.8, 0.8], [0.8, 0.8]],
+        )
+        with self._enabled_env():
+            response = self.client.get(
+                f"/api/capture-lab/proposals/{STEM_C}/crop",
+                params={"source": "phone"},
+            )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        self.assertTrue(response.json()["detail"])
+
+    def test_cache_separates_auto_and_phone_sources(self):
+        _write_proposal(self.root, 320, STEM_A)
+        env = {"SCAN_CROP_SOURCE": "collectorvision"}
+        real_build = capture_lab_proposals._build_proposal
+        with self._enabled_env(), patch.dict(os.environ, env), patch.object(
+            capture_lab_proposals.cv_crop,
+            "propose_with_collectorvision",
+            return_value=self._cv_proposal(turned_cw=0),
+        ), patch.object(
+            capture_lab_proposals.cv_crop, "cv_identity", return_value={}
+        ), patch.object(
+            capture_lab_proposals, "_build_proposal", wraps=real_build
+        ) as builder:
+            auto_first = self.client.get(
+                f"/api/capture-lab/proposals/{STEM_A}/crop"
+            )
+            phone_first = self.client.get(
+                f"/api/capture-lab/proposals/{STEM_A}/crop",
+                params={"source": "phone"},
+            )
+            auto_second = self.client.get(
+                f"/api/capture-lab/proposals/{STEM_A}/crop"
+            )
+            phone_second = self.client.get(
+                f"/api/capture-lab/proposals/{STEM_A}/crop",
+                params={"source": "phone"},
+            )
+
+        self.assertEqual(builder.call_count, 2)
+        self.assertEqual(auto_first.content, auto_second.content)
+        self.assertEqual(phone_first.content, phone_second.content)
+        self.assertNotEqual(auto_first.content, phone_first.content)
+        with Image.open(io.BytesIO(auto_first.content)) as image:
+            self.assertEqual(image.size, (120, 168))
+
+    def test_listing_adds_phone_url_only_to_collectorvision_items(self):
+        _write_proposal(self.root, 320, STEM_A)
+        identity = {
+            "algorithmVersion": "cv1",
+            "libraryCommit": "8b295ab80a997766afc00c640a616c1f2716df21",
+            "detectorFile": "cornelius-2.12.onnx",
+            "detectorSha256": "d" * 64,
+            "embedderFile": "model.onnx",
+            "embedderSha256": "e" * 64,
+            "catalogKey": "milo1/tcgplayer/pokemon",
+            "catalogVersion": 75,
+            "cropAspect": [63, 88],
+        }
+        env = {"SCAN_CROP_SOURCE": "collectorvision"}
+        with self._enabled_env(), patch.dict(os.environ, env):
+            with patch.object(
+                capture_lab_proposals.cv_crop,
+                "propose_with_collectorvision",
+                return_value=self._cv_proposal(),
+            ), patch.object(
+                capture_lab_proposals.cv_crop,
+                "cv_identity",
+                return_value=identity,
+            ):
+                cv_listing = self.client.get(
+                    "/api/capture-lab/proposals"
+                ).json()
+
+            capture_lab_proposals._clear_cache()
+            with patch.object(
+                capture_lab_proposals.cv_crop,
+                "propose_with_collectorvision",
+                return_value=None,
+            ):
+                phone_listing = self.client.get(
+                    "/api/capture-lab/proposals"
+                ).json()
+
+        cv_item = cv_listing["items"][0]
+        self.assertEqual(cv_item["source"], "collectorvision")
+        self.assertEqual(
+            cv_item["phoneUrl"],
+            f"/api/capture-lab/proposals/{STEM_A}/crop?source=phone",
+        )
+        phone_item = phone_listing["items"][0]
+        self.assertEqual(phone_item["source"], "phone")
+        self.assertNotIn("phoneUrl", phone_item)
 
 
 if __name__ == "__main__":

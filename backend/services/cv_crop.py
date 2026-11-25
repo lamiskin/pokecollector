@@ -310,7 +310,8 @@ def cv_identity_digest(identity: dict[str, Any] | None = None) -> str:
 
     ``identity`` defaults to the live engine's identity. Callers that record a
     manifest must pass the same dict they store so the digest and the dict can
-    never disagree; ``straighten_manifest_is_current`` verifies that pairing.
+    never disagree; ``services.scan_storage.cv_manifest_is_current`` verifies
+    that pairing.
     """
     payload = cv_identity() if identity is None else identity
     body = json.dumps(payload, sort_keys=True, separators=(",", ":"))

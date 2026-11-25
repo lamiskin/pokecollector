@@ -3,23 +3,25 @@ import { ChevronLeft, ChevronRight, RotateCcw } from 'lucide-react'
 import api from '../api/client'
 import './CaptureLabProposals.css'
 
-const views = ['Original', 'Crop', 'Turned', 'CollectorVision']
+const views = ['Original', 'Crop', 'Turned', 'CollectorVision', 'Phone']
 
 async function fetchProposal(item) {
   const urls = {}
   let unavailable = false
-  for (const key of ['original', 'crop', 'turned', ...(item.cvUrl ? ['cv'] : [])]) {
-    const path = (key === 'cv' ? item.cvUrl : item[`${key}Url`])?.replace(/^\/api(?=\/)/, '')
+  let phoneUnavailable = false
+  for (const key of ['original', 'crop', 'turned', ...(item.cvUrl ? ['cv'] : []), ...(item.phoneUrl ? ['phone'] : [])]) {
+    const path = (key === 'cv' ? item.cvUrl : key === 'phone' ? item.phoneUrl : item[`${key}Url`])?.replace(/^\/api(?=\/)/, '')
     if (!path) continue
     try {
       const response = await api.get(path, { responseType: 'blob' })
       urls[key] = URL.createObjectURL(response.data)
     } catch (error) {
-      if (error.response?.status === 409 && key !== 'original') unavailable = true
+      if (error.response?.status === 409 && key === 'phone') phoneUnavailable = true
+      else if (error.response?.status === 409 && key !== 'original') unavailable = true
       else if (key === 'original') throw error
     }
   }
-  return { urls, unavailable }
+  return { urls, unavailable, phoneUnavailable }
 }
 
 export default function CaptureLabProposals() {
@@ -85,7 +87,7 @@ export default function CaptureLabProposals() {
   const verdict = (choice) => setVotes(prev => ({ ...prev, [current.stem]: choice }))
   const tally = Object.values(votes).reduce((acc, value) => ({ ...acc, [value]: acc[value] + 1 }), { crop: 0, original: 0 })
   const asset = current && assets[current.stem]
-  const src = asset?.urls?.[{ Original: 'original', Crop: 'crop', Turned: 'turned', CollectorVision: 'cv' }[view]]
+  const src = asset?.urls?.[{ Original: 'original', Crop: 'crop', Turned: 'turned', CollectorVision: 'cv', Phone: 'phone' }[view]]
   const noProposal = asset?.unavailable || !current?.cropUrl
   const onTouchStart = event => { touchStart.current = [event.touches[0].clientX, event.touches[0].clientY] }
   const onTouchEnd = event => {
@@ -99,11 +101,11 @@ export default function CaptureLabProposals() {
     <header className="proposal-topbar"><a href="/capture-lab" aria-label="Back to capture lab"><ChevronLeft /></a><span>Capture lab</span><span className="proposal-count">{loading ? '…' : `${items.length ? index + 1 : 0} / ${items.length}`}</span></header>
     {loading ? <section className="proposal-stage"><div className="proposal-skeleton" /></section> : failure ? <section className="proposal-message"><p>Could not load proposals.</p><button onClick={loadList}>Try again</button></section> : !current ? <section className="proposal-message"><p>No proposals yet.</p></section> : <>
       <section className="proposal-stage" ref={stageRef}>
-        {src ? <div className="proposal-photo" style={photoHeight ? { height: `${photoHeight}px` } : undefined}><img src={src} alt={view === 'Original' ? 'Original card photo' : view === 'CollectorVision' ? 'CollectorVision' : `${view} crop`} />{view === 'Original' && <svg className="proposal-boundary" viewBox="0 0 1 1" preserveAspectRatio="none" aria-label="Proposed crop boundary"><polygon points={current.quad.map(point => point.join(',')).join(' ')} /></svg>}</div> : <div className="proposal-skeleton" />}
-        {noProposal && <div className="proposal-notice">The proposal could not be produced.</div>}
+        {src ? <div className="proposal-photo" style={photoHeight ? { height: `${photoHeight}px` } : undefined}><img src={src} alt={view === 'Original' ? 'Original card photo' : view === 'CollectorVision' ? 'CollectorVision' : view === 'Phone' ? 'Phone fallback crop' : `${view} crop`} />{view === 'Original' && <svg className="proposal-boundary" viewBox="0 0 1 1" preserveAspectRatio="none" aria-label="Proposed crop boundary"><polygon points={current.quad.map(point => point.join(',')).join(' ')} /></svg>}</div> : <div className="proposal-skeleton" />}
+        {noProposal && view !== 'Phone' && <div className="proposal-notice">The proposal could not be produced.</div>}
       </section>
       <section className="proposal-details"><div><span className="proposal-label">Unverified crop</span><p>{current.outputWidth} × {current.outputHeight}</p></div><span className="proposal-tally">{tally.crop} crop · {tally.original} original</span></section>
-      <div className="proposal-view-slot"><nav className="proposal-views" aria-label="Photo view">{views.map(name => <button key={name} className={view === name ? 'selected' : ''} aria-pressed={view === name} aria-label={name === 'CollectorVision' ? 'CollectorVision' : undefined} disabled={name === 'CollectorVision' && !current.cvUrl} onClick={() => setView(name)}>{name === 'CollectorVision' ? 'CV' : name}</button>)}</nav><div className="proposal-comparison" aria-live="polite">{view === 'CollectorVision' && current.cvUrl ? <>{current.cv?.top1?.name || current.cv?.top1?.id}<small>{Number(current.cv?.score).toFixed(2)} · {current.cv?.detection === 'direct' ? 'direct' : 'padded'}</small></> : !current.cvUrl ? 'No comparison for this capture.' : '\u00a0'}</div></div>
+      <div className="proposal-view-slot"><nav className="proposal-views" aria-label="Photo view">{views.map(name => <button key={name} className={view === name ? 'selected' : ''} aria-pressed={view === name} aria-label={name === 'CollectorVision' ? 'CollectorVision' : undefined} disabled={(name === 'CollectorVision' && !current.cvUrl) || (name === 'Phone' && (!current.phoneUrl || asset?.phoneUnavailable))} onClick={() => setView(name)}>{name === 'CollectorVision' ? 'CV' : name}</button>)}</nav><div className="proposal-comparison" aria-live="polite">{view === 'Phone' && (!current.phoneUrl || asset?.phoneUnavailable) ? 'Phone crop unavailable for this capture.' : view === 'Phone' ? '\u00a0' : view === 'Crop' && current.source === 'phone' ? 'Crop is the phone fallback for this capture.' : view === 'CollectorVision' && current.cvUrl ? <>{current.cv?.top1?.name || current.cv?.top1?.id}<small>{Number(current.cv?.score).toFixed(2)} · {current.cv?.detection === 'direct' ? 'direct' : 'padded'}</small></> : !current.cvUrl ? 'No comparison for this capture.' : '\u00a0'}</div></div>
       <footer className="proposal-actions"><button className="proposal-original" onClick={() => verdict('original')} aria-pressed={votes[current.stem] === 'original'}><RotateCcw size={18} />Use original</button><button className="proposal-use" disabled={noProposal} onClick={() => verdict('crop')} aria-pressed={votes[current.stem] === 'crop'}>Use this crop</button><div className="proposal-stepper"><button aria-label="Previous proposal" onClick={() => go(index - 1)}><ChevronLeft /></button><button aria-label="Next proposal" onClick={() => go(index + 1)}><ChevronRight /></button></div></footer>
     </>}
   </main>
