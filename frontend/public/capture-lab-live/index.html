@@ -10,7 +10,7 @@
 <body>
 <header>
   <h1>Capture lab live</h1>
-  <p class="sub">Our detector, our ring · Cornelius 2.12 · <code>/detector/</code> · detector only, nothing is uploaded until you press Send results</p>
+  <p class="sub">Our detector, our ring · Cornelius 2.12 · <code>/detector/</code> · detector only; only Send results and the matrix's one completion post upload anything</p>
 </header>
 
 <div id="banner" class="banner" role="status" aria-live="polite" hidden></div>
@@ -60,6 +60,25 @@
   </label>
 </div>
 
+<section class="ab" aria-labelledby="matrix-title">
+  <h2 id="matrix-title">Run all &amp; send</h2>
+  <p class="ab-help">
+    Runs every combination once — thread cap 1 / 2 / 4 × detector input 320 / 480 / 640
+    at the current camera size, 8 s each (9 runs, about 72 s) — then posts the whole set
+    once. Without cross-origin isolation or SharedArrayBuffer only cap 1 is measured.
+    Stop keeps the runs collected so far; they can still be sent with Send results.
+  </p>
+  <div class="ab-row">
+    <button id="matrix-run" type="button" disabled>Run all &amp; send</button>
+    <button id="matrix-stop" type="button" hidden>Stop</button>
+    <span id="matrix-status" class="ab-status" role="status" aria-live="polite"></span>
+  </div>
+  <div class="ab-row">
+    <button id="matrix-retry" type="button" hidden>Retry send</button>
+    <span id="matrix-send-status" class="ab-status" role="status" aria-live="polite"></span>
+  </div>
+</section>
+
 <dl class="stats">
   <div class="stat"><dt class="k">crossOriginIsolated</dt><dd class="v" id="s-isolated">…</dd></div>
   <div class="stat"><dt class="k">threads granted</dt><dd class="v" id="s-threads">…</dd></div>
@@ -106,8 +125,9 @@
     cross-origin isolated and <code>SharedArrayBuffer</code> exists. Changing the cap restarts
     the worker, so the A/B helper compares like-for-like without a reload. The camera size
     is renegotiated on the live track and the detector input resizes the next frame, so
-    neither restarts the worker or drops the ring. Nothing is uploaded until you press
-    Send results; a failed send keeps the list and offers a retry. Blur outside the card:
+    neither restarts the worker or drops the ring. Single sweeps upload only when you
+    press Send results; Run all &amp; send posts the collected matrix once on completion.
+    A failed send keeps the list and offers a retry. Blur outside the card:
     <span id="blur-state">…</span>.
   </p>
   <p class="worker">worker: <code id="worker-src">not loaded</code></p>

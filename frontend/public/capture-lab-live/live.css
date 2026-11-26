@@ -143,6 +143,7 @@ button {
   cursor: pointer;
 }
 button:disabled { opacity: .45; cursor: default; }
+button[hidden] { display: none; }
 button.primary { background: #8a6d10; border-color: var(--gold); color: #fff8e1; }
 
 .cap {

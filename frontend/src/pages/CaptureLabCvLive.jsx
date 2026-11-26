@@ -44,6 +44,12 @@ const CV_UPLOAD_EDGES = [640, 960, 1280, 1600]
 const DEFAULT_CV_UPLOAD_EDGE = 1280
 
 const SWEEP_DURATION_MS = 10000
+// "Run all & send": every detector input × CV upload combination at the current
+// camera size. There is no thread cap on this page (the detector worker is
+// started once by the app), so six 8 s runs cover the matrix in about 48 s.
+const MATRIX_INPUT_EDGES = [320, 480, 640]
+const MATRIX_CV_EDGES = [960, 1280]
+const MATRIX_DURATION_MS = 8000
 
 function toFiniteNumber(value) {
   if (value == null || value === '') return null
@@ -188,6 +194,10 @@ export default function CaptureLabCvLive() {
   const [label, setLabel] = useState('')
   const [sending, setSending] = useState(false)
   const [sendState, setSendState] = useState(null)
+  const [matrixActive, setMatrixActive] = useState(false)
+  const [matrixStatus, setMatrixStatus] = useState('')
+  const [matrixSending, setMatrixSending] = useState(false)
+  const [matrixSendState, setMatrixSendState] = useState(null)
 
   const videoRef = useRef(null)
   const canvasRef = useRef(null)
@@ -223,6 +233,23 @@ export default function CaptureLabCvLive() {
   })
   const sweepTimerRef = useRef(null)
   const sweepIntervalRef = useRef(null)
+  // Orchestration for "Run all & send". It drives the single-run machinery
+  // below: each combination is one normal sweep whose finish resolves the
+  // promise the matrix loop awaits. The token guards against a CV request that
+  // began under the previous combination landing in the new window.
+  const matrixRef = useRef({
+    active: false,
+    cancelled: false,
+    internal: false,
+    queue: [],
+    index: 0,
+    total: 0,
+    collected: [],
+  })
+  const matrixPayloadRef = useRef(null)
+  const matrixSendingRef = useRef(false)
+  const sweepTokenRef = useRef(0)
+  const ourSampleTokenRef = useRef(0)
 
   useEffect(() => {
     mountedRef.current = true
@@ -235,6 +262,9 @@ export default function CaptureLabCvLive() {
       if (sweepIntervalRef.current != null) window.clearInterval(sweepIntervalRef.current)
       sweepTimerRef.current = null
       sweepIntervalRef.current = null
+      sweepRef.current.resolve?.(null)
+      sweepRef.current.resolve = null
+      matrixRef.current.cancelled = true
     }
   }, [])
 
@@ -265,7 +295,32 @@ export default function CaptureLabCvLive() {
     sweepTimerRef.current = null
     sweepIntervalRef.current = null
     setSweepActive(false)
-    setSweepStatus(`run cancelled (${reason}).`)
+    const resolve = run.resolve
+    run.resolve = null
+    resolve?.(null)
+    const matrix = matrixRef.current
+    if (matrix.active) {
+      setMatrixStatus(
+        `matrix cancelled (${reason}) — ${matrix.collected.length} run(s) kept; press Send results.`,
+      )
+    } else {
+      setSweepStatus(`run cancelled (${reason}).`)
+    }
+  }
+
+  // Abort the matrix but keep every run already collected: they are in the
+  // results list, so the ordinary Send results button can still post them.
+  const abortMatrix = reason => {
+    const matrix = matrixRef.current
+    if (!matrix.active || matrix.cancelled) return
+    matrix.cancelled = true
+    if (sweepRef.current.active) {
+      cancelSweep(reason)
+    } else {
+      setMatrixStatus(
+        `matrix cancelled (${reason}) — ${matrix.collected.length} run(s) kept; press Send results.`,
+      )
+    }
   }
 
   const cameraTarget = key => {
@@ -280,6 +335,7 @@ export default function CaptureLabCvLive() {
     setCameraSizeKey(key)
     cameraSizeRef.current = key
     setCameraNote('')
+    if (matrixRef.current.active) abortMatrix('camera changed')
     cancelSweep('camera changed')
     const track = streamRef.current?.getVideoTracks?.()[0]
     // Before Start there is no track: the selection is applied when it opens.
@@ -307,6 +363,8 @@ export default function CaptureLabCvLive() {
 
   // Our detector input is a local frame-canvas decision: no worker restart.
   const changeDetectorEdge = edge => {
+    const matrix = matrixRef.current
+    if (matrix.active && !matrix.internal) abortMatrix('detector input changed')
     setDetectorEdge(edge)
     detectorEdgeRef.current = edge
     cancelSweep('input changed')
@@ -314,6 +372,8 @@ export default function CaptureLabCvLive() {
 
   // The CV upload size only changes the next JPEG's long edge.
   const changeCvUploadEdge = edge => {
+    const matrix = matrixRef.current
+    if (matrix.active && !matrix.internal) abortMatrix('cv upload changed')
     setCvUploadEdge(edge)
     cvUploadEdgeRef.current = edge
     cancelSweep('cv upload changed')
@@ -322,18 +382,33 @@ export default function CaptureLabCvLive() {
   const updateSweepStatus = () => {
     const run = sweepRef.current
     if (!run.active) return
-    const left = Math.max(0, SWEEP_DURATION_MS - (performance.now() - run.startedAt))
+    const left = Math.max(0, run.duration - (performance.now() - run.startedAt))
+    const matrix = matrixRef.current
+    if (matrix.active) {
+      setMatrixStatus(
+        `run ${matrix.index + 1}/${matrix.total} · in ${run.edge} · cv ${run.cvUpload} · `
+          + `${(left / 1000).toFixed(1)} s left`,
+      )
+      return
+    }
     setSweepStatus(
       `sampling — ${(left / 1000).toFixed(1)} s left at cam ${run.cam} · in ${run.edge} · cv ${run.cvUpload}`,
     )
   }
 
-  const startSweep = () => {
+  const startSweep = (durationMs = SWEEP_DURATION_MS) => {
     const run = sweepRef.current
-    if (cameraStatus !== 'live' || run.active) return
+    if (cameraStatus !== 'live' || !streamRef.current || run.active) {
+      return Promise.resolve(null)
+    }
     const video = videoRef.current
+    const token = (sweepTokenRef.current += 1)
+    let resolve
+    const done = new Promise(doneResolve => { resolve = doneResolve })
     sweepRef.current = {
       active: true,
+      token,
+      duration: durationMs,
       startedAt: performance.now(),
       cam: video?.videoWidth && video?.videoHeight ? `${video.videoWidth}×${video.videoHeight}` : '—',
       edge: detectorEdgeRef.current,
@@ -341,11 +416,14 @@ export default function CaptureLabCvLive() {
       oursMs: [],
       oursStamps: [],
       cv: [],
+      resolve,
     }
     setSweepActive(true)
+    if (!matrixRef.current.active) setSweepStatus('')
     updateSweepStatus()
     sweepIntervalRef.current = window.setInterval(updateSweepStatus, 200)
-    sweepTimerRef.current = window.setTimeout(finishSweep, SWEEP_DURATION_MS)
+    sweepTimerRef.current = window.setTimeout(finishSweep, durationMs)
+    return done
   }
 
   const finishSweep = () => {
@@ -383,8 +461,12 @@ export default function CaptureLabCvLive() {
       }
     }
 
-    if (!ours && !cv) {
+    const matrix = matrixRef.current
+    if (!ours && !cv && !matrix.active) {
       setSweepStatus('no samples — keep the card in view and try again.')
+      const resolve = run.resolve
+      run.resolve = null
+      resolve?.(null)
       return
     }
 
@@ -409,19 +491,44 @@ export default function CaptureLabCvLive() {
     })
     // The list changed, so an earlier send no longer covers it.
     setSendState(null)
-    setSweepStatus(
-      `recorded cam ${result.cam} · in ${result.edge} · cv ${result.cvUpload}. `
-        + 'Run another combination to compare.',
-    )
+    if (!matrix.active) {
+      setSweepStatus(
+        `recorded cam ${result.cam} · in ${result.edge} · cv ${result.cvUpload}. `
+          + 'Run another combination to compare.',
+      )
+    }
+    const resolve = run.resolve
+    run.resolve = null
+    resolve?.(result)
   }
 
-  const sendResults = async () => {
-    if (sending || !results.length) return
-    setSending(true)
-    setSendState(null)
+  const runPayload = result => ({
+    settings: { cam: result.cam, input: result.edge, cvUpload: result.cvUpload },
+    ours: result.ours
+      ? {
+          msMedian: result.ours.msMedian,
+          perSecond: result.ours.perSecond,
+          detections: result.ours.detections,
+        }
+      : null,
+    cv: result.cv
+      ? {
+          roundTripMs: result.cv.roundTripMs,
+          detectMs: result.cv.detectMs,
+          detection: result.cv.detection,
+          sharpness: result.cv.sharpness,
+          found: result.cv.found,
+          resized: result.cv.resized,
+        }
+      : null,
+    at: result.at,
+  })
+
+  const buildPayload = (runs, mode = '') => {
     const trimmed = label.trim()
-    const payload = {
+    return {
       page: 'cv-live',
+      ...(mode ? { mode } : {}),
       ...(trimmed ? { label: trimmed } : {}),
       device: {
         ua: navigator.userAgent,
@@ -429,31 +536,21 @@ export default function CaptureLabCvLive() {
         isolated: window.crossOriginIsolated === true,
         threadsGranted: threadsGrantedRef.current,
       },
-      runs: results.map(result => ({
-        settings: { cam: result.cam, input: result.edge, cvUpload: result.cvUpload },
-        ours: result.ours
-          ? {
-              msMedian: result.ours.msMedian,
-              perSecond: result.ours.perSecond,
-              detections: result.ours.detections,
-            }
-          : null,
-        cv: result.cv
-          ? {
-              roundTripMs: result.cv.roundTripMs,
-              detectMs: result.cv.detectMs,
-              detection: result.cv.detection,
-              sharpness: result.cv.sharpness,
-              found: result.cv.found,
-              resized: result.cv.resized,
-            }
-          : null,
-        at: result.at,
-      })),
+      runs: runs.map(runPayload),
     }
+  }
+
+  const postExperiment = async payload => {
+    const response = await api.post(EXPERIMENTS_PATH, payload)
+    return response.data?.id ?? null
+  }
+
+  const sendResults = async () => {
+    if (sending || !results.length) return
+    setSending(true)
+    setSendState(null)
     try {
-      const response = await api.post(EXPERIMENTS_PATH, payload)
-      const id = response.data?.id
+      const id = await postExperiment(buildPayload(results))
       setSendState({ tone: 'ok', text: id == null ? 'sent' : `sent · id ${id}` })
     } catch (error) {
       setSendState({
@@ -465,7 +562,95 @@ export default function CaptureLabCvLive() {
     }
   }
 
+  // The matrix posts exactly once, on completion. A failed post keeps the
+  // payload so the retry button repeats the same request; the manual Send
+  // results button above remains a separate path and never fires by itself.
+  const postMatrixPayload = async () => {
+    if (matrixSendingRef.current || !matrixPayloadRef.current) return
+    matrixSendingRef.current = true
+    setMatrixSending(true)
+    setMatrixSendState(null)
+    try {
+      const id = await postExperiment(matrixPayloadRef.current)
+      setMatrixSendState({ tone: 'ok', text: id == null ? 'sent' : `sent · id ${id}` })
+    } catch (error) {
+      setMatrixSendState({
+        tone: 'error',
+        text: `send failed: ${getApiErrorMessage(error)}`,
+      })
+    } finally {
+      matrixSendingRef.current = false
+      setMatrixSending(false)
+    }
+  }
+
+  const autoSendMatrix = async () => {
+    const matrix = matrixRef.current
+    if (!matrix.collected.length) return
+    matrixPayloadRef.current = buildPayload(matrix.collected, 'matrix')
+    await postMatrixPayload()
+  }
+
+  const startMatrix = async () => {
+    if (cameraStatus !== 'live' || sweepRef.current.active || matrixRef.current.active) return
+    const combos = []
+    for (const edge of MATRIX_INPUT_EDGES) {
+      for (const cvUpload of MATRIX_CV_EDGES) combos.push({ edge, cvUpload })
+    }
+    const matrix = matrixRef.current
+    matrix.active = true
+    matrix.cancelled = false
+    matrix.internal = false
+    matrix.queue = combos
+    matrix.index = 0
+    matrix.total = combos.length
+    matrix.collected = []
+    matrixPayloadRef.current = null
+    setMatrixActive(true)
+    setMatrixSendState(null)
+    setMatrixStatus('starting…')
+
+    try {
+      for (let i = 0; i < combos.length; i += 1) {
+        if (!matrix.active || matrix.cancelled) break
+        matrix.index = i
+        const combo = combos[i]
+        // Applying the settings is the matrix's own doing, so suppress the
+        // user-change abort inside the setters.
+        matrix.internal = true
+        try {
+          changeDetectorEdge(combo.edge)
+          changeCvUploadEdge(combo.cvUpload)
+        } finally {
+          matrix.internal = false
+        }
+        if (!matrix.active || matrix.cancelled) break
+        setMatrixStatus(
+          `run ${i + 1}/${matrix.total} · in ${combo.edge} · cv ${combo.cvUpload} · `
+            + `${(MATRIX_DURATION_MS / 1000).toFixed(1)} s left`,
+        )
+        const result = await startSweep(MATRIX_DURATION_MS)
+        if (result) matrix.collected.push(result)
+        if (!matrix.active || matrix.cancelled) break
+      }
+    } finally {
+      const completed = matrix.active && !matrix.cancelled
+      matrix.active = false
+      matrix.internal = false
+      setMatrixActive(false)
+      if (completed) {
+        if (matrix.collected.length) {
+          setMatrixStatus(`matrix complete — ${matrix.collected.length} run(s).`)
+          await autoSendMatrix()
+        } else {
+          setMatrixStatus('matrix finished with no samples — nothing to send.')
+        }
+      }
+    }
+  }
+
   const stopCamera = () => {
+    abortMatrix('camera stopped')
     cancelSweep('camera stopped')
     controllerRef.current?.abort()
     controllerRef.current = null
@@ -524,6 +709,7 @@ export default function CaptureLabCvLive() {
       if (track) {
         track.onended = () => {
           if (!mountedRef.current) return
+          abortMatrix('camera ended')
           cancelSweep('camera ended')
           setCameraStatus('error')
           setCameraError('The camera stream ended.')
@@ -578,6 +764,10 @@ export default function CaptureLabCvLive() {
 
       inFlightRef.current = true
       setInFlight(true)
+      // The token of the run that owns this frame. A response whose request
+      // began before the current combination started is discarded, so a frame
+      // encoded with the previous upload edge cannot land in the new window.
+      const requestToken = sweepRef.current.token
       let controller = null
       try {
         const scale = Math.min(1, cvUploadEdgeRef.current / Math.max(video.videoWidth, video.videoHeight))
@@ -613,7 +803,7 @@ export default function CaptureLabCvLive() {
           downscaled: result.downscaled,
         })
         const sweepRun = sweepRef.current
-        if (sweepRun.active) {
+        if (sweepRun.active && sweepRun.token === requestToken) {
           sweepRun.cv.push({
             roundTripMs,
             detectMs: result.detectMs,
@@ -744,6 +934,7 @@ export default function CaptureLabCvLive() {
           ourInFlightRef.current = false
           return
         }
+        ourSampleTokenRef.current = sweepRef.current.token
         worker.postMessage({ type: 'detect', bitmap, seq }, [bitmap])
         bitmap = null
       } catch {
@@ -778,7 +969,7 @@ export default function CaptureLabCvLive() {
             .slice(-OURS_MEDIAN_WINDOW)
         }
         const sweepRun = sweepRef.current
-        if (sweepRun.active) {
+        if (sweepRun.active && sweepRun.token === ourSampleTokenRef.current) {
           if (inferenceMs != null) sweepRun.oursMs.push(inferenceMs)
           sweepRun.oursStamps.push(performance.now())
         }
@@ -927,8 +1118,8 @@ export default function CaptureLabCvLive() {
           <button
             type="button"
             className="btn-ghost-sm"
-            disabled={cameraStatus !== 'live' || sweepActive}
-            onClick={startSweep}
+            disabled={cameraStatus !== 'live' || sweepActive || matrixActive}
+            onClick={() => void startSweep()}
           >
             {sweepActive ? 'Sampling…' : 'Run 10 s sweep'}
           </button>
@@ -1016,13 +1207,58 @@ export default function CaptureLabCvLive() {
       </section>
 
       <section className="rounded-lg border border-border bg-bg-card p-4">
+        <h2 className="text-sm font-semibold text-text-primary">Run all &amp; send</h2>
+        <p className="mt-1 text-xs text-text-secondary">
+          Runs every combination once — detector input 320 / 480 / 640 × CV upload
+          960 / 1280 at the current camera size, 8 s each (6 runs, about 48 s) — then
+          posts the whole set once with mode matrix. Stop keeps the runs collected so
+          far, and Send results still posts them. A sample whose CV request began before
+          the current combination is discarded rather than credited to it.
+        </p>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            className="btn-primary-sm"
+            disabled={cameraStatus !== 'live' || sweepActive || matrixActive || matrixSending}
+            onClick={() => void startMatrix()}
+          >
+            {matrixActive ? 'Running matrix…' : 'Run all & send'}
+          </button>
+          {matrixActive ? (
+            <button type="button" className="btn-ghost-sm" onClick={() => abortMatrix('stopped')}>
+              Stop
+            </button>
+          ) : null}
+          {matrixStatus ? <p className="text-xs text-text-secondary">{matrixStatus}</p> : null}
+        </div>
+        {matrixSendState ? (
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <p className={`text-xs ${matrixSendState.tone === 'error' ? 'text-brand-red' : 'text-text-secondary'}`}>
+              {matrixSendState.text}
+            </p>
+            {matrixSendState.tone === 'error' ? (
+              <button
+                type="button"
+                className="btn-ghost-sm"
+                disabled={matrixSending}
+                onClick={() => void postMatrixPayload()}
+              >
+                {matrixSending ? 'Sending…' : 'Retry send'}
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+      </section>
+
+      <section className="rounded-lg border border-border bg-bg-card p-4">
         <h2 className="text-sm font-semibold text-text-primary">Sweep results</h2>
         <p className="mt-1 text-xs text-text-secondary">
           A 10 s sweep records our median inference and detections/s from the green pass,
           and the CV half&apos;s median round trip and server detect time, with the last
           detection path, sharpness, found and resized of the window. Lines are keyed by
           cam · in · cv, so rerunning a combination replaces it. Results survive Stop/Start,
-          and nothing is uploaded until you press Send results.
+          and nothing is uploaded until you press Send results (matrix runs are 8 s and
+          appear in this list too).
         </p>
         {sweepStatus ? <p className="mt-2 text-xs text-text-secondary">{sweepStatus}</p> : null}
         {results.length ? (

@@ -26,6 +26,12 @@ const RUNTIME = 'wasm'
 const THREAD_CAPS = [1, 2, 4, 8]
 const DEFAULT_THREAD_CAP = 4
 const AB_DURATION_MS = 10000
+// "Run all & send": every cap × input combination at the current camera size.
+// 8 s each keeps the whole matrix under a minute and a half; the runs are stored
+// keyed like the single sweeps, so a rerun replaces its line.
+const MATRIX_CAPS = [1, 2, 4]
+const MATRIX_EDGES = [320, 480, 640]
+const MATRIX_DURATION_MS = 8000
 
 // Camera presets. 'max' re-applies the track's capability maximum (the start
 // default); the rest are explicit ideal sizes. A rejected change keeps the
@@ -94,6 +100,11 @@ const els = {
   abLabel: document.getElementById('ab-label'),
   abSend: document.getElementById('ab-send'),
   abSendStatus: document.getElementById('ab-send-status'),
+  matrixRun: document.getElementById('matrix-run'),
+  matrixStop: document.getElementById('matrix-stop'),
+  matrixStatus: document.getElementById('matrix-status'),
+  matrixRetry: document.getElementById('matrix-retry'),
+  matrixSendStatus: document.getElementById('matrix-send-status'),
 }
 
 const HARDWARE = navigator.hardwareConcurrency || 1
@@ -162,6 +173,28 @@ const AB = {
   stamps: [],
   endTimer: null,
   countdownTimer: null,
+  // The matrix uses the same window machinery with a shorter duration.
+  duration: AB_DURATION_MS,
+  resolveFinish: null,
+}
+
+// Orchestration for "Run all & send". It drives the single-run machinery above
+// rather than sampling anything itself: each combination is one normal run whose
+// finish resolves the promise the loop awaits.
+const MATRIX = {
+  active: false,
+  cancelled: false,
+  // Set while the matrix applies its own settings, so those setters do not
+  // mistake the matrix for a user change and abort it.
+  internal: false,
+  queue: [],
+  index: 0,
+  total: 0,
+  collected: [],
+  note: '',
+  sending: false,
+  lastPayload: null,
+  sendError: '',
 }
 
 // ------------------------------------------------------------------ reporting
@@ -747,6 +780,7 @@ async function performRestart() {
 }
 
 async function changeCap(cap) {
+  if (MATRIX.active && !MATRIX.internal) abortMatrix('thread cap changed')
   state.threads.cap = cap
   els.cap.value = String(cap)
   updateAbRunButton()
@@ -765,29 +799,71 @@ function rateFromStamps(stamps) {
 function updateAbRunButton() {
   els.abRunCap.textContent = String(state.threads.cap)
   els.abRunInput.textContent = String(state.detectorEdge)
-  els.abRun.disabled = !state.running || AB.active || state.restarting
+  els.abRun.disabled = !state.running || AB.active || state.restarting || MATRIX.active
+  updateMatrixButton()
+}
+
+function matrixCombinations() {
+  // A pool only exists when the document is isolated and SharedArrayBuffer is
+  // exposed; without both the worker clamps to one thread, so cap 1 is the only
+  // combination the device can honour.
+  const caps = state.threads.isolated && state.threads.hasSAB ? MATRIX_CAPS : [1]
+  const combos = []
+  for (const cap of caps) {
+    for (const edge of MATRIX_EDGES) combos.push({ cap, edge })
+  }
+  return combos
+}
+
+function matrixNote() {
+  if (state.threads.isolated && state.threads.hasSAB) return ''
+  return state.threads.isolated
+    ? 'cap 1 only — SharedArrayBuffer unavailable'
+    : 'cap 1 only — not cross-origin isolated'
+}
+
+function matrixProgressText(leftMs, cap, edge) {
+  const prefix = MATRIX.note ? `${MATRIX.note} · ` : ''
+  return `${prefix}run ${MATRIX.index + 1}/${MATRIX.total} · cap ${cap} · in ${edge} · `
+    + `${(Math.max(0, leftMs) / 1000).toFixed(1)} s left`
+}
+
+function updateMatrixButton() {
+  els.matrixRun.disabled = !state.running || AB.active || MATRIX.active
+    || state.restarting || MATRIX.sending
+  els.matrixRun.textContent = MATRIX.active ? 'Running matrix…' : 'Run all & send'
+  els.matrixStop.hidden = !MATRIX.active
+  els.matrixStop.disabled = !MATRIX.active
 }
 
 function updateAbStatus() {
   if (!AB.active) return
-  const left = Math.max(0, AB_DURATION_MS - (performance.now() - AB.startedAt))
+  const left = Math.max(0, AB.duration - (performance.now() - AB.startedAt))
+  if (MATRIX.active) {
+    els.matrixStatus.textContent = matrixProgressText(left, AB.cap, AB.edge)
+    return
+  }
   els.abStatus.textContent = `hold still — ${(left / 1000).toFixed(1)} s left at cap ${AB.cap} · in ${AB.edge}`
 }
 
-function startAbRun() {
-  if (!state.running || AB.active || state.restarting) return
+function startAbRun(durationMs = AB_DURATION_MS) {
+  if (!state.running || AB.active || state.restarting) return Promise.resolve(null)
   AB.active = true
   AB.cap = state.threads.cap
   AB.cam = resolvedCameraLabel()
   AB.edge = state.detectorEdge
+  AB.duration = durationMs
   AB.startedAt = performance.now()
   AB.samples = []
   AB.stamps = []
   els.abRepeat.replaceChildren()
+  if (!MATRIX.active) els.abStatus.textContent = ''
+  const done = new Promise(resolve => { AB.resolveFinish = resolve })
   updateAbRunButton()
   updateAbStatus()
   AB.countdownTimer = window.setInterval(updateAbStatus, 200)
-  AB.endTimer = window.setTimeout(finishAbRun, AB_DURATION_MS)
+  AB.endTimer = window.setTimeout(finishAbRun, durationMs)
+  return done
 }
 
 function cancelAbRun(reason = '') {
@@ -799,7 +875,15 @@ function cancelAbRun(reason = '') {
   AB.countdownTimer = null
   AB.samples = []
   AB.stamps = []
-  els.abStatus.textContent = reason ? `run cancelled (${reason}).` : 'run cancelled.'
+  if (MATRIX.active) {
+    els.matrixStatus.textContent =
+      `matrix cancelled (${reason}) — ${MATRIX.collected.length} run(s) kept.`
+  } else {
+    els.abStatus.textContent = reason ? `run cancelled (${reason}).` : 'run cancelled.'
+  }
+  const resolve = AB.resolveFinish
+  AB.resolveFinish = null
+  resolve?.(null)
   updateAbRunButton()
 }
 
@@ -833,11 +917,16 @@ function finishAbRun() {
 
   renderAbResults()
   renderAbRepeat()
-  const key = `cap ${result.cap} · in ${result.edge}`
-  els.abStatus.textContent = result.ms === null
-    ? `${key}: no inference samples — keep the card in view and try again.`
-    : `${key} recorded. Run another cap or input to compare.`
+  if (!MATRIX.active) {
+    const key = `cap ${result.cap} · in ${result.edge}`
+    els.abStatus.textContent = result.ms === null
+      ? `${key}: no inference samples — keep the card in view and try again.`
+      : `${key} recorded. Run another cap or input to compare.`
+  }
   updateAbRunButton()
+  const resolve = AB.resolveFinish
+  AB.resolveFinish = null
+  resolve?.(result)
 }
 
 function formatAbLine(result) {
@@ -877,13 +966,14 @@ function round1(value) {
   return value == null ? null : Math.round(value * 10) / 10
 }
 
-function experimentPayload() {
+function experimentPayload(results = state.abResults, mode = '') {
   const label = (els.abLabel.value || '').trim()
   return {
     page: 'capture-lab-live',
+    ...(mode ? { mode } : {}),
     ...(label ? { label } : {}),
     device: deviceInfo(),
-    runs: state.abResults.map(result => ({
+    runs: results.map(result => ({
       settings: { cap: result.cap, cam: result.cam, input: result.edge },
       ours: {
         msMedian: round1(result.ms),
@@ -903,33 +993,36 @@ function updateAbSendButton() {
     : state.abSendError ? 'Retry send' : 'Send results'
 }
 
+async function postExperiment(payload) {
+  const token = localStorage.getItem('token')
+  const response = await fetch(EXPERIMENTS_PATH, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(payload),
+  })
+  let body = null
+  try { body = await response.json() } catch { body = null }
+  if (!response.ok) {
+    const detail = body?.detail ?? body?.message
+    const reason = response.status === 401
+      ? 'not signed in — sign in to the app in this browser first'
+      : typeof detail === 'string' ? detail : `HTTP ${response.status}`
+    throw new Error(reason)
+  }
+  return body?.id ?? null
+}
+
 async function sendAbResults() {
   if (state.abSending || !state.abResults.length) return
   state.abSending = true
   state.abSendError = ''
   updateAbSendButton()
   els.abSendStatus.textContent = 'sending…'
-
-  const token = localStorage.getItem('token')
   try {
-    const response = await fetch(EXPERIMENTS_PATH, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
-      body: JSON.stringify(experimentPayload()),
-    })
-    let body = null
-    try { body = await response.json() } catch { body = null }
-    if (!response.ok) {
-      const detail = body?.detail ?? body?.message
-      const reason = response.status === 401
-        ? 'not signed in — sign in to the app in this browser first'
-        : typeof detail === 'string' ? detail : `HTTP ${response.status}`
-      throw new Error(reason)
-    }
-    const id = body?.id
+    const id = await postExperiment(experimentPayload())
     els.abSendStatus.textContent = id == null ? 'sent' : `sent · id ${id}`
   } catch (error) {
     // Keep the list: the button stays enabled as Retry send.
@@ -938,6 +1031,116 @@ async function sendAbResults() {
   } finally {
     state.abSending = false
     updateAbSendButton()
+  }
+}
+
+// "Run all & send": the matrix posts once on completion, and only then. A failed
+// post keeps the payload so the retry button repeats that same request; the
+// manual Send results button above remains a separate path.
+async function postMatrixPayload() {
+  if (MATRIX.sending || !MATRIX.lastPayload) return
+  MATRIX.sending = true
+  MATRIX.sendError = ''
+  updateMatrixButton()
+  els.matrixRetry.hidden = true
+  els.matrixSendStatus.textContent = 'sending…'
+  try {
+    const id = await postExperiment(MATRIX.lastPayload)
+    els.matrixSendStatus.textContent = id == null ? 'sent' : `sent · id ${id}`
+  } catch (error) {
+    MATRIX.sendError = error?.message || String(error)
+    els.matrixSendStatus.textContent = `send failed: ${MATRIX.sendError}`
+    els.matrixRetry.hidden = false
+  } finally {
+    MATRIX.sending = false
+    updateMatrixButton()
+  }
+}
+
+async function autoSendMatrix() {
+  if (!MATRIX.collected.length) return
+  MATRIX.lastPayload = experimentPayload(MATRIX.collected, 'matrix')
+  await postMatrixPayload()
+}
+
+function abortMatrix(reason) {
+  if (!MATRIX.active) return
+  MATRIX.cancelled = true
+  if (AB.active) {
+    cancelAbRun(reason)
+  } else {
+    els.matrixStatus.textContent =
+      `matrix cancelled (${reason}) — ${MATRIX.collected.length} run(s) kept.`
+    updateMatrixButton()
+  }
+}
+
+async function startMatrix() {
+  if (!state.running || AB.active || MATRIX.active || state.restarting) return
+  const combos = matrixCombinations()
+  MATRIX.active = true
+  MATRIX.cancelled = false
+  MATRIX.internal = false
+  MATRIX.queue = combos
+  MATRIX.index = 0
+  MATRIX.total = combos.length
+  MATRIX.collected = []
+  MATRIX.note = matrixNote()
+  MATRIX.sendError = ''
+  MATRIX.lastPayload = null
+  els.matrixRetry.hidden = true
+  els.matrixSendStatus.textContent = ''
+  els.abStatus.textContent = ''
+  els.matrixStatus.textContent = MATRIX.note
+    ? `${MATRIX.note} · starting ${combos.length} runs…`
+    : `starting ${combos.length} runs…`
+  updateAbRunButton()
+
+  try {
+    for (let i = 0; i < combos.length; i += 1) {
+      if (!MATRIX.active || MATRIX.cancelled || !state.running) break
+      MATRIX.index = i
+      const combo = combos[i]
+      // Applying the settings is the matrix's own doing, so suppress the
+      // user-change abort inside the setters. The flag covers only the
+      // synchronous call: a restart is awaited with it cleared, so a user
+      // change during that restart still aborts the matrix.
+      MATRIX.internal = true
+      try {
+        changeDetectorEdge(combo.edge)
+      } finally {
+        MATRIX.internal = false
+      }
+      if (state.threads.cap !== combo.cap) {
+        els.matrixStatus.textContent = `loading cap ${combo.cap} worker…`
+        MATRIX.internal = true
+        let restart
+        try {
+          restart = changeCap(combo.cap)
+        } finally {
+          MATRIX.internal = false
+        }
+        await restart
+      }
+      if (!MATRIX.active || MATRIX.cancelled || !state.running) break
+      els.matrixStatus.textContent = matrixProgressText(MATRIX_DURATION_MS, combo.cap, combo.edge)
+      const result = await startAbRun(MATRIX_DURATION_MS)
+      if (result) MATRIX.collected.push(result)
+      if (!MATRIX.active || MATRIX.cancelled) break
+    }
+  } finally {
+    const completed = MATRIX.active && !MATRIX.cancelled
+    MATRIX.active = false
+    MATRIX.internal = false
+    updateAbRunButton()
+    if (completed) {
+      if (MATRIX.collected.length) {
+        els.matrixStatus.textContent = `matrix complete — ${MATRIX.collected.length} run(s).`
+        await autoSendMatrix()
+      } else {
+        els.matrixStatus.textContent = 'matrix finished with no samples — nothing to send.'
+      }
+    }
   }
 }
 
@@ -968,7 +1171,7 @@ async function runAtSettings(cap, edge) {
     els.abStatus.textContent = 'start the camera first.'
     return
   }
-  if (AB.active || state.restarting) return
+  if (AB.active || state.restarting || MATRIX.active) return
   // Input first: it needs no restart, then the cap restart clears the samples.
   changeDetectorEdge(edge)
   await changeCap(cap)
@@ -1069,6 +1272,7 @@ async function applyCameraSize(key) {
     renderTelemetry()
     return
   }
+  if (MATRIX.active) abortMatrix('camera changed')
   if (AB.active) cancelAbRun('camera changed')
   const track = state.stream.getVideoTracks()[0]
   const target = cameraTarget(key)
@@ -1099,6 +1303,7 @@ async function applyCameraSize(key) {
 
 // Detection input is a local frame-canvas decision: no worker restart, no lost ring.
 function changeDetectorEdge(edge) {
+  if (MATRIX.active && !MATRIX.internal) abortMatrix('detector input changed')
   state.detectorEdge = edge
   els.detectorSize.value = String(edge)
   updateAbRunButton()
@@ -1205,6 +1410,7 @@ async function startCamera() {
 }
 
 function stopCamera() {
+  abortMatrix('camera stopped')
   state.running = false
   cancelAbRun('camera stopped')
   window.clearTimeout(state.timer)
@@ -1280,8 +1486,11 @@ els.cameraSize.addEventListener('change', () => {
 els.detectorSize.addEventListener('change', () => {
   changeDetectorEdge(Number(els.detectorSize.value) || DEFAULT_DETECTOR_EDGE)
 })
-els.abRun.addEventListener('click', startAbRun)
+els.abRun.addEventListener('click', () => { void startAbRun() })
 els.abSend.addEventListener('click', () => { void sendAbResults() })
+els.matrixRun.addEventListener('click', () => { void startMatrix() })
+els.matrixStop.addEventListener('click', () => abortMatrix('stopped'))
+els.matrixRetry.addEventListener('click', () => { void postMatrixPayload() })
 
 els.video.addEventListener('resize', () => {
   updateStageAspect()
