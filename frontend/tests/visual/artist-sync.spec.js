@@ -43,6 +43,11 @@ test('artist directory and checklist render artwork and manual-valued cards', as
     const { pathname } = url
     const json = body => route.fulfill({ status: 200, json: body })
 
+    // The Vite dev server serves source modules from /src (including
+    // /src/api/client.js), which this broad glob also matches. Only mock real
+    // backend requests; fulfilling a module with JSON breaks the app.
+    if (!pathname.startsWith('/api/')) return route.continue()
+
     if (pathname.startsWith('/api/images/')) {
       return route.fulfill({ contentType: 'image/svg+xml', body: artwork })
     }
