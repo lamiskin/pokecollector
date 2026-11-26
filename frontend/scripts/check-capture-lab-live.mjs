@@ -98,6 +98,38 @@ expect(script.includes('runAtSettings'), 'live.js must offer repeats at another 
 expect(/numThreads = threads/.test(worker), 'the worker must accept the requested thread count')
 expect(worker.includes('isolated && hasSAB ? requested : 1'), 'the worker must clamp threads without isolation')
 
+// Server assist: CollectorVision is polled beside the local detector, and the
+// auto rule may prefer the server shape only while it is clearly cheaper.
+expect(html.includes('id="assist-mode"'), 'index.html must contain the server assist control')
+for (const mode of ['auto', 'off', 'on']) {
+  expect(
+    new RegExp(`<option value="${mode}"`).test(html),
+    `index.html must offer server assist mode ${mode}`,
+  )
+}
+expect(/<option value="auto"[^>]*selected/.test(html), 'server assist must default to auto')
+expect(html.includes('id="s-assist"'), 'index.html must show the server assist state')
+expect(html.includes('id="assist-frame"'), 'index.html must contain the assist upload canvas')
+expect(script.includes("'/api/capture-lab/cv-detect'"), 'live.js must poll the capture-lab cv-detect endpoint')
+expect(script.includes('ASSIST_POLL_MS = 1100'), 'live.js must poll the server every 1100 ms')
+expect(script.includes('ASSIST_TIMEOUT_MS = 15000'), 'live.js must time the server request out at 15 s')
+expect(script.includes('ASSIST_UPLOAD_EDGE = 1280'), 'live.js must upload a 1280 px long edge')
+expect(script.includes('ASSIST_JPEG_QUALITY = 0.8'), 'live.js must encode the upload at JPEG q0.8')
+expect(script.includes('ASSIST_COST_RATIO = 0.8'), 'live.js must require the server below 0.8x local cost')
+expect(script.includes('ASSIST_MIN_SAMPLES = 3'), 'live.js must require three samples from each side')
+expect(script.includes('ASSIST_BACKOFF_MS = 30000'), 'live.js must back off for 30 s when the server is slower')
+expect(script.includes('ASSIST_BLEND_MS = 250'), 'live.js must blend the ring to the server quad over 250 ms')
+expect(script.includes('ASSIST_DISAGREE = 0.12'), 'live.js must flag disagreement above 12% mean corner distance')
+expect(script.includes('ASSIST_MAX_PAIRS = 600'), 'live.js must cap the paired sample log at 600')
+expect(script.includes('function quadIou'), 'live.js must compute polygon IoU for paired samples')
+expect(script.includes('agreed:'), 'live.js must record whether a pair agreed')
+expect(script.includes("localStorage.getItem('token')"), 'live.js must send the app bearer token')
+expect(script.includes('assist: assistSummary(pairs)'), 'the experiment payload must carry an assist summary')
+expect(
+  script.includes('pairs: pairsForPayload(result.pairs)'),
+  'each experiment run must carry its paired samples',
+)
+
 // Serving rules.
 expect(nginx.includes('location ^~ /capture-lab-live/'), 'nginx.conf must scope the page location')
 expect(/Cross-Origin-Opener-Policy "same-origin"/.test(nginx), 'nginx.conf must send COOP for the page')

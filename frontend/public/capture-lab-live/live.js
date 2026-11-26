@@ -33,6 +33,26 @@ const MATRIX_CAPS = [1, 2, 4]
 const MATRIX_EDGES = [320, 480, 640]
 const MATRIX_DURATION_MS = 8000
 
+// Server assist: CollectorVision's card boundary from the capture-lab endpoint,
+// polled beside the local detector. On WiFi a server round trip can be cheaper
+// than local inference; on mobile data it usually is not, so `auto` only adopts
+// the server shape while it is clearly the faster source.
+const ASSIST_PATH = '/api/capture-lab/cv-detect'
+const ASSIST_POLL_MS = 1100
+const ASSIST_TIMEOUT_MS = 15000
+const ASSIST_UPLOAD_EDGE = 1280
+const ASSIST_JPEG_QUALITY = 0.8
+const ASSIST_WINDOW = 5
+const ASSIST_MIN_SAMPLES = 3
+const ASSIST_COST_RATIO = 0.8
+const ASSIST_BACKOFF_MS = 30000
+const ASSIST_BLEND_MS = 250
+const ASSIST_DISAGREE = 0.12
+const ASSIST_MAX_PAIRS = 600
+const ASSIST_SEND_PAIRS = 120
+const ASSIST_STALE_MS = 3500
+const ASSIST_SERVER_STROKE = 'rgba(125, 211, 252, 0.55)'
+
 // Camera presets. 'max' re-applies the track's capability maximum (the start
 // default); the rest are explicit ideal sizes. A rejected change keeps the
 // stream that already works and says so in the camera stat.
@@ -80,6 +100,8 @@ const els = {
   cap: document.getElementById('thread-cap'),
   cameraSize: document.getElementById('camera-size'),
   detectorSize: document.getElementById('detector-size'),
+  assistMode: document.getElementById('assist-mode'),
+  assistFrame: document.getElementById('assist-frame'),
   isolated: document.getElementById('s-isolated'),
   threads: document.getElementById('s-threads'),
   capStat: document.getElementById('s-cap'),
@@ -89,6 +111,7 @@ const els = {
   frame: document.getElementById('s-frame'),
   count: document.getElementById('s-count'),
   sharp: document.getElementById('s-sharp'),
+  assist: document.getElementById('s-assist'),
   blurState: document.getElementById('blur-state'),
   workerSrc: document.getElementById('worker-src'),
   abRun: document.getElementById('ab-run'),
@@ -160,6 +183,29 @@ const state = {
   blurKey: null,
   blurSize: null,
   blurShown: false,
+  // The ring is the local quad unless server assist owns the shape; `blend`
+  // eases it to each server quad over ASSIST_BLEND_MS.
+  ring: { quad: null, blend: null },
+  assist: {
+    mode: 'auto',
+    active: false,
+    inFlight: false,
+    timer: null,
+    controller: null,
+    // The last ASSIST_WINDOW values each; the auto rule compares their EWMAs.
+    rtts: [],
+    locals: [],
+    lastRttEwma: null,
+    lastLocalEwma: null,
+    lastLocalMs: null,
+    serverQuad: null,
+    serverAt: 0,
+    backoff: false,
+    backoffUntil: 0,
+    unavailable: false,
+    error: '',
+    pairs: [],
+  },
   // A/B runs survive Start/Stop for the session; only a reload clears them.
   abResults: [],
   // Nothing is uploaded automatically: only Send results posts the list.
@@ -177,6 +223,9 @@ const AB = {
   startedAt: 0,
   samples: [],
   stamps: [],
+  // Server-assist pairs recorded inside this window, sent with its run.
+  pairs: [],
+  token: 0,
   endTimer: null,
   countdownTimer: null,
   // The matrix uses the same window machinery with a shorter duration.
@@ -293,6 +342,11 @@ function renderTelemetry() {
 
   const inference = median(state.runSamples)
   setStat(els.ms, inference === null ? '…' : inference.toFixed(1))
+
+  const assistTone = state.assist.unavailable
+    ? 'bad'
+    : state.assist.active ? 'ok' : state.assist.backoff ? 'warn' : ''
+  setStat(els.assist, assistStatusText(), assistTone)
 
   const video = els.video
   const width = video.videoWidth
@@ -506,13 +560,17 @@ function drawFrame() {
 
   updatePhase()
 
-  const fresh = state.quad && now - state.lastQuadAt < QUAD_STALE_MS
-  if (!fresh) {
+  const localFresh = state.quad && now - state.lastQuadAt < QUAD_STALE_MS
+  const serverFresh = assistShapeInUse(now)
+  if (!localFresh && !serverFresh) {
     hideBlur()
     return
   }
 
-  const points = mapToStage(state.quad, rect)
+  // The ring is the local quad unless server assist owns the shape, in which
+  // case it eases to each server quad over ASSIST_BLEND_MS.
+  const shape = ringQuadAt(now, serverFresh)
+  const points = shape ? mapToStage(shape, rect) : null
   if (!points) {
     hideBlur()
     return
@@ -540,6 +598,22 @@ function drawFrame() {
   ctx.shadowBlur = detected ? 14 : 8
   ctx.stroke(new Path2D(path))
   ctx.restore()
+
+  // A server quad that disagrees with the ring is drawn faintly, so the
+  // disagreement is visible on the phone and not only in the logged numbers.
+  if (serverFresh && state.assist.serverQuad
+    && meanQuadDistance(state.assist.serverQuad, shape) > 0.02) {
+    const serverPoints = mapToStage(state.assist.serverQuad, rect)
+    if (serverPoints) {
+      ctx.save()
+      ctx.beginPath()
+      ctx.setLineDash([4, 4])
+      ctx.strokeStyle = ASSIST_SERVER_STROKE
+      ctx.lineWidth = 1.2
+      ctx.stroke(new Path2D(toPath(serverPoints)))
+      ctx.restore()
+    }
+  }
 
   updateBlur(points, rect.width, rect.height)
 }
@@ -610,6 +684,10 @@ function onWorkerMessage(event) {
       : message.ms
     if (Number.isFinite(inferenceMs)) {
       pushSample(state.runSamples, inferenceMs)
+      // The server-assist auto rule compares its round trips against these.
+      state.assist.lastLocalMs = inferenceMs
+      pushWindow(state.assist.locals, inferenceMs, ASSIST_WINDOW)
+      state.assist.lastLocalEwma = ewmaOf(state.assist.locals)
       if (AB.active) AB.samples.push(inferenceMs)
     }
 
@@ -640,6 +718,7 @@ function onWorkerMessage(event) {
 function smoothQuad(corners) {
   if (!state.quad) {
     state.quad = corners.map(([x, y]) => [x, y])
+    followLocalRing()
     return
   }
   let jump = 0
@@ -649,12 +728,20 @@ function smoothQuad(corners) {
   // A re-found card elsewhere is a cut, not a swoop across the frame.
   if (jump > SNAP_DISTANCE) {
     state.quad = corners.map(([x, y]) => [x, y])
+    followLocalRing()
     return
   }
   state.quad = corners.map(([x, y], i) => [
     state.quad[i][0] + (x - state.quad[i][0]) * SMOOTHING,
     state.quad[i][1] + (y - state.quad[i][1]) * SMOOTHING,
   ])
+  followLocalRing()
+}
+
+// While the server owns the ring shape the local quad keeps updating for the
+// phase pill and counts but must not pull the drawn ring back.
+function followLocalRing() {
+  if (!assistShapeInUse() && !state.ring.blend) state.ring.quad = state.quad
 }
 
 async function startWorker() {
@@ -835,6 +922,10 @@ async function performRestart() {
   // Fresh samples so the median reflects the new pool, not a blend of both.
   state.runSamples = []
   state.stamps = []
+  // The local cost changed with the pool, so the auto comparison restarts.
+  state.assist.locals = []
+  state.assist.lastLocalEwma = null
+  state.assist.lastLocalMs = null
 
   try {
     await startWorker()
@@ -927,6 +1018,8 @@ function startAbRun(durationMs = AB_DURATION_MS) {
   AB.startedAt = performance.now()
   AB.samples = []
   AB.stamps = []
+  AB.pairs = []
+  AB.token += 1
   els.abRepeat.replaceChildren()
   if (!MATRIX.active) els.abStatus.textContent = ''
   const done = new Promise(resolve => { AB.resolveFinish = resolve })
@@ -946,6 +1039,8 @@ function cancelAbRun(reason = '') {
   AB.countdownTimer = null
   AB.samples = []
   AB.stamps = []
+  AB.pairs = []
+  AB.token += 1
   if (MATRIX.active) {
     els.matrixStatus.textContent =
       `matrix cancelled (${reason}) — ${MATRIX.collected.length} run(s) kept.`
@@ -973,6 +1068,7 @@ function finishAbRun() {
     ms: median(AB.samples),
     rate: rateFromStamps(AB.stamps),
     detections: AB.stamps.length,
+    pairs: AB.pairs.slice(),
     at: new Date().toISOString(),
   }
   // One line per cap · camera · input: rerunning the same combination replaces it.
@@ -1039,11 +1135,14 @@ function round1(value) {
 
 function experimentPayload(results = state.abResults, mode = '') {
   const label = (els.abLabel.value || '').trim()
+  // The summary describes the runs in this payload, not every pair ever seen.
+  const pairs = results.flatMap(result => result.pairs || [])
   return {
     page: 'capture-lab-live',
     ...(mode ? { mode } : {}),
     ...(label ? { label } : {}),
     device: deviceInfo(),
+    assist: assistSummary(pairs),
     runs: results.map(result => ({
       settings: { cap: result.cap, cam: result.cam, input: result.edge },
       ours: {
@@ -1052,6 +1151,7 @@ function experimentPayload(results = state.abResults, mode = '') {
         detections: result.detections,
       },
       cv: null,
+      pairs: pairsForPayload(result.pairs),
       at: result.at,
     })),
   }
@@ -1249,6 +1349,574 @@ async function runAtSettings(cap, edge) {
   if (state.running && !state.restarting) startAbRun()
 }
 
+// ---------------------------------------------------------------- server assist
+
+function pushWindow(list, value, cap) {
+  list.push(value)
+  if (list.length > cap) list.splice(0, list.length - cap)
+}
+
+// EWMA over the retained window (span = ASSIST_WINDOW): alpha = 2 / (span + 1).
+function ewmaOf(values) {
+  if (!values.length) return null
+  const alpha = 2 / (ASSIST_WINDOW + 1)
+  let value = values[0]
+  for (let i = 1; i < values.length; i += 1) value += alpha * (values[i] - value)
+  return value
+}
+
+function cloneQuad(quad) {
+  return quad ? quad.map(([x, y]) => [x, y]) : null
+}
+
+function roundTo(value, digits) {
+  if (value == null || !Number.isFinite(value)) return null
+  const factor = 10 ** digits
+  return Math.round(value * factor) / factor
+}
+
+// --- quad geometry (normalised coordinates) ---------------------------------
+
+function signedArea(points) {
+  let sum = 0
+  for (let i = 0; i < points.length; i += 1) {
+    const [x1, y1] = points[i]
+    const [x2, y2] = points[(i + 1) % points.length]
+    sum += x1 * y2 - x2 * y1
+  }
+  return sum / 2
+}
+
+// Order corners counter-clockwise around their centroid. The detector and the
+// server need not start at the same corner, and clipping needs one winding.
+function orderQuad(quad) {
+  const cx = quad.reduce((sum, [x]) => sum + x, 0) / quad.length
+  const cy = quad.reduce((sum, [, y]) => sum + y, 0) / quad.length
+  const ordered = [...quad].sort(
+    (a, b) => Math.atan2(a[1] - cy, a[0] - cx) - Math.atan2(b[1] - cy, b[0] - cx),
+  )
+  return signedArea(ordered) < 0 ? ordered.reverse() : ordered
+}
+
+function polygonArea(points) {
+  return Math.abs(signedArea(points))
+}
+
+function lineIntersection(p1, p2, q1, q2) {
+  const r = [p2[0] - p1[0], p2[1] - p1[1]]
+  const s = [q2[0] - q1[0], q2[1] - q1[1]]
+  const denom = r[0] * s[1] - r[1] * s[0]
+  if (Math.abs(denom) < 1e-12) return null
+  const t = ((q1[0] - p1[0]) * s[1] - (q1[1] - p1[1]) * s[0]) / denom
+  return [p1[0] + t * r[0], p1[1] + t * r[1]]
+}
+
+// Sutherland–Hodgman: clip `subject` by the convex `clip` polygon.
+function clipPolygon(subject, clip) {
+  let output = subject
+  for (let i = 0; i < clip.length; i += 1) {
+    const a = clip[i]
+    const b = clip[(i + 1) % clip.length]
+    const input = output
+    output = []
+    if (!input.length) break
+    let previous = input[input.length - 1]
+    let previousInside = (b[0] - a[0]) * (previous[1] - a[1])
+      - (b[1] - a[1]) * (previous[0] - a[0]) >= 0
+    for (const point of input) {
+      const inside = (b[0] - a[0]) * (point[1] - a[1])
+        - (b[1] - a[1]) * (point[0] - a[0]) >= 0
+      if (inside) {
+        if (!previousInside) {
+          const hit = lineIntersection(previous, point, a, b)
+          if (hit) output.push(hit)
+        }
+        output.push(point)
+      } else if (previousInside) {
+        const hit = lineIntersection(previous, point, a, b)
+        if (hit) output.push(hit)
+      }
+      previous = point
+      previousInside = inside
+    }
+  }
+  return output
+}
+
+// Polygon intersection-over-union in normalised coordinates (0..1 of the
+// frame), so two quads from different sources are directly comparable.
+function quadIou(a, b) {
+  if (!a || !b) return null
+  const first = orderQuad(a)
+  const second = orderQuad(b)
+  const intersection = clipPolygon(first, second)
+  const intersectionArea = intersection.length >= 3 ? polygonArea(intersection) : 0
+  const union = polygonArea(first) + polygonArea(second) - intersectionArea
+  return union > 0 ? intersectionArea / union : 0
+}
+
+// Mean corner distance, aligned over the four cyclic rotations and both
+// windings so a different starting corner is not mistaken for disagreement.
+function meanQuadDistance(a, b) {
+  if (!a || !b) return Infinity
+  let best = Infinity
+  for (let reversed = 0; reversed < 2; reversed += 1) {
+    for (let offset = 0; offset < 4; offset += 1) {
+      let sum = 0
+      for (let i = 0; i < 4; i += 1) {
+        const j = (i + offset) % 4
+        const point = reversed ? b[3 - j] : b[j]
+        sum += Math.hypot(a[i][0] - point[0], a[i][1] - point[1])
+      }
+      best = Math.min(best, sum / 4)
+    }
+  }
+  return best
+}
+
+// Rotate/reverse `target` to the correspondence closest to `reference`, so the
+// ring's corners move to their nearest server corner rather than crossing.
+function alignQuad(target, reference) {
+  if (!target || !reference) return cloneQuad(target)
+  let best = target
+  let bestDistance = Infinity
+  for (let reversed = 0; reversed < 2; reversed += 1) {
+    for (let offset = 0; offset < 4; offset += 1) {
+      const candidate = []
+      for (let i = 0; i < 4; i += 1) {
+        const j = (i + offset) % 4
+        candidate.push(reversed ? target[3 - j] : target[j])
+      }
+      let sum = 0
+      for (let i = 0; i < 4; i += 1) {
+        sum += Math.hypot(candidate[i][0] - reference[i][0], candidate[i][1] - reference[i][1])
+      }
+      if (sum < bestDistance) {
+        bestDistance = sum
+        best = candidate
+      }
+    }
+  }
+  return cloneQuad(best)
+}
+
+function assistShapeInUse(now = performance.now()) {
+  const assist = state.assist
+  return assist.active && assist.serverQuad != null && now - assist.serverAt < ASSIST_STALE_MS
+}
+
+function easeInOut(t) {
+  return t < 0.5 ? 2 * t * t : 1 - ((-2 * t + 2) ** 2) / 2
+}
+
+function ringQuadAt(now, serverFresh) {
+  const ring = state.ring
+  if (!serverFresh && !ring.blend && state.quad) ring.quad = state.quad
+  const blend = ring.blend
+  if (!blend) return ring.quad
+  const t = Math.min(1, (now - blend.start) / blend.duration)
+  const eased = easeInOut(t)
+  const quad = blend.from.map(([x, y], i) => [
+    x + (blend.to[i][0] - x) * eased,
+    y + (blend.to[i][1] - y) * eased,
+  ])
+  if (t >= 1) {
+    ring.quad = cloneQuad(blend.to)
+    ring.blend = null
+  }
+  return quad
+}
+
+function beginRingBlend(target) {
+  if (!target) return
+  const from = ringQuadAt(performance.now(), assistShapeInUse())
+  if (!from) {
+    state.ring.quad = cloneQuad(target)
+    state.ring.blend = null
+    return
+  }
+  state.ring.blend = {
+    from: cloneQuad(from),
+    to: cloneQuad(target),
+    start: performance.now(),
+    duration: ASSIST_BLEND_MS,
+  }
+}
+
+// Leaving server shape: ease the ring back from wherever it is (including a
+// half-finished blend) to the local quad instead of leaving it on the server.
+function releaseAssistShape() {
+  if (!state.quad) {
+    state.ring.blend = null
+    state.ring.quad = null
+    return
+  }
+  if (state.ring.blend) {
+    beginRingBlend(state.quad)
+  } else {
+    state.ring.quad = state.quad
+  }
+}
+
+function syncRingToAssist() {
+  const assist = state.assist
+  if (assist.active && assist.serverQuad) {
+    beginRingBlend(alignQuad(assist.serverQuad, ringQuadAt(performance.now(), assistShapeInUse())))
+  } else {
+    releaseAssistShape()
+  }
+}
+
+// --- polling ----------------------------------------------------------------
+
+function assistStatusText() {
+  const assist = state.assist
+  if (assist.mode === 'off') return 'off (manual)'
+  if (assist.unavailable) {
+    return assist.error ? `off — ${assist.error}` : 'off — server unavailable'
+  }
+  if (!state.running) return `idle (${assist.mode})`
+  const rtt = assist.lastRttEwma
+  const local = assist.lastLocalEwma
+  const rttText = rtt == null ? '—' : `${Math.round(rtt)} ms`
+  const localText = local == null ? '—' : `${Math.round(local)} ms`
+  if (assist.backoff) {
+    const left = Math.max(0, Math.ceil((assist.backoffUntil - performance.now()) / 1000))
+    return `off — server slower (${rttText} vs ${localText}) · retry in ${left} s`
+  }
+  if (assist.active) {
+    if (rtt == null) return 'on — waiting for samples'
+    return `on (${rttText} vs ${localText})`
+  }
+  if (assist.rtts.length < ASSIST_MIN_SAMPLES) {
+    return `waiting — ${assist.rtts.length}/${ASSIST_MIN_SAMPLES} round trips`
+  }
+  return 'waiting'
+}
+
+function scheduleAssistPoll(delay) {
+  const assist = state.assist
+  if (assist.timer != null) window.clearTimeout(assist.timer)
+  assist.timer = null
+  if (!state.running || assist.mode === 'off' || assist.unavailable || assist.backoff) return
+  assist.timer = window.setTimeout(pollAssist, Math.max(0, delay))
+}
+
+function beginAssistBackoff() {
+  const assist = state.assist
+  if (assist.backoff) return
+  assist.backoff = true
+  assist.backoffUntil = performance.now() + ASSIST_BACKOFF_MS
+  assist.active = false
+  assist.serverQuad = null
+  if (assist.timer != null) window.clearTimeout(assist.timer)
+  assist.timer = window.setTimeout(retryAssist, ASSIST_BACKOFF_MS)
+  syncRingToAssist()
+  renderTelemetry()
+}
+
+// One probe cycle after the backoff: reset only the round-trip window and ask
+// again. If the server is still slower the rule backs off for another 30 s.
+function retryAssist() {
+  const assist = state.assist
+  assist.timer = null
+  if (!state.running || assist.mode !== 'auto' || assist.unavailable) return
+  assist.backoff = false
+  assist.backoffUntil = 0
+  assist.rtts = []
+  assist.lastRttEwma = null
+  scheduleAssistPoll(0)
+  renderTelemetry()
+}
+
+function evaluateAssistAuto() {
+  const assist = state.assist
+  if (assist.rtts.length < ASSIST_MIN_SAMPLES || assist.locals.length < ASSIST_MIN_SAMPLES) {
+    assist.active = false
+    return
+  }
+  const rtt = ewmaOf(assist.rtts)
+  const local = ewmaOf(assist.locals)
+  assist.lastRttEwma = rtt
+  assist.lastLocalEwma = local
+  if (rtt < ASSIST_COST_RATIO * local) {
+    assist.active = true
+    assist.backoff = false
+    return
+  }
+  assist.active = false
+  beginAssistBackoff()
+}
+
+function normalizeServerQuad(raw) {
+  if (!Array.isArray(raw) || raw.length !== 4) return null
+  const points = []
+  for (const point of raw) {
+    const pair = Array.isArray(point) ? point : [point?.x, point?.y]
+    const x = Number(pair?.[0])
+    const y = Number(pair?.[1])
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null
+    points.push([x, y])
+  }
+  return points
+}
+
+function recordAssistPair({ roundTripMs, serverMs, serverQuad, localQuad, localMs, pairToken }) {
+  const assist = state.assist
+  const pair = {
+    at: new Date().toISOString(),
+    localQuad: cloneQuad(localQuad),
+    serverQuad: cloneQuad(serverQuad),
+    iou: localQuad && serverQuad ? roundTo(quadIou(localQuad, serverQuad), 4) : null,
+    localMs: roundTo(localMs, 1),
+    serverMs: roundTo(serverMs, 1),
+    roundTripMs: Math.round(roundTripMs),
+    agreed: Boolean(
+      localQuad && serverQuad
+      && meanQuadDistance(localQuad, serverQuad) <= ASSIST_DISAGREE,
+    ),
+  }
+  assist.pairs.push(pair)
+  if (assist.pairs.length > ASSIST_MAX_PAIRS) {
+    assist.pairs.splice(0, assist.pairs.length - ASSIST_MAX_PAIRS)
+  }
+  // A request that began before the current run must not land in its pairs.
+  if (AB.active && AB.token === pairToken) AB.pairs.push(pair)
+  return pair
+}
+
+function handleAssistResponse(data, roundTripMs, sentLocalQuad, sentLocalMs, pairToken) {
+  const assist = state.assist
+  const payload = data || {}
+  const corners = normalizeServerQuad(payload.corners)
+  const found = payload.detected !== false && corners != null
+  const detectMs = Number.isFinite(payload.ms?.detect) ? payload.ms.detect : null
+
+  pushWindow(assist.rtts, roundTripMs, ASSIST_WINDOW)
+  assist.lastRttEwma = ewmaOf(assist.rtts)
+  if (assist.locals.length) assist.lastLocalEwma = ewmaOf(assist.locals)
+
+  if (found) {
+    assist.serverQuad = corners
+    assist.serverAt = performance.now()
+  } else {
+    assist.serverQuad = null
+  }
+
+  if (assist.mode === 'auto') evaluateAssistAuto()
+  else if (assist.mode === 'on') assist.active = true
+
+  // Adopt the server shape when active; on deactivation or a no-card response
+  // this lets the ring return to the local quad.
+  syncRingToAssist()
+
+  recordAssistPair({
+    roundTripMs,
+    serverMs: detectMs,
+    serverQuad: found ? corners : null,
+    localQuad: sentLocalQuad,
+    localMs: sentLocalMs,
+    pairToken,
+  })
+  renderTelemetry()
+}
+
+async function pollAssist() {
+  const assist = state.assist
+  assist.timer = null
+  if (!state.running || assist.mode === 'off' || assist.unavailable || assist.backoff) return
+  if (document.hidden) {
+    scheduleAssistPoll(500)
+    return
+  }
+  if (assist.inFlight) return
+
+  const video = els.video
+  if (!video.videoWidth || !video.videoHeight || video.readyState < 2) {
+    scheduleAssistPoll(400)
+    return
+  }
+
+  const canvas = els.assistFrame
+  if (!canvas) {
+    scheduleAssistPoll(ASSIST_POLL_MS)
+    return
+  }
+  const scale = Math.min(1, ASSIST_UPLOAD_EDGE / Math.max(video.videoWidth, video.videoHeight))
+  const width = Math.max(1, Math.round(video.videoWidth * scale))
+  const height = Math.max(1, Math.round(video.videoHeight * scale))
+  if (canvas.width !== width) canvas.width = width
+  if (canvas.height !== height) canvas.height = height
+  canvas.getContext('2d').drawImage(video, 0, 0, width, height)
+
+  // Pair the response with the frame's local result, not with whatever the
+  // local detector has moved on to by the time the server answers.
+  const sentLocalQuad = state.quad && performance.now() - state.lastQuadAt < QUAD_STALE_MS
+    ? cloneQuad(state.quad)
+    : null
+  const sentLocalMs = assist.lastLocalMs
+
+  let blob = null
+  try {
+    blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', ASSIST_JPEG_QUALITY))
+  } catch {
+    blob = null
+  }
+  if (!state.running || assist.mode === 'off' || assist.backoff || assist.unavailable) return
+  if (!blob) {
+    scheduleAssistPoll(ASSIST_POLL_MS)
+    return
+  }
+
+  const pairToken = AB.token
+  const controller = new AbortController()
+  assist.controller = controller
+  assist.inFlight = true
+  const startedAt = performance.now()
+  const timeout = window.setTimeout(() => controller.abort(), ASSIST_TIMEOUT_MS)
+  try {
+    const form = new FormData()
+    form.append('image', blob, 'frame.jpg')
+    const token = localStorage.getItem('token')
+    const response = await fetch(ASSIST_PATH, {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: form,
+      signal: controller.signal,
+    })
+    let data = null
+    try { data = await response.json() } catch { data = null }
+    if (!response.ok) {
+      const detail = data?.detail ?? data?.message
+      if (response.status === 401) {
+        assist.unavailable = true
+        assist.error = 'sign in to use server assist'
+      } else if (response.status === 404 || response.status === 503) {
+        assist.unavailable = true
+        assist.error = 'server unavailable'
+      } else {
+        assist.error = typeof detail === 'string' ? detail : `HTTP ${response.status}`
+      }
+      throw new Error(assist.error || `HTTP ${response.status}`)
+    }
+    const roundTripMs = performance.now() - startedAt
+    handleAssistResponse(data, roundTripMs, sentLocalQuad, sentLocalMs, pairToken)
+  } catch (error) {
+    if (!assist.unavailable) {
+      assist.error = error?.name === 'AbortError'
+        ? `timed out after ${Math.round(ASSIST_TIMEOUT_MS / 1000)} s`
+        : error?.message || String(error)
+    }
+  } finally {
+    window.clearTimeout(timeout)
+    if (assist.controller === controller) assist.controller = null
+    assist.inFlight = false
+    if (state.running && assist.mode !== 'off' && !assist.unavailable && !assist.backoff) {
+      const elapsed = performance.now() - startedAt
+      scheduleAssistPoll(Math.max(0, ASSIST_POLL_MS - elapsed))
+    }
+    renderTelemetry()
+  }
+}
+
+function startAssist() {
+  const assist = state.assist
+  assist.unavailable = false
+  assist.error = ''
+  assist.backoff = false
+  assist.backoffUntil = 0
+  assist.rtts = []
+  assist.locals = []
+  assist.lastRttEwma = null
+  assist.lastLocalEwma = null
+  assist.lastLocalMs = null
+  assist.serverQuad = null
+  assist.serverAt = 0
+  assist.active = assist.mode === 'on'
+  scheduleAssistPoll(0)
+}
+
+function stopAssist() {
+  const assist = state.assist
+  if (assist.timer != null) window.clearTimeout(assist.timer)
+  assist.timer = null
+  assist.controller?.abort()
+  assist.controller = null
+  assist.inFlight = false
+  assist.active = false
+  assist.serverQuad = null
+  assist.serverAt = 0
+  assist.backoff = false
+  assist.backoffUntil = 0
+  assist.error = ''
+  assist.unavailable = false
+  state.ring.blend = null
+  state.ring.quad = null
+}
+
+function setAssistMode(mode) {
+  const assist = state.assist
+  const next = mode === 'off' || mode === 'on' ? mode : 'auto'
+  assist.mode = next
+  if (els.assistMode) els.assistMode.value = next
+  if (assist.timer != null) window.clearTimeout(assist.timer)
+  assist.timer = null
+  assist.backoff = false
+  assist.backoffUntil = 0
+  assist.unavailable = false
+  assist.error = ''
+  assist.rtts = []
+  assist.lastRttEwma = null
+  assist.active = next === 'on'
+  if (next === 'off') {
+    assist.controller?.abort()
+    assist.controller = null
+    assist.serverQuad = null
+    syncRingToAssist()
+  } else if (state.running) {
+    scheduleAssistPoll(0)
+  }
+  renderTelemetry()
+}
+
+// --- payload ----------------------------------------------------------------
+
+function downsample(list, max) {
+  if (list.length <= max) return list.slice()
+  if (max <= 1) return [list[list.length - 1]]
+  const step = (list.length - 1) / (max - 1)
+  const out = []
+  for (let i = 0; i < max; i += 1) out.push(list[Math.round(i * step)])
+  return out
+}
+
+function pairsForPayload(pairs) {
+  return downsample(pairs || [], ASSIST_SEND_PAIRS).map(pair => ({ ...pair }))
+}
+
+function assistSummary(pairs = state.assist.pairs) {
+  const assist = state.assist
+  const ious = pairs.map(pair => pair.iou).filter(value => Number.isFinite(value))
+  const localMs = pairs.map(pair => pair.localMs).filter(value => Number.isFinite(value))
+  const serverMs = pairs.map(pair => pair.serverMs).filter(value => Number.isFinite(value))
+  return {
+    mode: assist.mode,
+    samples: pairs.length,
+    meanIou: ious.length
+      ? roundTo(ious.reduce((sum, value) => sum + value, 0) / ious.length, 3)
+      : null,
+    medianRoundTripMs: round1(median(pairs.map(pair => pair.roundTripMs))),
+    medianLocalMs: round1(median(localMs)),
+    medianServerMs: round1(median(serverMs)),
+    agreedShare: pairs.length
+      ? roundTo(pairs.filter(pair => pair.agreed).length / pairs.length, 3)
+      : null,
+    serverFoundShare: pairs.length
+      ? roundTo(pairs.filter(pair => pair.serverQuad != null).length / pairs.length, 3)
+      : null,
+  }
+}
+
 // ----------------------------------------------------------------------- loop
 
 function scheduleTick(ms) {
@@ -1377,6 +2045,10 @@ function changeDetectorEdge(edge) {
   if (MATRIX.active && !MATRIX.internal) abortMatrix('detector input changed')
   state.detectorEdge = edge
   els.detectorSize.value = String(edge)
+  // A different input edge is a different local inference cost.
+  state.assist.locals = []
+  state.assist.lastLocalEwma = null
+  state.assist.lastLocalMs = null
   updateAbRunButton()
   if (AB.active) cancelAbRun('input changed')
   if (state.running) {
@@ -1477,6 +2149,7 @@ async function startCamera() {
   els.start.disabled = true
   updateAbRunButton()
   renderTelemetry()
+  startAssist()
   scheduleTick(0)
 }
 
@@ -1484,6 +2157,7 @@ function stopCamera() {
   abortMatrix('camera stopped')
   state.running = false
   cancelAbRun('camera stopped')
+  stopAssist()
   window.clearTimeout(state.timer)
   state.timer = null
   state.inFlight = false
@@ -1557,6 +2231,7 @@ els.cameraSize.addEventListener('change', () => {
 els.detectorSize.addEventListener('change', () => {
   changeDetectorEdge(Number(els.detectorSize.value) || DEFAULT_DETECTOR_EDGE)
 })
+els.assistMode.addEventListener('change', () => setAssistMode(els.assistMode.value))
 els.abRun.addEventListener('click', () => { void startAbRun() })
 els.abSend.addEventListener('click', () => { void sendAbResults() })
 els.matrixRun.addEventListener('click', () => { void startMatrix() })
@@ -1582,6 +2257,7 @@ if (!BLUR_SUPPORTED) els.blur.style.display = 'none'
 els.cap.value = String(DEFAULT_CAP)
 els.cameraSize.value = state.cameraSize
 els.detectorSize.value = String(state.detectorEdge)
+els.assistMode.value = state.assist.mode
 updateAbRunButton()
 renderAbResults()
 renderTelemetry()

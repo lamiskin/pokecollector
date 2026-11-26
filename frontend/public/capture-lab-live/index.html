@@ -27,6 +27,7 @@
 </div>
 
 <canvas id="frame-source" hidden aria-hidden="true"></canvas>
+<canvas id="assist-frame" hidden aria-hidden="true"></canvas>
 
 <div class="controls">
   <button id="start" class="primary" type="button">Start camera</button>
@@ -58,6 +59,14 @@
       <option value="960">960</option>
     </select>
   </label>
+  <label class="cap" for="assist-mode">
+    <span>server assist</span>
+    <select id="assist-mode">
+      <option value="auto" selected>auto</option>
+      <option value="off">off</option>
+      <option value="on">on</option>
+    </select>
+  </label>
 </div>
 
 <section class="ab" aria-labelledby="matrix-title">
@@ -85,6 +94,7 @@
   <div class="stat"><dt class="k">thread cap requested</dt><dd class="v" id="s-cap">…</dd></div>
   <div class="stat"><dt class="k">detections / s</dt><dd class="v" id="s-rate">…</dd></div>
   <div class="stat"><dt class="k">inference ms (median 20)</dt><dd class="v" id="s-ms">…</dd></div>
+  <div class="stat"><dt class="k">server assist</dt><dd class="v" id="s-assist">…</dd></div>
   <div class="stat"><dt class="k">camera (resolved)</dt><dd class="v" id="s-camera">…</dd></div>
   <div class="stat"><dt class="k">frame sent</dt><dd class="v" id="s-frame">…</dd></div>
   <div class="stat"><dt class="k">detections</dt><dd class="v" id="s-count">0</dd></div>
@@ -125,7 +135,12 @@
     cross-origin isolated and <code>SharedArrayBuffer</code> exists. Changing the cap restarts
     the worker, so the A/B helper compares like-for-like without a reload. The camera size
     is renegotiated on the live track and the detector input resizes the next frame, so
-    neither restarts the worker or drops the ring. Single sweeps upload only when you
+    neither restarts the worker or drops the ring. Server assist polls
+    <code>/api/capture-lab/cv-detect</code> with a 1280 px JPEG every 1100 ms; in
+    <code>auto</code> its quad is used only while the last five round trips are
+    cheaper than 0.8 × local inference (three samples each), otherwise it backs off
+    for 30 s. The local detector still drives the counts and the phase pill, and a
+    disagreeing server quad is drawn faintly. Single sweeps upload only when you
     press Send results; Run all &amp; send posts the collected matrix once on completion.
     A failed send keeps the list and offers a retry. Blur outside the card:
     <span id="blur-state">…</span>.

@@ -218,6 +218,8 @@ button.primary { background: #8a6d10; border-color: var(--gold); color: #fff8e1;
 .stat .v.ok { color: var(--ok); }
 .stat .v.warn { color: var(--warn); }
 .stat .v.bad { color: var(--bad); }
+/* The server-assist state is a sentence, not a single figure. */
+#s-assist { font-size: .92rem; line-height: 1.35; }
 
 footer {
   margin-top: 18px;
