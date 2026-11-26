@@ -226,6 +226,7 @@ fork's destination Card List) commit atomically.
   `api_info`, `scheduler`, `telegram` (the fork keeps `send_new_sets_notification`
   for `sync_service`; shared-message helpers are `send_message` and
   `send_price_alert`), `pre_upgrade_backup`, `postgres_cli`, `debug_logging`,
-  `analytics`, `access_log` (uvicorn access-log query redaction for OIDC paths).
+  `analytics`, `access_log` (uvicorn access-log query redaction for OIDC paths),
+  `rate_limit` (the app-wide SlowAPI limiter that `main.py` installs).
 - **OIDC**: `oidc_provider`, `oidc_identity`, `oidc_link`, `oidc_transactions`,
   `oidc_crypto`.

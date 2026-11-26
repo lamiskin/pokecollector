@@ -66,6 +66,8 @@ Key architectural decisions:
   `get_optional_user` (public-vs-private branching). A `USER_MODE` env var can
   force single- or multi-user mode (`env_user_mode` / `mode_is_env_locked`).
 - **Rate limiting.** `slowapi` (`Limiter`, `SlowAPIMiddleware`) at 60 req/min/IP,
+  with the shared `limiter` instance in `services/rate_limit.py` (capture-lab
+  routes opt out per route with `@limiter.exempt`),
   plus a bespoke in-memory middleware capping login at 5 attempts/min/IP.
 - **Config is env-var driven with DB-backed settings.** Secrets/URLs come from
   environment variables (`DATABASE_URL`, `JWT_SECRET_KEY`, `ADMIN_PASSWORD`,

@@ -24,6 +24,7 @@ from PIL import Image, ImageOps
 
 from api.auth import get_current_user
 from models import User
+from services.rate_limit import limiter
 
 try:  # Pillow alone still reads JPEG/PNG/WebP
     from pillow_heif import register_heif_opener
@@ -110,6 +111,7 @@ def _media_path(directory: Path, name: str) -> Path:
     return path
 
 
+@limiter.exempt
 @router.post("/capture")
 async def upload_capture(
     user: User = Depends(get_current_user),
@@ -161,6 +163,7 @@ async def upload_capture(
     return {**sidecar, "url": f"/api/dev/capture-lab/captures/{name}"}
 
 
+@limiter.exempt
 @router.get("/captures")
 def list_captures(user: User = Depends(get_current_user)):
     """Newest first, at most 200 entries, with a JPEG thumbnail data URL."""
@@ -182,6 +185,7 @@ def list_captures(user: User = Depends(get_current_user)):
     return {"directory": str(directory.resolve()), "captures": entries}
 
 
+@limiter.exempt
 @router.get("/captures/{name}")
 def download_capture(name: str, user: User = Depends(get_current_user)):
     """Serve the stored media type without re-encoding."""
@@ -192,6 +196,7 @@ def download_capture(name: str, user: User = Depends(get_current_user)):
     return FileResponse(path, media_type=media_type, filename=name)
 
 
+@limiter.exempt
 @router.delete("/captures/{name}")
 def delete_capture(name: str, user: User = Depends(get_current_user)):
     """Delete a capture and its sidecar."""
@@ -204,6 +209,7 @@ def delete_capture(name: str, user: User = Depends(get_current_user)):
     return {"deleted": name}
 
 
+@limiter.exempt
 @router.post("/captures/{name}/rotate")
 def rotate_capture(name: str, user: User = Depends(get_current_user)):
     """Rotate a stored capture 180° in place, re-encoding it as JPEG."""
@@ -250,6 +256,7 @@ def _diagnostics_dir() -> Path:
     return _storage_dir() / "diagnostics"
 
 
+@limiter.exempt
 @router.post("/diagnostics")
 async def upload_diagnostics(request: Request, user: User = Depends(get_current_user)):
     """Store one client-side live-detection recording for offline reading."""
@@ -281,6 +288,7 @@ async def upload_diagnostics(request: Request, user: User = Depends(get_current_
     }
 
 
+@limiter.exempt
 @router.get("/diagnostics")
 def list_diagnostics(user: User = Depends(get_current_user)):
     """Newest first, at most 50 recordings."""
@@ -306,6 +314,7 @@ def list_diagnostics(user: User = Depends(get_current_user)):
     return {"diagnostics": entries}
 
 
+@limiter.exempt
 @router.get("/diagnostics/{name}")
 def download_diagnostics(name: str, user: User = Depends(get_current_user)):
     """Serve one stored recording as JSON."""

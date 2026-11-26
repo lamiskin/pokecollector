@@ -12,7 +12,10 @@ import api, { getApiErrorMessage } from '../api/client'
 // existing detector worker on a downscaled frame and draws the raw quad it
 // returns. No tracker, smoothing or capture logic is involved.
 
-const POLL_INTERVAL_MS = 800
+// CollectorVision's boundary is polled every 1100 ms (~54 requests/minute),
+// which stays under the API's global 60/minute rate limit even without the
+// capture-lab routes' rate-limit exemption.
+const POLL_INTERVAL_MS = 1100
 const REQUEST_TIMEOUT_MS = 15000
 const JPEG_QUALITY = 0.8
 const CV_STROKE = '#f59e0b'
@@ -1039,7 +1042,7 @@ export default function CaptureLabCvLive() {
         </div>
         <p className="mt-1 text-sm text-text-secondary">
           Dev-only: CollectorVision&apos;s card boundary over the live camera, refreshed about
-          every 800 ms, and our own detector&apos;s boundary in green, refreshed about every
+          every 1100 ms, and our own detector&apos;s boundary in green, refreshed about every
           400 ms. Amber is CollectorVision; green is ours.
         </p>
       </header>

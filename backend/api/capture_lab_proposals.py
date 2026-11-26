@@ -32,6 +32,7 @@ from api.auth import get_current_user
 from api.dev_capture_lab import _require_enabled
 from models import User
 from services import cv_crop
+from services.rate_limit import limiter
 from services.scan_storage import (
     GEOMETRY_SIDECAR_SUFFIX,
     STRAIGHTEN_JPEG_QUALITY,
@@ -422,6 +423,7 @@ def _load_geometry(stem: str) -> tuple[Path, Path, dict]:
     return image_path, geometry_path, geometry
 
 
+@limiter.exempt
 @router.get("/proposals")
 def list_proposals(user: User = Depends(get_current_user)):
     """Proposals the current rules can produce, newest job first.
@@ -515,6 +517,7 @@ def list_proposals(user: User = Depends(get_current_user)):
     )
 
 
+@limiter.exempt
 @router.get("/proposals/{stem}/original")
 def proposal_original(stem: str, user: User = Depends(get_current_user)):
     """Serve the stored padded JPEG unchanged."""
@@ -530,6 +533,7 @@ def proposal_original(stem: str, user: User = Depends(get_current_user)):
     )
 
 
+@limiter.exempt
 @router.get("/proposals/{stem}/crop")
 def proposal_crop(
     stem: str,
@@ -554,6 +558,7 @@ def proposal_crop(
     )
 
 
+@limiter.exempt
 @router.get("/proposals/{stem}/cv")
 def proposal_cv(stem: str, user: User = Depends(get_current_user)):
     """The offline CollectorVision comparison crop for one proposal, if any."""
@@ -564,6 +569,7 @@ def proposal_cv(stem: str, user: User = Depends(get_current_user)):
     return FileResponse(path, media_type="image/jpeg", headers=NO_STORE)
 
 
+@limiter.exempt
 @router.get("/proposals/{stem}/turned")
 def proposal_turned(stem: str, user: User = Depends(get_current_user)):
     """The same crop rotated 180°, for the orientation ambiguity."""
@@ -574,6 +580,7 @@ def proposal_turned(stem: str, user: User = Depends(get_current_user)):
     )
 
 
+@limiter.exempt
 @router.post("/cv-detect")
 async def cv_detect(
     image: UploadFile = File(...),

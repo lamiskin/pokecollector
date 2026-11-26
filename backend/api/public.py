@@ -16,11 +16,11 @@ router = APIRouter()
 
 # Rate limiting: these public GET endpoints are already covered by the global
 # SlowAPI default_limits=["60/minute"] configured on the app-wide `limiter` in
-# main.py (see Limiter(... default_limits=["60/minute"]) + SlowAPIMiddleware).
-# No per-route @limiter.limit(...) is added here on purpose: main.py imports
-# api.public (via the router), so importing `limiter` back from main.py would
-# create an import cycle. The global default already applies to every route,
-# including these, so a per-route decorator would just be redundant.
+# services/rate_limit.py (see Limiter(... default_limits=["60/minute"]) +
+# SlowAPIMiddleware installed by main.py).
+# No per-route @limiter.limit(...) is added here on purpose: the global default
+# already applies to every route, including these, so a per-route decorator
+# would just be redundant.
 
 
 class PublicCard(BaseModel):

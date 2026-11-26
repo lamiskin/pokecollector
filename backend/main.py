@@ -2,7 +2,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
-from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 
 from services.api_info import API_FEATURES, API_LEVEL
+from services.rate_limit import limiter
 
 logging.basicConfig(
     level=logging.INFO,
@@ -25,10 +26,8 @@ from services.access_log import install_oidc_access_log_redaction  # noqa: E402
 
 install_oidc_access_log_redaction()
 
-# Rate limiter: uses client IP, default 60 requests/minute
-limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
-
-
+# Rate limiter: defined in services/rate_limit.py so routers can import the
+# same instance (and opt out per route) without importing main.py.
 def read_app_version() -> str:
     """Read the release version from the repository VERSION file."""
     env_version = os.environ.get("APP_VERSION")
@@ -132,6 +131,8 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# The limiter itself lives in services/rate_limit.py so routers can import it
+# without an import cycle; SlowAPIMiddleware applies its 60/minute default here.
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)

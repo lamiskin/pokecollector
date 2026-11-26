@@ -29,6 +29,7 @@ from fastapi.responses import JSONResponse
 from api.auth import get_current_user
 from api.dev_capture_lab import _require_enabled, _storage_dir
 from models import User
+from services.rate_limit import limiter
 
 router = APIRouter(dependencies=[Depends(_require_enabled)])
 
@@ -89,6 +90,7 @@ async def _read_bounded_body(request: Request) -> bytes:
     return bytes(body)
 
 
+@limiter.exempt
 @router.post("/experiments")
 async def create_experiment(
     request: Request,
@@ -131,6 +133,7 @@ async def create_experiment(
     return {"id": stem}
 
 
+@limiter.exempt
 @router.get("/experiments")
 def list_experiments(user: User = Depends(get_current_user)):
     """Metadata for every stored experiment, newest first.
