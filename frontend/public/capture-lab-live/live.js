@@ -696,7 +696,72 @@ async function startWorker() {
     assetBase: window.location.origin,
   })
 
-  const info = await withTimeout(ready, READY_TIMEOUT_MS)
+  let info
+  try {
+    info = await withTimeout(ready, READY_TIMEOUT_MS)
+  } catch (error) {
+    // A threaded pool can hang without an error when its nested worker scripts
+    // are refused (a cached /detector/ response from before COEP was added is
+    // the usual cause). Degrade to the single-thread baseline instead of
+    // failing the page, and say so plainly: the measurement stays valid, it is
+    // just not the threaded one.
+    if (requested <= 1) throw error
+    // Tear down the hung pool the same way the stop path does.
+    if (state.worker) {
+      state.worker.onmessage = null
+      state.worker.onerror = null
+      state.worker.terminate()
+      state.worker = null
+    }
+    state.readyResolve = null
+    state.readyReject = null
+    if (state.blobUrl) {
+      URL.revokeObjectURL(state.blobUrl)
+      state.blobUrl = ''
+    }
+    state.threads.fellBack = true
+    state.threads.fellBackReason = error?.message || String(error)
+    state.threads.requested = 1
+    state.workerUrl = state.workerUrl || await resolveWorkerUrl()
+    const retryBlob = URL.createObjectURL(
+      new Blob([`import ${JSON.stringify(state.workerUrl)}`], { type: 'text/javascript' }),
+    )
+    const retry = new Worker(retryBlob, { type: 'module' })
+    state.worker = retry
+    state.blobUrl = retryBlob
+    const retryReady = new Promise((resolve, reject) => {
+      state.readyResolve = resolve
+      state.readyReject = reject
+    })
+    retry.onmessage = event => {
+      if (state.worker !== retry) return
+      onWorkerMessage(event)
+    }
+    retry.onerror = event => {
+      if (state.worker !== retry) return
+      const err = new Error(event?.message || 'the detector worker crashed')
+      state.readyReject?.(err)
+      state.readyReject = null
+      state.readyResolve = null
+      state.inFlight = false
+      fail('Detector worker crashed', err.message)
+    }
+    retry.postMessage({
+      type: 'init',
+      runtime: RUNTIME,
+      numThreads: 1,
+      assetBase: window.location.origin,
+    })
+    info = await withTimeout(retryReady, READY_TIMEOUT_MS)
+    showBanner(
+      'warn',
+      'Threaded start failed — running single-threaded',
+      `<p>The ${requested}-thread pool did not become ready (${state.threads.fellBackReason}). `
+        + 'The measurement below is the single-thread baseline. A stale cached '
+        + '<code>/detector/</code> response without COEP is the usual cause: clear this site\'s '
+        + 'data once, or open the page in a private window.</p>',
+    )
+  }
   state.threads.granted = Number(info.threads) || 1
   state.threads.matched = state.threads.granted === state.threads.requested
   state.threads.runtime = info.runtime || RUNTIME
