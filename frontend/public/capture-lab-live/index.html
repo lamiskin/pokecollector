@@ -10,7 +10,7 @@
 <body>
 <header>
   <h1>Capture lab live</h1>
-  <p class="sub">Our detector, our ring · Cornelius 2.12 · <code>/detector/</code> · detector only, nothing is captured or uploaded</p>
+  <p class="sub">Our detector, our ring · Cornelius 2.12 · <code>/detector/</code> · detector only, nothing is uploaded until you press Send results</p>
 </header>
 
 <div id="banner" class="banner" role="status" aria-live="polite" hidden></div>
@@ -78,13 +78,22 @@
     Runs 10 s at the selected thread cap and records the resolved camera size, the
     detector input, the median inference and detections/s. Each line is keyed by
     cap · camera · input, so rerunning a combination replaces it; the repeat buttons
-    offer another cap or input so you can compare.
+    offer another cap or input so you can compare. Send results uploads the list
+    once, only when you press it.
   </p>
   <div class="ab-row">
     <button id="ab-run" type="button" disabled>Run 10 s at cap <span id="ab-run-cap">4</span> · in <span id="ab-run-input">640</span></button>
     <span id="ab-status" class="ab-status" role="status" aria-live="polite"></span>
   </div>
   <ol id="ab-results" class="ab-results" hidden></ol>
+  <div class="ab-send">
+    <label class="cap" for="ab-label">
+      <span>label</span>
+      <input id="ab-label" type="text" maxlength="120" placeholder="optional" autocomplete="off">
+    </label>
+    <button id="ab-send" type="button" disabled>Send results</button>
+    <span id="ab-send-status" class="ab-status" role="status" aria-live="polite"></span>
+  </div>
   <div id="ab-repeat" class="ab-repeat"></div>
 </section>
 
@@ -97,7 +106,8 @@
     cross-origin isolated and <code>SharedArrayBuffer</code> exists. Changing the cap restarts
     the worker, so the A/B helper compares like-for-like without a reload. The camera size
     is renegotiated on the live track and the detector input resizes the next frame, so
-    neither restarts the worker or drops the ring. Blur outside the card:
+    neither restarts the worker or drops the ring. Nothing is uploaded until you press
+    Send results; a failed send keeps the list and offers a retry. Blur outside the card:
     <span id="blur-state">…</span>.
   </p>
   <p class="worker">worker: <code id="worker-src">not loaded</code></p>

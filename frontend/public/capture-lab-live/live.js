@@ -19,6 +19,7 @@
 
 const MANIFEST_URL = '/.vite/manifest.json'
 const WORKER_SOURCE = 'src/workers/cardDetector.worker.js'
+const EXPERIMENTS_PATH = '/api/capture-lab/experiments'
 const RUNTIME = 'wasm'
 // The page offers a few caps so the same device can be compared A/B: a pool can
 // help, or hurt when the phone is thermally limited or the cores are contended.
@@ -90,6 +91,9 @@ const els = {
   abStatus: document.getElementById('ab-status'),
   abResults: document.getElementById('ab-results'),
   abRepeat: document.getElementById('ab-repeat'),
+  abLabel: document.getElementById('ab-label'),
+  abSend: document.getElementById('ab-send'),
+  abSendStatus: document.getElementById('ab-send-status'),
 }
 
 const HARDWARE = navigator.hardwareConcurrency || 1
@@ -141,6 +145,9 @@ const state = {
   blurShown: false,
   // A/B runs survive Start/Stop for the session; only a reload clears them.
   abResults: [],
+  // Nothing is uploaded automatically: only Send results posts the list.
+  abSending: false,
+  abSendError: '',
 }
 
 // One measurement window: the detector loop keeps running unchanged, we just
@@ -811,6 +818,7 @@ function finishAbRun() {
     ms: median(AB.samples),
     rate: rateFromStamps(AB.stamps),
     detections: AB.stamps.length,
+    at: new Date().toISOString(),
   }
   // One line per cap · camera · input: rerunning the same combination replaces it.
   const existing = state.abResults.findIndex(
@@ -818,6 +826,10 @@ function finishAbRun() {
   )
   if (existing >= 0) state.abResults[existing] = result
   else state.abResults.push(result)
+
+  // A changed list has not been sent yet, so do not keep claiming the old send.
+  state.abSendError = ''
+  els.abSendStatus.textContent = ''
 
   renderAbResults()
   renderAbRepeat()
@@ -836,6 +848,7 @@ function formatAbLine(result) {
 
 function renderAbResults() {
   els.abResults.replaceChildren()
+  updateAbSendButton()
   if (!state.abResults.length) {
     els.abResults.hidden = true
     return
@@ -846,6 +859,86 @@ function renderAbResults() {
     els.abResults.append(item)
   }
   els.abResults.hidden = false
+}
+
+// Send results — the only path that uploads anything. The payload is the
+// accumulated A/B list, one entry per cap · camera · input, with the detector
+// half filled in and no CV half (this page has none).
+function deviceInfo() {
+  return {
+    ua: navigator.userAgent,
+    hardwareConcurrency: navigator.hardwareConcurrency || 1,
+    isolated: window.crossOriginIsolated === true,
+    threadsGranted: state.threads.granted || null,
+  }
+}
+
+function round1(value) {
+  return value == null ? null : Math.round(value * 10) / 10
+}
+
+function experimentPayload() {
+  const label = (els.abLabel.value || '').trim()
+  return {
+    page: 'capture-lab-live',
+    ...(label ? { label } : {}),
+    device: deviceInfo(),
+    runs: state.abResults.map(result => ({
+      settings: { cap: result.cap, cam: result.cam, input: result.edge },
+      ours: {
+        msMedian: round1(result.ms),
+        perSecond: round1(result.rate),
+        detections: result.detections,
+      },
+      cv: null,
+      at: result.at,
+    })),
+  }
+}
+
+function updateAbSendButton() {
+  els.abSend.disabled = state.abSending || !state.abResults.length
+  els.abSend.textContent = state.abSending
+    ? 'Sending…'
+    : state.abSendError ? 'Retry send' : 'Send results'
+}
+
+async function sendAbResults() {
+  if (state.abSending || !state.abResults.length) return
+  state.abSending = true
+  state.abSendError = ''
+  updateAbSendButton()
+  els.abSendStatus.textContent = 'sending…'
+
+  const token = localStorage.getItem('token')
+  try {
+    const response = await fetch(EXPERIMENTS_PATH, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify(experimentPayload()),
+    })
+    let body = null
+    try { body = await response.json() } catch { body = null }
+    if (!response.ok) {
+      const detail = body?.detail ?? body?.message
+      const reason = response.status === 401
+        ? 'not signed in — sign in to the app in this browser first'
+        : typeof detail === 'string' ? detail : `HTTP ${response.status}`
+      throw new Error(reason)
+    }
+    const id = body?.id
+    els.abSendStatus.textContent = id == null ? 'sent' : `sent · id ${id}`
+  } catch (error) {
+    // Keep the list: the button stays enabled as Retry send.
+    state.abSendError = error?.message || String(error)
+    els.abSendStatus.textContent = `send failed: ${state.abSendError} — press Retry send.`
+  } finally {
+    state.abSending = false
+    updateAbSendButton()
+  }
 }
 
 function renderAbRepeat() {
@@ -1188,6 +1281,7 @@ els.detectorSize.addEventListener('change', () => {
   changeDetectorEdge(Number(els.detectorSize.value) || DEFAULT_DETECTOR_EDGE)
 })
 els.abRun.addEventListener('click', startAbRun)
+els.abSend.addEventListener('click', () => { void sendAbResults() })
 
 els.video.addEventListener('resize', () => {
   updateStageAspect()

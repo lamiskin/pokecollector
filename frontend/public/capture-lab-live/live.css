@@ -152,7 +152,8 @@ button.primary { background: #8a6d10; border-color: var(--gold); color: #fff8e1;
   color: var(--muted);
   font-size: .8rem;
 }
-.cap select {
+.cap select,
+.cap input {
   padding: 8px 10px;
   border: 1px solid var(--line);
   border-radius: 9px;
@@ -161,6 +162,7 @@ button.primary { background: #8a6d10; border-color: var(--gold); color: #fff8e1;
   font: inherit;
   font-size: .9rem;
 }
+.cap input { min-width: 150px; }
 
 .ab {
   margin: 16px 0 0;
@@ -181,6 +183,8 @@ button.primary { background: #8a6d10; border-color: var(--gold); color: #fff8e1;
   line-height: 1.6;
 }
 .ab-results[hidden] { display: none; }
+.ab-send { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 10px; }
+.ab-send:empty { display: none; }
 .ab-repeat { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .ab-repeat:empty { display: none; }
 

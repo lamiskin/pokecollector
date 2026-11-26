@@ -14,18 +14,36 @@ import api, { getApiErrorMessage } from '../api/client'
 
 const POLL_INTERVAL_MS = 800
 const REQUEST_TIMEOUT_MS = 15000
-const MAX_FRAME_EDGE = 1280
 const JPEG_QUALITY = 0.8
 const CV_STROKE = '#f59e0b'
 const CV_DETECT_PATH = '/capture-lab/cv-detect'
+const EXPERIMENTS_PATH = '/capture-lab/experiments'
 
-// Our detector's own cadence, independent of the CV poll. 640 px matches the
-// live loop in CaptureLab, so both pages see the same model input scale.
+// Camera presets renegotiated on the live track. 'max' re-applies the track's
+// capability maximum, which is what the start request asks for.
+const CAMERA_SIZES = [
+  { key: 'max', label: 'Max (capability)', width: null, height: null },
+  { key: '1920x1080', label: '1920 × 1080', width: 1920, height: 1080 },
+  { key: '1280x720', label: '1280 × 720', width: 1280, height: 720 },
+  { key: '960x540', label: '960 × 540', width: 960, height: 540 },
+]
+const DEFAULT_CAMERA_SIZE = 'max'
+
+// Our detector's own cadence, independent of the CV poll. The detector input is
+// the long edge of the frame canvas only: changing it never restarts the worker.
 const OURS_INTERVAL_MS = 400
-const OURS_MAX_EDGE = 640
+const DETECTOR_EDGES = [320, 480, 640, 960]
+const DEFAULT_DETECTOR_EDGE = 640
 const OURS_STROKE = '#22c55e'
 const OURS_RUNTIME = 'asyncify'
 const OURS_MEDIAN_WINDOW = 20
+
+// The JPEG long edge uploaded to CollectorVision. Smaller uploads are cheaper to
+// encode and send; the server downsizes again to its own detection edge anyway.
+const CV_UPLOAD_EDGES = [640, 960, 1280, 1600]
+const DEFAULT_CV_UPLOAD_EDGE = 1280
+
+const SWEEP_DURATION_MS = 10000
 
 function toFiniteNumber(value) {
   if (value == null || value === '') return null
@@ -70,6 +88,9 @@ function readDetection(payload) {
   const sharpness = toFiniteNumber(
     data.sharpness ?? block?.sharpness ?? data.quality?.sharpness,
   )
+  // The server times its own decode + detection; it is the CV half's compute
+  // cost without the upload, encode or network.
+  const detectMs = toFiniteNumber(data.ms?.detect ?? data.detectMs ?? data.detect_ms)
   // The server reports this as `resized` (the frame was downscaled before
   // detection); older shapes used `downscaled`.
   const downscaled = typeof data.resized === 'boolean'
@@ -83,8 +104,10 @@ function readDetection(payload) {
     corners: normalizeQuad(rawQuad, frame),
     detection,
     sharpness,
+    detectMs,
     downscaled,
-    found: data.found !== false,
+    // The server answers `detected`; older shapes used `found`.
+    found: data.detected !== false && data.found !== false,
   }
 }
 
@@ -92,6 +115,7 @@ function formatTelemetry(telemetry) {
   if (!telemetry) return 'No frame sent yet.'
   return [
     telemetry.roundTripMs == null ? 'round trip —' : `round trip ${telemetry.roundTripMs} ms`,
+    telemetry.detectMs == null ? 'detect —' : `detect ${telemetry.detectMs} ms`,
     `detection ${telemetry.detection || '—'}`,
     `sharpness ${telemetry.sharpness == null ? '—' : telemetry.sharpness.toFixed(3)}`,
     telemetry.downscaled == null
@@ -104,9 +128,33 @@ function median(values) {
   if (!values.length) return null
   const sorted = [...values].sort((a, b) => a - b)
   const mid = Math.floor(sorted.length / 2)
-  return sorted.length % 2
-    ? sorted[mid]
-    : Math.round((sorted[mid - 1] + sorted[mid]) / 2)
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2
+}
+
+function round1(value) {
+  return value == null ? null : Math.round(value * 10) / 10
+}
+
+function rateFromStamps(stamps) {
+  if (stamps.length < 2) return null
+  const span = stamps[stamps.length - 1] - stamps[0]
+  return span > 0 ? ((stamps.length - 1) * 1000) / span : null
+}
+
+// One line per cam · in · cv: the standalone page's format with the cap absent
+// and the CV half appended.
+function formatResultLine(result) {
+  const ours = result.ours
+  const ms = ours?.msMedian == null ? '—' : ours.msMedian.toFixed(1)
+  const rate = ours?.perSecond == null ? '—' : ours.perSecond.toFixed(1)
+  const head = `cam ${result.cam} · in ${result.edge} · cv ${result.cvUpload} → ${ms} ms, ${rate}/s`
+  if (!result.cv) return `${head} · cv no samples`
+  const cv = result.cv
+  const roundTrip = cv.roundTripMs == null ? '—' : `${cv.roundTripMs} ms rt`
+  const detect = cv.detectMs == null ? '—' : `${cv.detectMs} ms detect`
+  const sharp = cv.sharpness == null ? '—' : cv.sharpness.toFixed(3)
+  return `${head} · cv ${roundTrip} / ${detect} · ${cv.detection || '—'} · sharp ${sharp}`
+    + ` · ${cv.found ? 'found' : 'no card'} · ${cv.resized ? 'resized' : 'not resized'}`
 }
 
 function formatOurTelemetry(status, telemetry) {
@@ -114,7 +162,7 @@ function formatOurTelemetry(status, telemetry) {
   if (status !== 'ready') return 'ours · detector starting…'
   return [
     'ours',
-    `inference ${telemetry?.inferenceMs == null ? '—' : `${telemetry.inferenceMs} ms`}`,
+    `inference ${telemetry?.inferenceMs == null ? '—' : `${Math.round(telemetry.inferenceMs)} ms`}`,
     `detections ${telemetry?.detections ?? 0}`,
   ].join(' · ')
 }
@@ -122,6 +170,11 @@ function formatOurTelemetry(status, telemetry) {
 export default function CaptureLabCvLive() {
   const [cameraStatus, setCameraStatus] = useState('idle')
   const [cameraError, setCameraError] = useState('')
+  const [cameraSizeKey, setCameraSizeKey] = useState(DEFAULT_CAMERA_SIZE)
+  const [cameraResolved, setCameraResolved] = useState('')
+  const [cameraNote, setCameraNote] = useState('')
+  const [detectorEdge, setDetectorEdge] = useState(DEFAULT_DETECTOR_EDGE)
+  const [cvUploadEdge, setCvUploadEdge] = useState(DEFAULT_CV_UPLOAD_EDGE)
   const [quad, setQuad] = useState(null)
   const [telemetry, setTelemetry] = useState(null)
   const [inFlight, setInFlight] = useState(false)
@@ -129,6 +182,12 @@ export default function CaptureLabCvLive() {
   const [ourStatus, setOurStatus] = useState('idle')
   const [ourQuad, setOurQuad] = useState(null)
   const [ourTelemetry, setOurTelemetry] = useState(null)
+  const [sweepActive, setSweepActive] = useState(false)
+  const [sweepStatus, setSweepStatus] = useState('')
+  const [results, setResults] = useState([])
+  const [label, setLabel] = useState('')
+  const [sending, setSending] = useState(false)
+  const [sendState, setSendState] = useState(null)
 
   const videoRef = useRef(null)
   const canvasRef = useRef(null)
@@ -143,6 +202,28 @@ export default function CaptureLabCvLive() {
   const controllerRef = useRef(null)
   const mountedRef = useRef(true)
 
+  // Read by the two sampling loops, which only depend on cameraStatus: a
+  // selector change must affect the next frame, not restart an effect.
+  const cameraSizeRef = useRef(DEFAULT_CAMERA_SIZE)
+  const detectorEdgeRef = useRef(DEFAULT_DETECTOR_EDGE)
+  const cvUploadEdgeRef = useRef(DEFAULT_CV_UPLOAD_EDGE)
+  const cameraMaximumRef = useRef(null)
+  const threadsGrantedRef = useRef(null)
+
+  // The 10 s sweep accumulates here while both loops keep running unchanged.
+  const sweepRef = useRef({
+    active: false,
+    startedAt: 0,
+    cam: '',
+    edge: DEFAULT_DETECTOR_EDGE,
+    cvUpload: DEFAULT_CV_UPLOAD_EDGE,
+    oursMs: [],
+    oursStamps: [],
+    cv: [],
+  })
+  const sweepTimerRef = useRef(null)
+  const sweepIntervalRef = useRef(null)
+
   useEffect(() => {
     mountedRef.current = true
     return () => {
@@ -150,10 +231,242 @@ export default function CaptureLabCvLive() {
       controllerRef.current?.abort()
       streamRef.current?.getTracks?.().forEach(track => track.stop())
       streamRef.current = null
+      if (sweepTimerRef.current != null) window.clearTimeout(sweepTimerRef.current)
+      if (sweepIntervalRef.current != null) window.clearInterval(sweepIntervalRef.current)
+      sweepTimerRef.current = null
+      sweepIntervalRef.current = null
     }
   }, [])
 
+  // Keep the displayed camera size current when applyConstraints renegotiates
+  // the track; the media 'resize' event is the reliable signal for that.
+  useEffect(() => {
+    const video = videoRef.current
+    if (!video) return undefined
+    video.addEventListener('resize', updateResolvedCamera)
+    return () => video.removeEventListener('resize', updateResolvedCamera)
+  }, [])
+
+  const updateResolvedCamera = () => {
+    const video = videoRef.current
+    if (video?.videoWidth && video?.videoHeight) {
+      setCameraResolved(`${video.videoWidth} × ${video.videoHeight}`)
+    }
+  }
+
+  // A settings change during a sweep ends that sweep: the line would otherwise
+  // mix two configurations under one key.
+  const cancelSweep = reason => {
+    const run = sweepRef.current
+    if (!run.active) return
+    run.active = false
+    if (sweepTimerRef.current != null) window.clearTimeout(sweepTimerRef.current)
+    if (sweepIntervalRef.current != null) window.clearInterval(sweepIntervalRef.current)
+    sweepTimerRef.current = null
+    sweepIntervalRef.current = null
+    setSweepActive(false)
+    setSweepStatus(`run cancelled (${reason}).`)
+  }
+
+  const cameraTarget = key => {
+    const preset = CAMERA_SIZES.find(item => item.key === key) || CAMERA_SIZES[0]
+    if (preset.width && preset.height) return { width: preset.width, height: preset.height }
+    return cameraMaximumRef.current
+  }
+
+  // Renegotiate the live track, never the stream: the worker, ring and a running
+  // sweep stay up. A rejected preference keeps the size that already works.
+  const applyCameraSize = async key => {
+    setCameraSizeKey(key)
+    cameraSizeRef.current = key
+    setCameraNote('')
+    cancelSweep('camera changed')
+    const track = streamRef.current?.getVideoTracks?.()[0]
+    // Before Start there is no track: the selection is applied when it opens.
+    if (!track) return
+    if (!track.applyConstraints) {
+      setCameraNote('size control unsupported')
+      return
+    }
+    const target = cameraTarget(key)
+    if (!target) {
+      setCameraNote('capability max unknown — kept current')
+      return
+    }
+    try {
+      await track.applyConstraints({
+        width: { ideal: target.width },
+        height: { ideal: target.height },
+      })
+    } catch {
+      setCameraNote('size change rejected — kept previous')
+      return
+    }
+    updateResolvedCamera()
+  }
+
+  // Our detector input is a local frame-canvas decision: no worker restart.
+  const changeDetectorEdge = edge => {
+    setDetectorEdge(edge)
+    detectorEdgeRef.current = edge
+    cancelSweep('input changed')
+  }
+
+  // The CV upload size only changes the next JPEG's long edge.
+  const changeCvUploadEdge = edge => {
+    setCvUploadEdge(edge)
+    cvUploadEdgeRef.current = edge
+    cancelSweep('cv upload changed')
+  }
+
+  const updateSweepStatus = () => {
+    const run = sweepRef.current
+    if (!run.active) return
+    const left = Math.max(0, SWEEP_DURATION_MS - (performance.now() - run.startedAt))
+    setSweepStatus(
+      `sampling — ${(left / 1000).toFixed(1)} s left at cam ${run.cam} · in ${run.edge} · cv ${run.cvUpload}`,
+    )
+  }
+
+  const startSweep = () => {
+    const run = sweepRef.current
+    if (cameraStatus !== 'live' || run.active) return
+    const video = videoRef.current
+    sweepRef.current = {
+      active: true,
+      startedAt: performance.now(),
+      cam: video?.videoWidth && video?.videoHeight ? `${video.videoWidth}×${video.videoHeight}` : '—',
+      edge: detectorEdgeRef.current,
+      cvUpload: cvUploadEdgeRef.current,
+      oursMs: [],
+      oursStamps: [],
+      cv: [],
+    }
+    setSweepActive(true)
+    updateSweepStatus()
+    sweepIntervalRef.current = window.setInterval(updateSweepStatus, 200)
+    sweepTimerRef.current = window.setTimeout(finishSweep, SWEEP_DURATION_MS)
+  }
+
+  const finishSweep = () => {
+    const run = sweepRef.current
+    if (!run.active) return
+    run.active = false
+    if (sweepTimerRef.current != null) window.clearTimeout(sweepTimerRef.current)
+    if (sweepIntervalRef.current != null) window.clearInterval(sweepIntervalRef.current)
+    sweepTimerRef.current = null
+    sweepIntervalRef.current = null
+    setSweepActive(false)
+
+    const msMedian = round1(median(run.oursMs))
+    const perSecond = round1(rateFromStamps(run.oursStamps))
+    const ours = msMedian == null && perSecond == null
+      ? null
+      : { msMedian, perSecond, detections: run.oursStamps.length }
+
+    // Medians for the numeric CV telemetry; the last response for the
+    // categorical fields (detection path, sharpness, found, resized).
+    let cv = null
+    if (run.cv.length) {
+      const last = run.cv[run.cv.length - 1]
+      const roundTrip = median(run.cv.map(sample => sample.roundTripMs))
+      const detect = median(
+        run.cv.map(sample => sample.detectMs).filter(value => value != null),
+      )
+      cv = {
+        roundTripMs: roundTrip == null ? null : Math.round(roundTrip),
+        detectMs: detect == null ? null : Math.round(detect * 100) / 100,
+        detection: last.detection,
+        sharpness: last.sharpness,
+        found: last.found,
+        resized: last.downscaled === true,
+      }
+    }
+
+    if (!ours && !cv) {
+      setSweepStatus('no samples — keep the card in view and try again.')
+      return
+    }
+
+    const result = {
+      cam: run.cam,
+      edge: run.edge,
+      cvUpload: run.cvUpload,
+      ours,
+      cv,
+      at: new Date().toISOString(),
+    }
+    setResults(previous => {
+      const index = previous.findIndex(
+        entry => entry.cam === result.cam
+          && entry.edge === result.edge
+          && entry.cvUpload === result.cvUpload,
+      )
+      if (index < 0) return [...previous, result]
+      const next = [...previous]
+      next[index] = result
+      return next
+    })
+    // The list changed, so an earlier send no longer covers it.
+    setSendState(null)
+    setSweepStatus(
+      `recorded cam ${result.cam} · in ${result.edge} · cv ${result.cvUpload}. `
+        + 'Run another combination to compare.',
+    )
+  }
+
+  const sendResults = async () => {
+    if (sending || !results.length) return
+    setSending(true)
+    setSendState(null)
+    const trimmed = label.trim()
+    const payload = {
+      page: 'cv-live',
+      ...(trimmed ? { label: trimmed } : {}),
+      device: {
+        ua: navigator.userAgent,
+        hardwareConcurrency: navigator.hardwareConcurrency || 1,
+        isolated: window.crossOriginIsolated === true,
+        threadsGranted: threadsGrantedRef.current,
+      },
+      runs: results.map(result => ({
+        settings: { cam: result.cam, input: result.edge, cvUpload: result.cvUpload },
+        ours: result.ours
+          ? {
+              msMedian: result.ours.msMedian,
+              perSecond: result.ours.perSecond,
+              detections: result.ours.detections,
+            }
+          : null,
+        cv: result.cv
+          ? {
+              roundTripMs: result.cv.roundTripMs,
+              detectMs: result.cv.detectMs,
+              detection: result.cv.detection,
+              sharpness: result.cv.sharpness,
+              found: result.cv.found,
+              resized: result.cv.resized,
+            }
+          : null,
+        at: result.at,
+      })),
+    }
+    try {
+      const response = await api.post(EXPERIMENTS_PATH, payload)
+      const id = response.data?.id
+      setSendState({ tone: 'ok', text: id == null ? 'sent' : `sent · id ${id}` })
+    } catch (error) {
+      setSendState({
+        tone: 'error',
+        text: `send failed: ${getApiErrorMessage(error)} — press Retry send.`,
+      })
+    } finally {
+      setSending(false)
+    }
+  }
+
   const stopCamera = () => {
+    cancelSweep('camera stopped')
     controllerRef.current?.abort()
     controllerRef.current = null
     const stream = streamRef.current
@@ -171,6 +484,9 @@ export default function CaptureLabCvLive() {
     setOurQuad(null)
     setOurTelemetry(null)
     setOurStatus('idle')
+    setCameraResolved('')
+    setCameraNote('')
+    cameraMaximumRef.current = null
   }
 
   const startCamera = async () => {
@@ -208,10 +524,31 @@ export default function CaptureLabCvLive() {
       if (track) {
         track.onended = () => {
           if (!mountedRef.current) return
+          cancelSweep('camera ended')
           setCameraStatus('error')
           setCameraError('The camera stream ended.')
         }
       }
+      // Ask the track for its capability maximum, then apply the selected preset:
+      // 'max' is the capability maximum, and the start request only used ideals.
+      let capabilities = {}
+      try { capabilities = track?.getCapabilities?.() || {} } catch { capabilities = {} }
+      const maxWidth = typeof capabilities.width?.max === 'number' ? capabilities.width.max : null
+      const maxHeight = typeof capabilities.height?.max === 'number' ? capabilities.height.max : null
+      cameraMaximumRef.current = maxWidth && maxHeight ? { width: maxWidth, height: maxHeight } : null
+      setCameraNote('')
+      const initial = cameraTarget(cameraSizeRef.current)
+      if (initial && track?.applyConstraints) {
+        try {
+          await track.applyConstraints({
+            width: { ideal: initial.width },
+            height: { ideal: initial.height },
+          })
+        } catch {
+          setCameraNote('size change rejected — kept previous')
+        }
+      }
+      updateResolvedCamera()
       setCameraStatus('live')
     } catch (error) {
       const name = error?.name || ''
@@ -243,7 +580,7 @@ export default function CaptureLabCvLive() {
       setInFlight(true)
       let controller = null
       try {
-        const scale = Math.min(1, MAX_FRAME_EDGE / Math.max(video.videoWidth, video.videoHeight))
+        const scale = Math.min(1, cvUploadEdgeRef.current / Math.max(video.videoWidth, video.videoHeight))
         const width = Math.max(1, Math.round(video.videoWidth * scale))
         const height = Math.max(1, Math.round(video.videoHeight * scale))
         if (canvas.width !== width) canvas.width = width
@@ -267,12 +604,25 @@ export default function CaptureLabCvLive() {
         if (stopped || !mountedRef.current) return
 
         const result = readDetection(response.data)
+        const roundTripMs = Math.round(performance.now() - requestStarted)
         setTelemetry({
-          roundTripMs: Math.round(performance.now() - requestStarted),
+          roundTripMs,
+          detectMs: result.detectMs,
           detection: result.detection,
           sharpness: result.sharpness,
           downscaled: result.downscaled,
         })
+        const sweepRun = sweepRef.current
+        if (sweepRun.active) {
+          sweepRun.cv.push({
+            roundTripMs,
+            detectMs: result.detectMs,
+            detection: result.detection,
+            sharpness: result.sharpness,
+            found: result.found,
+            downscaled: result.downscaled,
+          })
+        }
         if (!result.found || !result.corners) {
           setQuad(null)
           setNotice({ tone: 'muted', text: 'No card seen in the last frame.' })
@@ -377,7 +727,7 @@ export default function CaptureLabCvLive() {
       const canvas = detectorCanvasRef.current
       if (!canvas) return
 
-      const scale = Math.min(1, OURS_MAX_EDGE / Math.max(video.videoWidth, video.videoHeight))
+      const scale = Math.min(1, detectorEdgeRef.current / Math.max(video.videoWidth, video.videoHeight))
       const width = Math.max(1, Math.round(video.videoWidth * scale))
       const height = Math.max(1, Math.round(video.videoHeight * scale))
       if (canvas.width !== width) canvas.width = width
@@ -407,6 +757,7 @@ export default function CaptureLabCvLive() {
       const message = event.data || {}
       if (message.type === 'ready') {
         ready = true
+        if (Number.isFinite(message.threads)) threadsGrantedRef.current = message.threads
         setOurStatus('ready')
         return
       }
@@ -417,9 +768,19 @@ export default function CaptureLabCvLive() {
           ? message.corners
           : null
         setOurQuad(corners)
-        if (Number.isFinite(message.ms)) {
-          ourSamplesRef.current = [...ourSamplesRef.current, message.ms]
+        // runMs is the model run itself, the same number the standalone page's
+        // A/B records; fall back to the whole detect time if it is absent.
+        const inferenceMs = Number.isFinite(message.detectParts?.runMs)
+          ? message.detectParts.runMs
+          : Number.isFinite(message.ms) ? message.ms : null
+        if (inferenceMs != null) {
+          ourSamplesRef.current = [...ourSamplesRef.current, inferenceMs]
             .slice(-OURS_MEDIAN_WINDOW)
+        }
+        const sweepRun = sweepRef.current
+        if (sweepRun.active) {
+          if (inferenceMs != null) sweepRun.oursMs.push(inferenceMs)
+          sweepRun.oursStamps.push(performance.now())
         }
         setOurTelemetry(previous => ({
           inferenceMs: median(ourSamplesRef.current),
@@ -526,6 +887,56 @@ export default function CaptureLabCvLive() {
 
         {cameraMessage ? <p className="mt-2 text-xs text-text-secondary">{cameraMessage}</p> : null}
 
+        <div className="mt-3 flex flex-wrap items-end gap-3 border-t border-border pt-3">
+          <label className="text-xs text-text-muted">
+            Camera size
+            <select
+              className="select-sm mt-1 w-auto"
+              value={cameraSizeKey}
+              onChange={event => void applyCameraSize(event.target.value)}
+            >
+              {CAMERA_SIZES.map(preset => (
+                <option key={preset.key} value={preset.key}>{preset.label}</option>
+              ))}
+            </select>
+          </label>
+          <label className="text-xs text-text-muted">
+            Our detector input
+            <select
+              className="select-sm mt-1 w-auto"
+              value={detectorEdge}
+              onChange={event => changeDetectorEdge(Number(event.target.value))}
+            >
+              {DETECTOR_EDGES.map(edge => (
+                <option key={edge} value={edge}>{edge}</option>
+              ))}
+            </select>
+          </label>
+          <label className="text-xs text-text-muted">
+            CV upload size
+            <select
+              className="select-sm mt-1 w-auto"
+              value={cvUploadEdge}
+              onChange={event => changeCvUploadEdge(Number(event.target.value))}
+            >
+              {CV_UPLOAD_EDGES.map(edge => (
+                <option key={edge} value={edge}>{edge}</option>
+              ))}
+            </select>
+          </label>
+          <button
+            type="button"
+            className="btn-ghost-sm"
+            disabled={cameraStatus !== 'live' || sweepActive}
+            onClick={startSweep}
+          >
+            {sweepActive ? 'Sampling…' : 'Run 10 s sweep'}
+          </button>
+          <p className="pb-1 text-xs text-text-secondary">
+            camera (resolved) {cameraResolved || '—'}{cameraNote ? ` · ${cameraNote}` : ''}
+          </p>
+        </div>
+
         <div className="mt-3 flex justify-center overflow-hidden rounded bg-black">
           <div className="relative block w-full">
             <video
@@ -533,6 +944,7 @@ export default function CaptureLabCvLive() {
               autoPlay
               playsInline
               muted
+              onLoadedMetadata={updateResolvedCamera}
               className={`block h-auto w-full rounded bg-black object-contain ${cameraStatus === 'live' ? '' : 'hidden'}`}
             />
             {cameraStatus !== 'live' ? (
@@ -601,6 +1013,55 @@ export default function CaptureLabCvLive() {
           <p>{formatOurTelemetry(ourStatus, ourTelemetry)}</p>
         </div>
         {notice ? <p className={`mt-1 text-xs ${noticeClass}`}>{notice.text}</p> : null}
+      </section>
+
+      <section className="rounded-lg border border-border bg-bg-card p-4">
+        <h2 className="text-sm font-semibold text-text-primary">Sweep results</h2>
+        <p className="mt-1 text-xs text-text-secondary">
+          A 10 s sweep records our median inference and detections/s from the green pass,
+          and the CV half&apos;s median round trip and server detect time, with the last
+          detection path, sharpness, found and resized of the window. Lines are keyed by
+          cam · in · cv, so rerunning a combination replaces it. Results survive Stop/Start,
+          and nothing is uploaded until you press Send results.
+        </p>
+        {sweepStatus ? <p className="mt-2 text-xs text-text-secondary">{sweepStatus}</p> : null}
+        {results.length ? (
+          <ol className="mt-2 space-y-1 font-mono text-[11px] leading-relaxed text-text-secondary">
+            {results.map(result => (
+              <li key={`${result.cam}|${result.edge}|${result.cvUpload}`}>
+                {formatResultLine(result)}
+              </li>
+            ))}
+          </ol>
+        ) : (
+          <p className="mt-2 text-xs text-text-muted">No sweeps recorded yet.</p>
+        )}
+        <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-border pt-3">
+          <label className="text-xs text-text-muted">
+            Label (optional)
+            <input
+              type="text"
+              maxLength={120}
+              value={label}
+              onChange={event => setLabel(event.target.value)}
+              className="input mt-1 w-48"
+              placeholder="e.g. pixel 8, outdoor"
+            />
+          </label>
+          <button
+            type="button"
+            className="btn-primary-sm"
+            disabled={sending || !results.length}
+            onClick={() => void sendResults()}
+          >
+            {sending ? 'Sending…' : sendState?.tone === 'error' ? 'Retry send' : 'Send results'}
+          </button>
+          {sendState ? (
+            <p className={`text-xs ${sendState.tone === 'error' ? 'text-brand-red' : 'text-text-secondary'}`}>
+              {sendState.text}
+            </p>
+          ) : null}
+        </div>
       </section>
     </main>
   )
