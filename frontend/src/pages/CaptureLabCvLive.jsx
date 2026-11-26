@@ -7,9 +7,10 @@ import api, { getApiErrorMessage } from '../api/client'
 // the camera preview so it can be compared with our detector on the same phone.
 // Nothing is captured, stored or sent to the scanner.
 //
-// CollectorVision is amber; our detector's existing live overlay is green
-// (#22c55e). This page deliberately does not re-implement the detector/tracker
-// loop from CaptureLab, so only the amber boundary is drawn here.
+// CollectorVision is amber; our detector is green (#22c55e). This page does not
+// re-implement the detector/tracker loop from CaptureLab: it only starts the
+// existing detector worker on a downscaled frame and draws the raw quad it
+// returns. No tracker, smoothing or capture logic is involved.
 
 const POLL_INTERVAL_MS = 800
 const REQUEST_TIMEOUT_MS = 15000
@@ -17,6 +18,14 @@ const MAX_FRAME_EDGE = 1280
 const JPEG_QUALITY = 0.8
 const CV_STROKE = '#f59e0b'
 const CV_DETECT_PATH = '/capture-lab/cv-detect'
+
+// Our detector's own cadence, independent of the CV poll. 640 px matches the
+// live loop in CaptureLab, so both pages see the same model input scale.
+const OURS_INTERVAL_MS = 400
+const OURS_MAX_EDGE = 640
+const OURS_STROKE = '#22c55e'
+const OURS_RUNTIME = 'asyncify'
+const OURS_MEDIAN_WINDOW = 20
 
 function toFiniteNumber(value) {
   if (value == null || value === '') return null
@@ -61,11 +70,15 @@ function readDetection(payload) {
   const sharpness = toFiniteNumber(
     data.sharpness ?? block?.sharpness ?? data.quality?.sharpness,
   )
-  const downscaled = typeof data.downscaled === 'boolean'
-    ? data.downscaled
-    : typeof data.frame?.downscaled === 'boolean'
-      ? data.frame.downscaled
-      : null
+  // The server reports this as `resized` (the frame was downscaled before
+  // detection); older shapes used `downscaled`.
+  const downscaled = typeof data.resized === 'boolean'
+    ? data.resized
+    : typeof data.downscaled === 'boolean'
+      ? data.downscaled
+      : typeof data.frame?.downscaled === 'boolean'
+        ? data.frame.downscaled
+        : null
   return {
     corners: normalizeQuad(rawQuad, frame),
     detection,
@@ -87,6 +100,25 @@ function formatTelemetry(telemetry) {
   ].join(' · ')
 }
 
+function median(values) {
+  if (!values.length) return null
+  const sorted = [...values].sort((a, b) => a - b)
+  const mid = Math.floor(sorted.length / 2)
+  return sorted.length % 2
+    ? sorted[mid]
+    : Math.round((sorted[mid - 1] + sorted[mid]) / 2)
+}
+
+function formatOurTelemetry(status, telemetry) {
+  if (status === 'unavailable') return 'ours · our detector unavailable'
+  if (status !== 'ready') return 'ours · detector starting…'
+  return [
+    'ours',
+    `inference ${telemetry?.inferenceMs == null ? '—' : `${telemetry.inferenceMs} ms`}`,
+    `detections ${telemetry?.detections ?? 0}`,
+  ].join(' · ')
+}
+
 export default function CaptureLabCvLive() {
   const [cameraStatus, setCameraStatus] = useState('idle')
   const [cameraError, setCameraError] = useState('')
@@ -94,9 +126,17 @@ export default function CaptureLabCvLive() {
   const [telemetry, setTelemetry] = useState(null)
   const [inFlight, setInFlight] = useState(false)
   const [notice, setNotice] = useState(null)
+  const [ourStatus, setOurStatus] = useState('idle')
+  const [ourQuad, setOurQuad] = useState(null)
+  const [ourTelemetry, setOurTelemetry] = useState(null)
 
   const videoRef = useRef(null)
   const canvasRef = useRef(null)
+  const detectorCanvasRef = useRef(null)
+  const detectorWorkerRef = useRef(null)
+  const ourInFlightRef = useRef(false)
+  const ourSeqRef = useRef(0)
+  const ourSamplesRef = useRef([])
   const streamRef = useRef(null)
   const inFlightRef = useRef(false)
   const unavailableRef = useRef(false)
@@ -126,6 +166,11 @@ export default function CaptureLabCvLive() {
     setQuad(null)
     setTelemetry(null)
     setNotice(null)
+    // The detector effect tears down with cameraStatus; these keep the UI in
+    // step if a result was already queued when the camera stopped.
+    setOurQuad(null)
+    setOurTelemetry(null)
+    setOurStatus('idle')
   }
 
   const startCamera = async () => {
@@ -285,6 +330,143 @@ export default function CaptureLabCvLive() {
     }
   }, [cameraStatus])
 
+  // Our detector runs beside the CV poll on its own 400 ms interval. It reuses
+  // the existing worker (init/detect with a serial queue) rather than the
+  // CaptureLab loop, so only a raw quad is drawn: no tracker or smoothing.
+  // The in-flight guard means a slow inference skips ticks instead of queueing
+  // frames, and the worker's seq is checked so a stale result cannot repaint.
+  useEffect(() => {
+    if (cameraStatus !== 'live') return undefined
+    let stopped = false
+    let ready = false
+    let worker = null
+    let bootstrapUrl = ''
+    let timer = null
+
+    ourInFlightRef.current = false
+    ourSeqRef.current = 0
+    ourSamplesRef.current = []
+    setOurQuad(null)
+    setOurTelemetry(null)
+    setOurStatus('loading')
+
+    // Copied from CaptureLab.jsx loadDetector (lines 1244-1257): the worker is
+    // started from a blob so it inherits the document's CSP rather than a
+    // cached asset's headers, which would otherwise block the detector's wasm.
+    try {
+      const moduleUrl = new URL('../workers/cardDetector.worker.js', import.meta.url)
+      bootstrapUrl = URL.createObjectURL(
+        new Blob([`import ${JSON.stringify(moduleUrl.href)}`], { type: 'text/javascript' }),
+      )
+      worker = new Worker(bootstrapUrl, { type: 'module' })
+    } catch {
+      setOurStatus('unavailable')
+      return () => {
+        if (bootstrapUrl) URL.revokeObjectURL(bootstrapUrl)
+      }
+    }
+    detectorWorkerRef.current = worker
+
+    const tick = async () => {
+      if (stopped || !ready || ourInFlightRef.current) return
+      if (detectorWorkerRef.current !== worker) return
+      const video = videoRef.current
+      if (!video || !video.videoWidth || !video.videoHeight || video.readyState < 2) return
+      const track = streamRef.current?.getVideoTracks?.()[0]
+      if (track && track.readyState !== 'live') return
+      const canvas = detectorCanvasRef.current
+      if (!canvas) return
+
+      const scale = Math.min(1, OURS_MAX_EDGE / Math.max(video.videoWidth, video.videoHeight))
+      const width = Math.max(1, Math.round(video.videoWidth * scale))
+      const height = Math.max(1, Math.round(video.videoHeight * scale))
+      if (canvas.width !== width) canvas.width = width
+      if (canvas.height !== height) canvas.height = height
+
+      ourInFlightRef.current = true
+      const seq = (ourSeqRef.current += 1)
+      let bitmap = null
+      try {
+        canvas.getContext('2d').drawImage(video, 0, 0, width, height)
+        bitmap = await createImageBitmap(canvas)
+        if (stopped || detectorWorkerRef.current !== worker) {
+          bitmap.close?.()
+          ourInFlightRef.current = false
+          return
+        }
+        worker.postMessage({ type: 'detect', bitmap, seq }, [bitmap])
+        bitmap = null
+      } catch {
+        bitmap?.close?.()
+        ourInFlightRef.current = false
+      }
+    }
+
+    worker.onmessage = event => {
+      if (stopped || detectorWorkerRef.current !== worker) return
+      const message = event.data || {}
+      if (message.type === 'ready') {
+        ready = true
+        setOurStatus('ready')
+        return
+      }
+      if (message.type === 'result') {
+        ourInFlightRef.current = false
+        if (message.seq !== ourSeqRef.current) return
+        const corners = Array.isArray(message.corners) && message.corners.length === 4
+          ? message.corners
+          : null
+        setOurQuad(corners)
+        if (Number.isFinite(message.ms)) {
+          ourSamplesRef.current = [...ourSamplesRef.current, message.ms]
+            .slice(-OURS_MEDIAN_WINDOW)
+        }
+        setOurTelemetry(previous => ({
+          inferenceMs: median(ourSamplesRef.current),
+          detections: (previous?.detections || 0) + 1,
+        }))
+        return
+      }
+      if (message.type === 'error') {
+        ourInFlightRef.current = false
+        // A missing model or a CSP-blocked wasm runtime fails during init and
+        // carries no seq. The page exists for the CV overlay, so degrade the
+        // line instead of showing an error page.
+        if (message.seq == null) {
+          ready = false
+          setOurStatus('unavailable')
+          setOurQuad(null)
+          setOurTelemetry(null)
+        }
+      }
+    }
+    worker.onerror = () => {
+      if (stopped || detectorWorkerRef.current !== worker) return
+      ready = false
+      setOurStatus('unavailable')
+      setOurQuad(null)
+      setOurTelemetry(null)
+    }
+    // The worker runs from a blob, where root-relative URLs cannot be resolved.
+    worker.postMessage({ type: 'init', runtime: OURS_RUNTIME, assetBase: window.location.origin })
+    timer = setInterval(tick, OURS_INTERVAL_MS)
+
+    return () => {
+      stopped = true
+      if (timer != null) clearInterval(timer)
+      worker.onmessage = null
+      worker.onerror = null
+      worker.terminate()
+      if (detectorWorkerRef.current === worker) detectorWorkerRef.current = null
+      if (bootstrapUrl) URL.revokeObjectURL(bootstrapUrl)
+      ourInFlightRef.current = false
+      ourSamplesRef.current = []
+      setOurQuad(null)
+      setOurTelemetry(null)
+      setOurStatus('idle')
+    }
+  }, [cameraStatus])
+
   const cameraMessage = {
     requesting: 'Requesting camera…',
     denied: 'Camera permission was denied. Allow camera access in the browser and retry.',
@@ -305,8 +487,8 @@ export default function CaptureLabCvLive() {
         </div>
         <p className="mt-1 text-sm text-text-secondary">
           Dev-only: CollectorVision&apos;s card boundary over the live camera, refreshed about
-          every 800 ms. The amber outline is CollectorVision; our own detector&apos;s boundary is
-          not drawn on this page.
+          every 800 ms, and our own detector&apos;s boundary in green, refreshed about every
+          400 ms. Amber is CollectorVision; green is ours.
         </p>
       </header>
 
@@ -383,14 +565,41 @@ export default function CaptureLabCvLive() {
                 </span>
               </>
             ) : null}
+            {cameraStatus === 'live' && ourQuad ? (
+              <>
+                <svg
+                  viewBox="0 0 1 1"
+                  preserveAspectRatio="none"
+                  className="pointer-events-none absolute inset-0 h-full w-full"
+                  aria-hidden
+                >
+                  <polygon
+                    points={ourQuad.map(([x, y]) => `${x},${y}`).join(' ')}
+                    fill="none"
+                    stroke={OURS_STROKE}
+                    strokeWidth="2"
+                    strokeLinejoin="round"
+                    vectorEffect="non-scaling-stroke"
+                  />
+                </svg>
+                <span
+                  className="pointer-events-none absolute right-2 top-2 rounded bg-black/70 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
+                  style={{ color: OURS_STROKE }}
+                >
+                  ours
+                </span>
+              </>
+            ) : null}
           </div>
         </div>
 
         <canvas ref={canvasRef} className="hidden" aria-hidden />
+        <canvas ref={detectorCanvasRef} className="hidden" aria-hidden />
 
-        <p className="mt-2 text-xs text-text-secondary">
-          {formatTelemetry(telemetry)}
-        </p>
+        <div className="mt-2 space-y-0.5 text-xs text-text-secondary">
+          <p>{formatTelemetry(telemetry)}</p>
+          <p>{formatOurTelemetry(ourStatus, ourTelemetry)}</p>
+        </div>
         {notice ? <p className={`mt-1 text-xs ${noticeClass}`}>{notice.text}</p> : null}
       </section>
     </main>
