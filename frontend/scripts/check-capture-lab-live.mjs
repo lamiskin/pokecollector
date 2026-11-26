@@ -130,6 +130,55 @@ expect(
   'each experiment run must carry its paired samples',
 )
 
+// Correctness and motion: a pair must carry timing, both sources' scores, the
+// server's detection mode, the frame time and inter-pair motion, with quads in
+// one canonical order so the analysis never has to re-derive corner order.
+for (const field of [
+  'localAt:', 'serverAt:', 'frameAt:', 'localSharpness:', 'localConfidence:',
+  'serverSharpness:', 'serverConfidence:', 'serverDetection:', 'serverResized:',
+  'motion:',
+]) {
+  expect(script.includes(field), `live.js must record the pair field ${field}`)
+}
+expect(script.includes('function canonicalQuad'), 'live.js must canonicalise quad corner order')
+expect(
+  /function canonicalQuad[\s\S]{0,900}?orderQuad\(/.test(script),
+  "canonicalQuad must build on orderQuad's counter-clockwise winding",
+)
+expect(
+  /function canonicalQuad[\s\S]{0,900}?slice\(start\)/.test(script),
+  'canonicalQuad must rotate the winding to the top-left-most corner',
+)
+expect(
+  script.includes('ASSIST_STILL_MOTION = 0.01'),
+  'live.js must define the documented still-motion threshold',
+)
+expect(script.includes('medianIouStill:'), 'the assist summary must report a still-only median IoU')
+for (const key of [
+  'stillPairs:', 'movingPairs:', 'medianLocalSharpness:',
+  'medianServerSharpness:', 'localFoundShare:',
+]) {
+  expect(script.includes(key), `the assist summary must report ${key}`)
+}
+expect(
+  script.includes('assist: assistSummary(result.pairs)'),
+  'each experiment run must carry its own assist summary',
+)
+
+// Ground-truth frames: at most two 480 px q0.6 JPEGs per run, taken from the
+// worst- and median-IoU pair, and only when that pair has both quads.
+expect(script.includes('ASSIST_FRAME_EDGE = 480'), 'live.js must encode ground-truth frames at a 480 px long edge')
+expect(script.includes('ASSIST_FRAME_QUALITY = 0.6'), 'live.js must encode ground-truth frames at JPEG q0.6')
+expect(script.includes('ASSIST_FRAME_MAX = 2'), 'live.js must cap ground-truth frames at 2 per run')
+expect(script.includes("kind: 'worst'"), 'live.js must label the worst-IoU frame')
+expect(script.includes("kind: 'median'"), 'live.js must label the median-IoU frame')
+expect(script.includes('jpegB64'), 'a frame must carry its JPEG as base64')
+expect(
+  /pair\.localQuad && pair\.serverQuad && Number\.isFinite\(pair\.iou\)/.test(script),
+  'a frame must be skipped when its pair lacks both quads',
+)
+expect(script.includes('frames: result.frames || []'), 'each experiment run must carry its frames')
+
 // Serving rules.
 expect(nginx.includes('location ^~ /capture-lab-live/'), 'nginx.conf must scope the page location')
 expect(/Cross-Origin-Opener-Policy "same-origin"/.test(nginx), 'nginx.conf must send COOP for the page')

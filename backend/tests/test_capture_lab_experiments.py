@@ -72,6 +72,50 @@ class CaptureLabExperimentTests(unittest.TestCase):
         self.assertEqual(response.status_code, 413)
         self.assertFalse(self._experiments_dir().exists())
 
+    def _body_of_size(self, size):
+        prefix = b'{"pad":"'
+        suffix = b'"}'
+        return prefix + b"a" * (size - len(prefix) - len(suffix)) + suffix
+
+    def test_size_limit_boundary_accepts_4_mib_and_rejects_one_byte_more(self):
+        # The limit is inclusive: a body exactly at 4 MiB is stored, one byte
+        # over is refused, and the refusal writes nothing.
+        with self._enabled_env():
+            under = self.client.post(
+                self.url,
+                content=self._body_of_size(MAX_EXPERIMENT_BYTES - 1),
+                headers={"content-type": "application/json"},
+            )
+            at_limit = self.client.post(
+                self.url,
+                content=self._body_of_size(MAX_EXPERIMENT_BYTES),
+                headers={"content-type": "application/json"},
+            )
+            over = self.client.post(
+                self.url,
+                content=self._body_of_size(MAX_EXPERIMENT_BYTES + 1),
+                headers={"content-type": "application/json"},
+            )
+
+        self.assertEqual(under.status_code, 200)
+        self.assertEqual(at_limit.status_code, 200)
+        self.assertEqual(over.status_code, 413)
+        self.assertEqual(
+            over.json()["detail"],
+            "Experiment is larger than the 4 MiB limit.",
+        )
+
+        stored = [
+            self._stored(response.json()["id"]) for response in (under, at_limit)
+        ]
+        sizes = (MAX_EXPERIMENT_BYTES - 1, MAX_EXPERIMENT_BYTES)
+        for path, size in zip(stored, sizes):
+            self.assertTrue(path.is_file(), path.name)
+            stored_pad = json.loads(path.read_text(encoding="utf-8"))["pad"]
+            # The body is {"pad":"…"}: 8 bytes of prefix and 2 of suffix.
+            self.assertEqual(len(stored_pad), size - 10)
+        self.assertEqual(len(list(self._experiments_dir().glob("*.json"))), 2)
+
     def test_non_object_body_is_rejected(self):
         with self._enabled_env():
             for body in (b"[1, 2, 3]", b'"text"', b"null", b"42"):

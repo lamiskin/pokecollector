@@ -5,7 +5,7 @@ detector inputs, CV round trips) and posts each finished run here so it can be
 read from the host-mounted capture-lab directory. Each request body is stored
 verbatim as one JSON document beside the captures it describes.
 
-Writes are bounded to 1 MiB, atomic (unique temp file plus rename) and mode
+Writes are bounded to 4 MiB, atomic (unique temp file plus rename) and mode
 ``0600``; the experiments directory is only created by the first write. Nothing
 here serves a stored file back as a download, and nothing is rotated or
 deleted automatically.
@@ -33,7 +33,9 @@ from services.rate_limit import limiter
 
 router = APIRouter(dependencies=[Depends(_require_enabled)])
 
-MAX_EXPERIMENT_BYTES = 1024 * 1024
+MAX_EXPERIMENT_MIB = 4
+MAX_EXPERIMENT_BYTES = MAX_EXPERIMENT_MIB * 1024 * 1024
+_TOO_LARGE_DETAIL = f"Experiment is larger than the {MAX_EXPERIMENT_MIB} MiB limit."
 NO_STORE = {"Cache-Control": "no-store"}
 
 
@@ -72,7 +74,7 @@ async def _read_bounded_body(request: Request) -> bytes:
             if int(declared) > MAX_EXPERIMENT_BYTES:
                 raise HTTPException(
                     status_code=413,
-                    detail="Experiment is larger than the 1 MiB limit.",
+                    detail=_TOO_LARGE_DETAIL,
                     headers=NO_STORE,
                 )
         except ValueError:
@@ -84,7 +86,7 @@ async def _read_bounded_body(request: Request) -> bytes:
         if len(body) > MAX_EXPERIMENT_BYTES:
             raise HTTPException(
                 status_code=413,
-                detail="Experiment is larger than the 1 MiB limit.",
+                detail=_TOO_LARGE_DETAIL,
                 headers=NO_STORE,
             )
     return bytes(body)

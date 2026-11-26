@@ -53,6 +53,26 @@ const ASSIST_SEND_PAIRS = 120
 const ASSIST_STALE_MS = 3500
 const ASSIST_SERVER_STROKE = 'rgba(125, 211, 252, 0.55)'
 
+// Paired samples are only comparable on a still card: the camera and the server
+// keep sampling while the card moves, so the two quads can describe different
+// moments. `motion` is the mean corner move (normalised to the frame) since the
+// previous pair, and one pair interval is ASSIST_POLL_MS (~1.1 s). A threshold
+// of 0.01 therefore means the corners drift less than 1% of the frame between
+// samples: a card held at arm's length stays far below that (sub-pixel to a few
+// pixels at 1280 px ≈ 0.002), while a deliberate pan clears it. `medianIouStill`
+// uses it to drop motion artefacts instead of mixing them into the IoU.
+const ASSIST_STILL_MOTION = 0.01
+
+// Ground-truth frames: each run keeps the camera frame behind its worst- and
+// median-IoU pair, at 480 px long edge and JPEG q0.6 — enough to judge the
+// boundary without dominating the payload. A 16:9 frame is ~480×270 and encodes
+// to roughly 25–45 KB; base64 adds a third, so ~35–60 KB per frame and at most
+// two frames per run (~120 KB). A 9-run matrix therefore adds roughly 1 MB to
+// the experiment post, which is why the backend accepts 4 MB for this payload.
+const ASSIST_FRAME_EDGE = 480
+const ASSIST_FRAME_QUALITY = 0.6
+const ASSIST_FRAME_MAX = 2
+
 // Camera presets. 'max' re-applies the track's capability maximum (the start
 // default); the rest are explicit ideal sizes. A rejected change keeps the
 // stream that already works and says so in the camera stat.
@@ -174,6 +194,7 @@ const state = {
   lastQuadAt: 0,
   lastUsableAt: 0,
   lastSharpness: null,
+  lastConfidence: null,
   detections: 0,
   stamps: [],
   runSamples: [],
@@ -225,6 +246,8 @@ const AB = {
   stamps: [],
   // Server-assist pairs recorded inside this window, sent with its run.
   pairs: [],
+  // { pair, canvas } for each pair, so the worst/median pair can keep its frame.
+  frameCandidates: [],
   token: 0,
   endTimer: null,
   countdownTimer: null,
@@ -678,6 +701,11 @@ function onWorkerMessage(event) {
     }
     if (message.usable === true) state.lastUsableAt = performance.now()
     state.lastSharpness = Number.isFinite(message.sharpness) ? message.sharpness : null
+    // The worker reports a score only when its runtime exposes one; keep the
+    // pair record honest with null rather than inventing a confidence.
+    state.lastConfidence = Number.isFinite(message.confidence)
+      ? message.confidence
+      : Number.isFinite(message.score) ? message.score : null
 
     const inferenceMs = message.detectParts && Number.isFinite(message.detectParts.runMs)
       ? message.detectParts.runMs
@@ -1019,6 +1047,7 @@ function startAbRun(durationMs = AB_DURATION_MS) {
   AB.samples = []
   AB.stamps = []
   AB.pairs = []
+  AB.frameCandidates = []
   AB.token += 1
   els.abRepeat.replaceChildren()
   if (!MATRIX.active) els.abStatus.textContent = ''
@@ -1040,6 +1069,7 @@ function cancelAbRun(reason = '') {
   AB.samples = []
   AB.stamps = []
   AB.pairs = []
+  AB.frameCandidates = []
   AB.token += 1
   if (MATRIX.active) {
     els.matrixStatus.textContent =
@@ -1061,6 +1091,11 @@ function finishAbRun() {
   AB.endTimer = null
   AB.countdownTimer = null
 
+  const pairs = AB.pairs.slice()
+  const candidates = AB.frameCandidates.slice()
+  AB.pairs = []
+  AB.frameCandidates = []
+
   const result = {
     cap: AB.cap,
     cam: AB.cam,
@@ -1068,7 +1103,9 @@ function finishAbRun() {
     ms: median(AB.samples),
     rate: rateFromStamps(AB.stamps),
     detections: AB.stamps.length,
-    pairs: AB.pairs.slice(),
+    pairs,
+    // Filled in below once the two ground-truth frames are encoded.
+    frames: [],
     at: new Date().toISOString(),
   }
   // One line per cap · camera · input: rerunning the same combination replaces it.
@@ -1093,7 +1130,12 @@ function finishAbRun() {
   updateAbRunButton()
   const resolve = AB.resolveFinish
   AB.resolveFinish = null
-  resolve?.(result)
+  // Encoding runs off the pair canvases and takes ~100 ms. "Run all & send"
+  // awaits this promise, so the frames are attached before it posts.
+  runFrames(pairs, candidates)
+    .then(frames => { result.frames = frames })
+    .catch(() => {})
+    .finally(() => { resolve?.(result) })
 }
 
 function formatAbLine(result) {
@@ -1151,7 +1193,9 @@ function experimentPayload(results = state.abResults, mode = '') {
         detections: result.detections,
       },
       cv: null,
+      assist: assistSummary(result.pairs),
       pairs: pairsForPayload(result.pairs),
+      frames: result.frames || [],
       at: result.at,
     })),
   }
@@ -1396,6 +1440,27 @@ function orderQuad(quad) {
     (a, b) => Math.atan2(a[1] - cy, a[0] - cx) - Math.atan2(b[1] - cy, b[0] - cx),
   )
   return signedArea(ordered) < 0 ? ordered.reverse() : ordered
+}
+
+// Canonical storage order: counter-clockwise (orderQuad's winding) from the
+// top-left-most corner (smallest x + y, ties broken by the smaller y). Pairs are
+// recorded this way so the analysis never has to re-derive corner ordering, and
+// consecutive quads line up corner-for-corner for `motion`.
+function canonicalQuad(quad) {
+  if (!quad || quad.length !== 4) return null
+  const ordered = orderQuad(quad)
+  let start = 0
+  for (let i = 1; i < ordered.length; i += 1) {
+    const candidate = ordered[i]
+    const current = ordered[start]
+    const candidateKey = candidate[0] + candidate[1]
+    const currentKey = current[0] + current[1]
+    if (candidateKey < currentKey - 1e-9
+      || (Math.abs(candidateKey - currentKey) <= 1e-9 && candidate[1] < current[1])) {
+      start = i
+    }
+  }
+  return ordered.slice(start).concat(ordered.slice(0, start)).map(([x, y]) => [x, y])
 }
 
 function polygonArea(points) {
@@ -1661,19 +1726,48 @@ function normalizeServerQuad(raw) {
   return points
 }
 
-function recordAssistPair({ roundTripMs, serverMs, serverQuad, localQuad, localMs, pairToken }) {
+function recordAssistPair({
+  roundTripMs, serverMs, serverQuad, localQuad, localMs, localAt, serverAt,
+  frameAt, thumb, localSharpness, localConfidence,
+  serverSharpness, serverConfidence, serverDetection, serverResized, pairToken,
+}) {
   const assist = state.assist
+  // Canonical order is stored, not just used for IoU, so a pair can be read
+  // corner-for-corner without guessing the source's starting corner.
+  const canonicalLocal = canonicalQuad(localQuad)
+  const canonicalServer = canonicalQuad(serverQuad)
+  // Motion is only meaningful against the immediately previous pair of the same
+  // run: a gap of two intervals would otherwise look like one interval of slow
+  // drift, and a run boundary would compare two unrelated card positions.
+  const reference = AB.active && AB.token === pairToken ? AB.pairs : assist.pairs
+  const previous = reference.length ? reference[reference.length - 1] : null
+  const previousLocal = previous?.localQuad || null
   const pair = {
     at: new Date().toISOString(),
-    localQuad: cloneQuad(localQuad),
-    serverQuad: cloneQuad(serverQuad),
-    iou: localQuad && serverQuad ? roundTo(quadIou(localQuad, serverQuad), 4) : null,
+    // performance.now() when the local result arrived and the server JSON was
+    // parsed, plus the video time of the uploaded frame so a moving sample can
+    // be detected and excluded.
+    localAt: roundTo(localAt, 1),
+    serverAt: roundTo(serverAt, 1),
+    frameAt: roundTo(frameAt, 3),
+    localQuad: canonicalLocal,
+    serverQuad: canonicalServer,
+    iou: canonicalLocal && canonicalServer ? roundTo(quadIou(canonicalLocal, canonicalServer), 4) : null,
+    localSharpness: roundTo(localSharpness, 4),
+    localConfidence: roundTo(localConfidence, 4),
+    serverSharpness: roundTo(serverSharpness, 4),
+    serverConfidence: roundTo(serverConfidence, 4),
+    serverDetection: serverDetection ?? null,
+    serverResized: serverResized === true,
+    motion: previousLocal && canonicalLocal
+      ? roundTo(meanQuadDistance(previousLocal, canonicalLocal), 4)
+      : null,
     localMs: roundTo(localMs, 1),
     serverMs: roundTo(serverMs, 1),
     roundTripMs: Math.round(roundTripMs),
     agreed: Boolean(
-      localQuad && serverQuad
-      && meanQuadDistance(localQuad, serverQuad) <= ASSIST_DISAGREE,
+      canonicalLocal && canonicalServer
+      && meanQuadDistance(canonicalLocal, canonicalServer) <= ASSIST_DISAGREE,
     ),
   }
   assist.pairs.push(pair)
@@ -1681,16 +1775,23 @@ function recordAssistPair({ roundTripMs, serverMs, serverQuad, localQuad, localM
     assist.pairs.splice(0, assist.pairs.length - ASSIST_MAX_PAIRS)
   }
   // A request that began before the current run must not land in its pairs.
-  if (AB.active && AB.token === pairToken) AB.pairs.push(pair)
+  if (AB.active && AB.token === pairToken) {
+    AB.pairs.push(pair)
+    if (thumb) AB.frameCandidates.push({ pair, canvas: thumb })
+  }
   return pair
 }
 
-function handleAssistResponse(data, roundTripMs, sentLocalQuad, sentLocalMs, pairToken) {
+function handleAssistResponse(data, meta) {
+  const {
+    roundTripMs, serverAt, localQuad, localMs, localAt, pairToken, frameAt, thumb,
+  } = meta
   const assist = state.assist
   const payload = data || {}
   const corners = normalizeServerQuad(payload.corners)
   const found = payload.detected !== false && corners != null
   const detectMs = Number.isFinite(payload.ms?.detect) ? payload.ms.detect : null
+  const detection = typeof payload.detection === 'string' ? payload.detection : null
 
   pushWindow(assist.rtts, roundTripMs, ASSIST_WINDOW)
   assist.lastRttEwma = ewmaOf(assist.rtts)
@@ -1714,8 +1815,18 @@ function handleAssistResponse(data, roundTripMs, sentLocalQuad, sentLocalMs, pai
     roundTripMs,
     serverMs: detectMs,
     serverQuad: found ? corners : null,
-    localQuad: sentLocalQuad,
-    localMs: sentLocalMs,
+    localQuad,
+    localMs,
+    localAt,
+    serverAt,
+    frameAt,
+    thumb,
+    localSharpness: state.lastSharpness,
+    localConfidence: state.lastConfidence,
+    serverSharpness: Number.isFinite(payload.sharpness) ? payload.sharpness : null,
+    serverConfidence: Number.isFinite(payload.confidence) ? payload.confidence : null,
+    serverDetection: detection,
+    serverResized: payload.resized === true,
     pairToken,
   })
   renderTelemetry()
@@ -1749,11 +1860,18 @@ async function pollAssist() {
   if (canvas.height !== height) canvas.height = height
   canvas.getContext('2d').drawImage(video, 0, 0, width, height)
 
+  // The uploaded frame's identity: `frameAt` lets the analysis exclude a pair
+  // whose card moved, and a run keeps a 480 px copy as ground truth. The copy is
+  // only made while a run is recording, so idle polling costs nothing.
+  const frameAt = video.currentTime
+  const thumb = AB.active ? captureFrameThumb(video) : null
+
   // Pair the response with the frame's local result, not with whatever the
   // local detector has moved on to by the time the server answers.
   const sentLocalQuad = state.quad && performance.now() - state.lastQuadAt < QUAD_STALE_MS
     ? cloneQuad(state.quad)
     : null
+  const sentLocalAt = sentLocalQuad ? state.lastQuadAt : null
   const sentLocalMs = assist.lastLocalMs
 
   let blob = null
@@ -1800,7 +1918,17 @@ async function pollAssist() {
       throw new Error(assist.error || `HTTP ${response.status}`)
     }
     const roundTripMs = performance.now() - startedAt
-    handleAssistResponse(data, roundTripMs, sentLocalQuad, sentLocalMs, pairToken)
+    const serverAt = performance.now()
+    handleAssistResponse(data, {
+      roundTripMs,
+      serverAt,
+      localQuad: sentLocalQuad,
+      localMs: sentLocalMs,
+      localAt: sentLocalAt,
+      pairToken,
+      frameAt,
+      thumb,
+    })
   } catch (error) {
     if (!assist.unavailable) {
       assist.error = error?.name === 'AbortError'
@@ -1879,6 +2007,81 @@ function setAssistMode(mode) {
   renderTelemetry()
 }
 
+// --- ground-truth frames ----------------------------------------------------
+
+// A 480 px long-edge copy of the frame just uploaded. It is kept per pair (one
+// small canvas, not an encoded JPEG) so only the worst and median pair of a run
+// are ever encoded; see ASSIST_FRAME_* for the size budget.
+function captureFrameThumb(video) {
+  if (!video.videoWidth || !video.videoHeight) return null
+  const { width, height } = frameDimensions(video.videoWidth, video.videoHeight, ASSIST_FRAME_EDGE)
+  const canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+  try {
+    canvas.getContext('2d').drawImage(video, 0, 0, width, height)
+  } catch {
+    return null
+  }
+  return canvas
+}
+
+function canvasToBase64(canvas) {
+  return new Promise(resolve => {
+    try {
+      canvas.toBlob(async blob => {
+        if (!blob) return resolve(null)
+        try {
+          const bytes = new Uint8Array(await blob.arrayBuffer())
+          let binary = ''
+          // Chunked so a frame cannot overflow the argument list.
+          for (let i = 0; i < bytes.length; i += 0x8000) {
+            binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000))
+          }
+          resolve(btoa(binary))
+        } catch {
+          resolve(null)
+        }
+      }, 'image/jpeg', ASSIST_FRAME_QUALITY)
+    } catch {
+      resolve(null)
+    }
+  })
+}
+
+// Pick the worst- and median-IoU pair of a run and encode their frames. Both
+// need both quads, so a pair the server missed is never used as ground truth.
+// With a single eligible pair the two choices coincide and only one frame is
+// sent; the cap is applied last, so a missing canvas cannot consume a slot.
+async function runFrames(pairs, candidates) {
+  if (!candidates.length) return []
+  const eligible = pairs.filter(pair => pair.localQuad && pair.serverQuad && Number.isFinite(pair.iou))
+  if (!eligible.length) return []
+
+  const byPair = new Map(candidates.map(entry => [entry.pair, entry.canvas]))
+  let worst = eligible[0]
+  for (const pair of eligible) if (pair.iou < worst.iou) worst = pair
+  const middle = median(eligible.map(pair => pair.iou))
+  let medianPair = eligible[0]
+  for (const pair of eligible) {
+    if (Math.abs(pair.iou - middle) < Math.abs(medianPair.iou - middle)) medianPair = pair
+  }
+
+  const chosen = [{ kind: 'worst', pair: worst }]
+  if (medianPair !== worst) chosen.push({ kind: 'median', pair: medianPair })
+
+  const frames = []
+  for (const entry of chosen) {
+    if (frames.length >= ASSIST_FRAME_MAX) break
+    const canvas = byPair.get(entry.pair)
+    if (!canvas) continue
+    const jpegB64 = await canvasToBase64(canvas)
+    if (!jpegB64) continue
+    frames.push({ kind: entry.kind, iou: roundTo(entry.pair.iou, 4), jpegB64 })
+  }
+  return frames
+}
+
 // --- payload ----------------------------------------------------------------
 
 function downsample(list, max) {
@@ -1899,17 +2102,38 @@ function assistSummary(pairs = state.assist.pairs) {
   const ious = pairs.map(pair => pair.iou).filter(value => Number.isFinite(value))
   const localMs = pairs.map(pair => pair.localMs).filter(value => Number.isFinite(value))
   const serverMs = pairs.map(pair => pair.serverMs).filter(value => Number.isFinite(value))
+  const localSharpness = pairs.map(pair => pair.localSharpness).filter(value => Number.isFinite(value))
+  const serverSharpness = pairs.map(pair => pair.serverSharpness).filter(value => Number.isFinite(value))
+  // Stillness is judged only on pairs that have a motion value, i.e. two
+  // consecutive local quads; the first pair of a run and pairs without a local
+  // quad are counted in neither bucket rather than guessed.
+  const measured = pairs.filter(pair => pair.motion != null)
+  const still = measured.filter(pair => pair.motion < ASSIST_STILL_MOTION)
+  const stillIous = still
+    .filter(pair => pair.localQuad && pair.serverQuad && Number.isFinite(pair.iou))
+    .map(pair => pair.iou)
   return {
     mode: assist.mode,
     samples: pairs.length,
     meanIou: ious.length
       ? roundTo(ious.reduce((sum, value) => sum + value, 0) / ious.length, 3)
       : null,
+    // IoU restricted to pairs whose card barely moved: the honest comparison of
+    // boundary quality, without latency and motion mixed in.
+    medianIouStill: roundTo(median(stillIous), 3),
+    stillPairs: still.length,
+    movingPairs: measured.length - still.length,
+    stillThreshold: ASSIST_STILL_MOTION,
+    medianLocalSharpness: roundTo(median(localSharpness), 3),
+    medianServerSharpness: roundTo(median(serverSharpness), 3),
     medianRoundTripMs: round1(median(pairs.map(pair => pair.roundTripMs))),
     medianLocalMs: round1(median(localMs)),
     medianServerMs: round1(median(serverMs)),
     agreedShare: pairs.length
       ? roundTo(pairs.filter(pair => pair.agreed).length / pairs.length, 3)
+      : null,
+    localFoundShare: pairs.length
+      ? roundTo(pairs.filter(pair => pair.localQuad != null).length / pairs.length, 3)
       : null,
     serverFoundShare: pairs.length
       ? roundTo(pairs.filter(pair => pair.serverQuad != null).length / pairs.length, 3)
