@@ -17,7 +17,9 @@ orchestration.
   `CustomCardModal` creator), `CardListItem` (compact list identity/row).
 - **Grouping chrome** — `CardGroupSection` is the collapsible header (sprite, dex
   number, counts, value) shared by the Collection's species grid and the
-  Analytics species list; each caller keeps its own card rendering inside.
+  Analytics species list. `CollectionSpeciesView` builds Collection groups;
+  open panels use `WindowedCardGrid` with `deferOffscreen` to reserve distant
+  groups' height without mounting all their card controllers.
 - **Windowing / virtualization** — `WindowedCardGrid` (backed by
   `@tanstack/react-virtual`) renders large card sets in buffered grid rows using
   the nearest vertical scroller or the page window. It backs the collection

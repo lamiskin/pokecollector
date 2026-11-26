@@ -26,6 +26,12 @@ Four broad responsibilities live here:
 
 ## Design
 
+**Artist previews and collection species.** `artist_gallery` selects three
+distinct card identities with deterministic shared-valuation ranking from the
+artist router's lightweight rows. `collection_species` assigns each collection
+row once to its first valid National Dex species (or Other), preserving copies
+and portfolio value; `pokedex.species_directory` supplies static localized names.
+
 **Session-injected functions.** There is no service base class or repository
 pattern. Every data-touching function accepts a `db: Session` and manages its own
 commit/rollback; long-running jobs open their own session via

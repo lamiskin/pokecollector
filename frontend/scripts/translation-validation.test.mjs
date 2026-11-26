@@ -38,6 +38,19 @@ test('every shipped catalogue passes validation against English', async () => {
   }
 })
 
+test('every locale keeps the card-variant labels the UI uses', async () => {
+  const { parseCatalog } = await import('./translation-validation.mjs')
+  const names = readdirSync(locales).filter(name => name.endsWith('.json') && name !== 'en.json')
+  assert.equal(names.length, 17)
+  for (const name of names) {
+    const catalog = parseCatalog(readFileSync(new URL(name, locales), 'utf8'))
+    assert.equal(typeof catalog.variants?.label, 'string', `${name}: variants.label`)
+    assert.ok(catalog.variants.label.trim(), `${name}: variants.label is empty`)
+    assert.equal(typeof catalog.variants?.Normal, 'string', `${name}: variants.Normal`)
+    assert.ok(catalog.variants.Normal.trim(), `${name}: variants.Normal is empty`)
+  }
+})
+
 test('the normal translation check rejects invalid translated files and missing UI keys', () => {
   const fixture = mkdtempSync(join(tmpdir(), 'translation-check-'))
   try {

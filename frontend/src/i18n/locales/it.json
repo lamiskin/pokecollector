@@ -285,7 +285,10 @@
     "allTypes": "Tutti i tipi",
     "searchCards": "Cerca carte...",
     "clearFilters": "Cancella filtri",
-    "foundIn": "Trovata in"
+    "foundIn": "Trovata in",
+    "otherCards": "Altre carte",
+    "byPokemon": "Per Pokémon",
+    "speciesHint": "Le carte con più Pokémon appaiono una sola volta, sotto la prima specie indicata."
   },
   "printingDetails": {
     "label": "Printing details",
@@ -459,7 +462,11 @@
     "statusSold": "Venduto ✓",
     "statusOwned": "In possesso",
     "soldFor": "Venduto per",
-    "profit": "Profitto"
+    "profit": "Profitto",
+    "printing": "edizione",
+    "printings": "edizioni",
+    "copy": "copia",
+    "copies": "copie"
   },
   "products": {
     "title": "Investimenti in prodotti",
@@ -922,6 +929,31 @@
     "searchLangFilter": "Filtra ricerca per lingua"
   },
   "variants": {
+    "label": "Variante",
+    "none": "- Nessuna variante -",
+    "Normal": "Normale",
+    "Holo": "Holo",
+    "Reverse Holo": "Reverse Holo",
+    "First Edition": "First Edition",
+    "Full Art": "Full Art",
+    "Alt Art": "Alt Art",
+    "Gold": "Oro",
+    "Rainbow": "Arcobaleno",
+    "Illustration Rare": "Illustration Rare",
+    "Special Illustration Rare": "Special Illustration Rare",
+    "Crown Rare": "Crown Rare",
+    "Promo": "Promo",
+    "Art Rare": "Art Rare",
+    "Ultra Rare": "Ultra Rare",
+    "Secret Rare": "Secret Rare",
+    "Shiny": "Shiny",
+    "allVariants": "Tutte le varianti",
+    "filterVariant": "Variante"
+  },
+  "artists": {
+    "galleryView": "Vista galleria",
+    "listView": "Vista elenco",
+    "featuredCards": "Carte in evidenza",
     "label": "Variante",
     "none": "- Nessuna variante -",
     "Normal": "Normale",

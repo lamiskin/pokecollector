@@ -51,6 +51,11 @@ Routers are registered centrally in `backend/main.py` via
   `services/` (`card_upsert`, `card_state`, `scan_queue`, `scan_storage`,
   `public_profile`, `pokemon_api`, `scheduler`, …). Routers import these and
   keep endpoints thin.
+- **Artist and species views.** `cards.py` serves exact/contains artist
+  checklists and the paginated directory using shared valuation and bounded
+  `artist_gallery` previews. `collection.py` delegates `/by-species` grouping
+  to `collection_species`; `pokedex.py` exposes both `/directory` (wrapped
+  compatibility response) and `/species` (plain static catalogue).
 - **Physical binder overlay.** `binders.router` includes `binder_layouts.router`
   for owner-scoped layout reads, previews, configuration, one-copy placement and
   guarded undo. `cards.py` supplies owner-scoped location lookup; `public.py`

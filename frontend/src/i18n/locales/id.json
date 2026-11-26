@@ -286,7 +286,10 @@
     "allTypes": "Semua Tipe",
     "searchCards": "Cari kartu...",
     "clearFilters": "Hapus filter",
-    "foundIn": "Ditemukan di"
+    "foundIn": "Ditemukan di",
+    "otherCards": "Kartu lain",
+    "byPokemon": "Menurut Pokémon",
+    "speciesHint": "Kartu dengan beberapa Pokémon muncul sekali di spesies pertama yang tercantum."
   },
   "printingDetails": {
     "label": "Printing details",
@@ -460,7 +463,11 @@
     "statusSold": "Terjual ✓",
     "statusOwned": "Dalam Kepemilikan",
     "soldFor": "Terjual seharga",
-    "profit": "Laba"
+    "profit": "Laba",
+    "printing": "cetakan",
+    "printings": "cetakan",
+    "copy": "salinan",
+    "copies": "salinan"
   },
   "products": {
     "title": "Investasi Produk",
@@ -923,6 +930,31 @@
     "searchLangFilter": "Filter pencarian berdasarkan bahasa"
   },
   "variants": {
+    "label": "Varian",
+    "none": "- Tanpa Varian -",
+    "Normal": "Normal",
+    "Holo": "Holo",
+    "Reverse Holo": "Reverse Holo",
+    "First Edition": "First Edition",
+    "Full Art": "Full Art",
+    "Alt Art": "Alt Art",
+    "Gold": "Gold",
+    "Rainbow": "Rainbow",
+    "Illustration Rare": "Illustration Rare",
+    "Special Illustration Rare": "Special Illustration Rare",
+    "Crown Rare": "Crown Rare",
+    "Promo": "Promo",
+    "Art Rare": "Art Rare",
+    "Ultra Rare": "Ultra Rare",
+    "Secret Rare": "Secret Rare",
+    "Shiny": "Shiny",
+    "allVariants": "Semua Varian",
+    "filterVariant": "Varian"
+  },
+  "artists": {
+    "galleryView": "Tampilan galeri",
+    "listView": "Tampilan daftar",
+    "featuredCards": "Kartu unggulan",
     "label": "Varian",
     "none": "- Tanpa Varian -",
     "Normal": "Normal",

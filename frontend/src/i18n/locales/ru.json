@@ -285,7 +285,10 @@
     "allTypes": "Все типы",
     "searchCards": "Искать карты...",
     "clearFilters": "Очистить фильтры",
-    "foundIn": "Найдена в"
+    "foundIn": "Найдена в",
+    "otherCards": "Другие карты",
+    "byPokemon": "По покемонам",
+    "speciesHint": "Карты с несколькими покемонами показаны один раз, у первого указанного вида."
   },
   "printingDetails": {
     "label": "Printing details",
@@ -459,7 +462,11 @@
     "statusSold": "Продано ✓",
     "statusOwned": "В наличии",
     "soldFor": "Продано за",
-    "profit": "Прибыль"
+    "profit": "Прибыль",
+    "printing": "издание",
+    "printings": "издания",
+    "copy": "копия",
+    "copies": "копии"
   },
   "products": {
     "title": "Инвестиции в товары",
@@ -922,6 +929,31 @@
     "searchLangFilter": "Фильтр поиска по языку"
   },
   "variants": {
+    "label": "Вариант",
+    "none": "- Нет варианта -",
+    "Normal": "Normal",
+    "Holo": "Holo",
+    "Reverse Holo": "Reverse Holo",
+    "First Edition": "First Edition",
+    "Full Art": "Full Art",
+    "Alt Art": "Alt Art",
+    "Gold": "Gold",
+    "Rainbow": "Rainbow",
+    "Illustration Rare": "Illustration Rare",
+    "Special Illustration Rare": "Special Illustration Rare",
+    "Crown Rare": "Crown Rare",
+    "Promo": "Promo",
+    "Art Rare": "Art Rare",
+    "Ultra Rare": "Ultra Rare",
+    "Secret Rare": "Secret Rare",
+    "Shiny": "Shiny",
+    "allVariants": "Все варианты",
+    "filterVariant": "Вариант"
+  },
+  "artists": {
+    "galleryView": "Вид галереи",
+    "listView": "Вид списка",
+    "featuredCards": "Избранные карты",
     "label": "Вариант",
     "none": "- Нет варианта -",
     "Normal": "Normal",

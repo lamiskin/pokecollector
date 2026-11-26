@@ -304,6 +304,9 @@
     "alreadyOwned": "Allerede i samlingen"
   },
   "collection": {
+    "byPokemon": "Efter Pokémon",
+    "otherCards": "Andre kort",
+    "speciesHint": "Kort med flere Pokémon vises én gang under den først angivne art.",
     "title": "Samling",
     "userCollection": "Samling",
     "ownPhoto": "Dit eget foto af dette kort",
@@ -777,6 +780,10 @@
     "retreatSupport": "Retreat-support"
   },
   "analytics": {
+    "printing": "udgave",
+    "printings": "udgaver",
+    "copy": "eksemplar",
+    "copies": "eksemplarer",
     "title": "Analyse",
     "subtitle": "Dyb indsigt i din samling",
     "newSetsDetected": "nye sæt opdaget",
@@ -1623,6 +1630,31 @@
     "searchLangFilter": "Filtrer søgning efter sprog"
   },
   "variants": {
+    "label": "Variant",
+    "none": "- Ingen variant -",
+    "Normal": "Normal",
+    "Holo": "Holo",
+    "Reverse Holo": "Reverse Holo",
+    "First Edition": "First Edition",
+    "Full Art": "Full Art",
+    "Alt Art": "Alt Art",
+    "Gold": "Gold",
+    "Rainbow": "Rainbow",
+    "Illustration Rare": "Illustration Rare",
+    "Special Illustration Rare": "Special Illustration Rare",
+    "Crown Rare": "Crown Rare",
+    "Promo": "Promo",
+    "Art Rare": "Art Rare",
+    "Ultra Rare": "Ultra Rare",
+    "Secret Rare": "Secret Rare",
+    "Shiny": "Shiny",
+    "allVariants": "Alle varianter",
+    "filterVariant": "Variant"
+  },
+  "artists": {
+    "galleryView": "Gallerivisning",
+    "listView": "Listevisning",
+    "featuredCards": "Udvalgte kort",
     "label": "Variant",
     "none": "- Ingen variant -",
     "Normal": "Normal",

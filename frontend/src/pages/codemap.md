@@ -28,6 +28,14 @@ of that routing table.
 
 ## Design
 
+- **Artist and species views.** `Artists` requests completion-sorted directory
+  pages with three-card previews; `ArtistChecklist` requests exact artist matches
+  and the account's valuation field. Collection's Pokémon mode delegates to
+  `CollectionSpeciesView`, while Analytics switches its Duplicates tab between
+  cards and species. Both grouped views use the shared `WindowedCardGrid` with
+  offscreen deferral per group, independent folding and existing card dialogs;
+  species analytics fetches only when selected.
+
 - **OIDC completion.** `OidcComplete` finishes the cookie-bound provider handoff
   outside the authenticated app shell. When the server requests a name for a new
   account, it shows a retryable naming form without establishing a session until

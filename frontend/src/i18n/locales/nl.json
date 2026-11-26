@@ -285,7 +285,10 @@
     "allTypes": "Alle Types",
     "searchCards": "Zoek kaarten...",
     "clearFilters": "Filters wissen",
-    "foundIn": "Gevonden in"
+    "foundIn": "Gevonden in",
+    "otherCards": "Andere kaarten",
+    "byPokemon": "Per Pokémon",
+    "speciesHint": "Kaarten met meerdere Pokémon staan één keer bij de eerst vermelde soort."
   },
   "printingDetails": {
     "label": "Printing details",
@@ -459,7 +462,11 @@
     "statusSold": "Verkocht ✓",
     "statusOwned": "In Bezit",
     "soldFor": "Verkocht voor",
-    "profit": "Winst"
+    "profit": "Winst",
+    "printing": "uitgave",
+    "printings": "uitgaven",
+    "copy": "exemplaar",
+    "copies": "exemplaren"
   },
   "products": {
     "title": "Product Investeringen",
@@ -922,6 +929,31 @@
     "searchLangFilter": "Filter zoekopdracht op taal"
   },
   "variants": {
+    "label": "Variant",
+    "none": "- Geen Variant -",
+    "Normal": "Normal",
+    "Holo": "Holo",
+    "Reverse Holo": "Reverse Holo",
+    "First Edition": "First Edition",
+    "Full Art": "Full Art",
+    "Alt Art": "Alt Art",
+    "Gold": "Gold",
+    "Rainbow": "Rainbow",
+    "Illustration Rare": "Illustration Rare",
+    "Special Illustration Rare": "Special Illustration Rare",
+    "Crown Rare": "Crown Rare",
+    "Promo": "Promo",
+    "Art Rare": "Art Rare",
+    "Ultra Rare": "Ultra Rare",
+    "Secret Rare": "Secret Rare",
+    "Shiny": "Shiny",
+    "allVariants": "Alle Varianten",
+    "filterVariant": "Variant"
+  },
+  "artists": {
+    "galleryView": "Galerijweergave",
+    "listView": "Lijstweergave",
+    "featuredCards": "Uitgelichte kaarten",
     "label": "Variant",
     "none": "- Geen Variant -",
     "Normal": "Normal",

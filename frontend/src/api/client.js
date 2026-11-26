@@ -338,9 +338,12 @@ export const addToWishlist = (data) => api.post('/wishlist/', data)
 export const updateWishlistItem = (id, data) => api.put(`/wishlist/${id}`, data)
 export const removeFromWishlist = (id) => api.delete(`/wishlist/${id}`)
 
+export const getPokedexDirectory = () => api.get('/pokedex/directory').then(r => r.data)
+export const getSpeciesDirectory = () => api.get('/pokedex/species').then(r => r.data)
+export const getCollectionBySpecies = (params) => api.get('/collection/by-species', { params })
+
 // National Pokédex
 export const getPokedex = (params = {}) => api.get('/pokedex', { params }).then(r => r.data)
-export const getPokedexDirectory = () => api.get('/pokedex/directory').then(r => r.data)
 export const getPokedexSpecies = (dexId, params = {}) => api.get(`/pokedex/${dexId}`, { params }).then(r => r.data)
 
 // Binders
@@ -393,8 +396,8 @@ export const exportBinderCsv = (binderId) => {
 export const getDashboard = (params) => api.get('/dashboard/', { params })
 
 // Analytics
-export const getDuplicates = (params = {}) => api.get('/analytics/duplicates', { params })
 export const getSpeciesDuplicates = (params = {}) => api.get('/analytics/species-duplicates', { params })
+export const getDuplicates = (params = {}) => api.get('/analytics/duplicates', { params })
 export const getTopMovers = (days, params = {}) => api.get('/analytics/top-movers', { params: { ...params, days } })
 export const getRarityStats = (params = {}) => api.get('/analytics/rarity-stats', { params })
 export const getInvestmentTracker = (params = {}) => api.get('/analytics/investment-tracker', { params })

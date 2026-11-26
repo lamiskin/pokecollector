@@ -285,7 +285,10 @@
     "allTypes": "Alla typer",
     "searchCards": "Sök kort...",
     "clearFilters": "Rensa filter",
-    "foundIn": "Hittad i"
+    "foundIn": "Hittad i",
+    "otherCards": "Övriga kort",
+    "byPokemon": "Efter Pokémon",
+    "speciesHint": "Kort med flera Pokémon visas en gång under den först angivna arten."
   },
   "printingDetails": {
     "label": "Printing details",
@@ -459,7 +462,11 @@
     "statusSold": "Såld ✓",
     "statusOwned": "I ägo",
     "soldFor": "Såld för",
-    "profit": "Vinst"
+    "profit": "Vinst",
+    "printing": "utgåva",
+    "printings": "utgåvor",
+    "copy": "exemplar",
+    "copies": "exemplar"
   },
   "products": {
     "title": "Produktinvesteringar",
@@ -922,6 +929,31 @@
     "searchLangFilter": "Filtrera sökning efter språk"
   },
   "variants": {
+    "label": "Variant",
+    "none": "- Ingen variant -",
+    "Normal": "Normal",
+    "Holo": "Holo",
+    "Reverse Holo": "Reverse Holo",
+    "First Edition": "First Edition",
+    "Full Art": "Full Art",
+    "Alt Art": "Alt Art",
+    "Gold": "Guld",
+    "Rainbow": "Regnbåge",
+    "Illustration Rare": "Illustration Rare",
+    "Special Illustration Rare": "Special Illustration Rare",
+    "Crown Rare": "Crown Rare",
+    "Promo": "Promo",
+    "Art Rare": "Art Rare",
+    "Ultra Rare": "Ultra Rare",
+    "Secret Rare": "Secret Rare",
+    "Shiny": "Shiny",
+    "allVariants": "Alla varianter",
+    "filterVariant": "Variant"
+  },
+  "artists": {
+    "galleryView": "Gallerivy",
+    "listView": "Listvy",
+    "featuredCards": "Utvalda kort",
     "label": "Variant",
     "none": "- Ingen variant -",
     "Normal": "Normal",

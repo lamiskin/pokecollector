@@ -285,7 +285,10 @@
     "allTypes": "모든 타입",
     "searchCards": "카드 검색...",
     "clearFilters": "필터 지우기",
-    "foundIn": "획득처"
+    "foundIn": "획득처",
+    "otherCards": "기타 카드",
+    "byPokemon": "포켓몬별",
+    "speciesHint": "여러 포켓몬이 있는 카드는 첫 번째 종에 한 번만 표시됩니다."
   },
   "printingDetails": {
     "label": "Printing details",
@@ -459,7 +462,11 @@
     "statusSold": "판매됨 ✓",
     "statusOwned": "보유 중",
     "soldFor": "판매가",
-    "profit": "이익"
+    "profit": "이익",
+    "printing": "종류",
+    "printings": "종류",
+    "copy": "장",
+    "copies": "장"
   },
   "products": {
     "title": "상품 투자",
@@ -922,6 +929,31 @@
     "searchLangFilter": "언어별 검색 필터"
   },
   "variants": {
+    "label": "변형",
+    "none": "- 변형 없음 -",
+    "Normal": "Normal",
+    "Holo": "Holo",
+    "Reverse Holo": "Reverse Holo",
+    "First Edition": "First Edition",
+    "Full Art": "Full Art",
+    "Alt Art": "Alt Art",
+    "Gold": "Gold",
+    "Rainbow": "Rainbow",
+    "Illustration Rare": "Illustration Rare",
+    "Special Illustration Rare": "Special Illustration Rare",
+    "Crown Rare": "Crown Rare",
+    "Promo": "Promo",
+    "Art Rare": "Art Rare",
+    "Ultra Rare": "Ultra Rare",
+    "Secret Rare": "Secret Rare",
+    "Shiny": "Shiny",
+    "allVariants": "모든 변형",
+    "filterVariant": "변형"
+  },
+  "artists": {
+    "galleryView": "갤러리 보기",
+    "listView": "목록 보기",
+    "featuredCards": "대표 카드",
     "label": "변형",
     "none": "- 변형 없음 -",
     "Normal": "Normal",
