@@ -19,11 +19,12 @@ import math
 import os
 import re
 import threading
+import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from PIL import Image
 
@@ -57,6 +58,14 @@ CACHE_LIMIT = 64
 # ``auto`` follows ``SCAN_CROP_SOURCE``; ``phone`` forces the geometry-only
 # path so the review page can show what the fallback would have produced.
 CROP_SOURCES = ("auto", "phone")
+
+# Detection-only comparison with CollectorVision. The image is bounded before
+# decoding (bytes) and before ``load`` (pixels); the detector's own frame is
+# capped at ``DETECTION_MAX_EDGE`` so a phone photo stays inside a live-request
+# latency budget. These are the capture lab's limits, not the scanner's.
+DETECT_MAX_BYTES = 8 * 1024 * 1024
+DETECT_MAX_PIXELS = 20_000_000
+DETECT_FORMATS = ("JPEG", "PNG")
 
 
 @dataclass(frozen=True)
@@ -562,4 +571,88 @@ def proposal_turned(stem: str, user: User = Depends(get_current_user)):
     proposal = _proposal_for(stem, image_path, geometry_path, geometry)
     return Response(
         content=proposal.turned, media_type="image/jpeg", headers=NO_STORE
+    )
+
+
+@router.post("/cv-detect")
+async def cv_detect(
+    image: UploadFile = File(...),
+    user: User = Depends(get_current_user),
+):
+    """CollectorVision's card boundary for one uploaded image.
+
+    Detection only: no dewarp, embedder, catalogue lookup or disk write. The
+    page draws these corners beside the phone's own overlay so the two
+    detectors can be compared on a real capture. An unavailable library or
+    detector is a 503 the page shows; a frame with no card is a normal 200 with
+    ``detected: false``.
+
+    Bounds: the upload is capped at 8 MiB before decoding and 20 MP before
+    ``load``; the long edge is reduced to ``DETECTION_MAX_EDGE`` (1600 px) for
+    detection latency and the returned corners are normalised to the supplied
+    image, so the page can draw them without knowing about the downscale.
+    """
+    started = time.perf_counter()
+    data = await image.read(DETECT_MAX_BYTES + 1)
+    if not data:
+        raise HTTPException(
+            status_code=422, detail="The image is empty.", headers=NO_STORE
+        )
+    if len(data) > DETECT_MAX_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail="Image is larger than the 8 MiB limit.",
+            headers=NO_STORE,
+        )
+
+    try:
+        with Image.open(io.BytesIO(data)) as opened:
+            if opened.format not in DETECT_FORMATS:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Expected a JPEG or PNG image.",
+                    headers=NO_STORE,
+                )
+            width, height = opened.size
+            if width * height > DETECT_MAX_PIXELS:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Image is larger than the 20 MP limit.",
+                    headers=NO_STORE,
+                )
+            opened.load()
+            rgb = opened.convert("RGB")
+    except HTTPException:
+        raise
+    except Exception:  # noqa: BLE001 - an unreadable upload is a client error
+        raise HTTPException(
+            status_code=422,
+            detail="The image could not be read.",
+            headers=NO_STORE,
+        )
+
+    try:
+        probe = cv_crop.detect_card(rgb)
+    except cv_crop.DetectionUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"CollectorVision unavailable: {exc}",
+            headers=NO_STORE,
+        )
+
+    total_ms = (time.perf_counter() - started) * 1000.0
+    return JSONResponse(
+        content={
+            "detected": probe.detected,
+            "corners": probe.corners,
+            "confidence": probe.confidence,
+            "sharpness": probe.sharpness,
+            "detection": probe.detection,
+            "ms": {
+                "detect": round(probe.detect_ms, 2),
+                "total": round(total_ms, 2),
+            },
+            "resized": probe.resized,
+        },
+        headers=NO_STORE,
     )

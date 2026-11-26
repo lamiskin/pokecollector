@@ -84,6 +84,13 @@ CROP_RASTERS = (CROP_RASTER_NATIVE, CROP_RASTER_EMBEDDER)
 RETRY_BORDER_FRACTION = 0.12
 DETECTION_AUTO = "auto"
 DETECTION_RETRY = "retry_border_replicate"
+DETECTION_NONE = "none"
+
+# Detection-only requests (the capture-lab comparison) are capped on the long
+# edge so a phone photo cannot turn into a multi-second inference. The detector
+# resizes to its own 384px input anyway; 1600 keeps small cards legible while
+# bounding decode/resize cost. Normalised corners are unaffected by the scale.
+DETECTION_MAX_EDGE = 1600
 
 # Artifact/manifest identity for a CollectorVision proposal. It lives beside the
 # phone helper's ``STRAIGHTEN_VERSION`` so a later rule set writes a new name.
@@ -109,6 +116,16 @@ _engine_lock = threading.Lock()
 _engine: "_Engine | None" = None
 _unavailable_reason: str | None = None
 _warned_unknown: set[str] = set()
+
+# The library import and the corner detector are cached separately from the
+# full proposal engine. Detection needs neither the catalogue nor the embedder,
+# so the capture-lab comparison can run on an image whose catalogue is missing;
+# the detector is still a single instance shared with proposals.
+_library_lock = threading.Lock()
+_library: Any | None = None
+_detector_lock = threading.Lock()
+_detector: Any | None = None
+_detector_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -136,6 +153,28 @@ class ProposalCrop:
     # ``native`` when the original image was warped with the detected corners;
     # ``embedder`` when only the library's dewarp raster was usable.
     crop_raster: str = CROP_RASTER_NATIVE
+
+
+@dataclass(frozen=True)
+class DetectionProbe:
+    """CollectorVision's card boundary, in the supplied image's coordinates."""
+
+    detected: bool
+    # Four normalised (u, v) points in the supplied image, or ``None`` when no
+    # card was found. The detection frame may be downscaled or padded, but the
+    # values are already mapped back to the caller's image.
+    corners: list[list[float]] | None
+    confidence: float | None
+    sharpness: float | None
+    detection: str
+    # Milliseconds spent inside the detector call(s), including a retry.
+    detect_ms: float
+    # True when the long edge was reduced before detection.
+    resized: bool
+
+
+class DetectionUnavailable(RuntimeError):
+    """CollectorVision's detector cannot be loaded on this instance."""
 
 
 @dataclass
@@ -177,10 +216,15 @@ def crop_source() -> str:
 
 def reset_state() -> None:
     """Drop the lazily built engine and its warnings (test hook)."""
-    global _engine, _unavailable_reason
+    global _engine, _unavailable_reason, _library, _detector, _detector_reason
     with _engine_lock:
         _engine = None
         _unavailable_reason = None
+        with _detector_lock:
+            _detector = None
+            _detector_reason = None
+            with _library_lock:
+                _library = None
     _warned_unknown.clear()
 
 
@@ -189,6 +233,50 @@ def _import_library():
     import collector_vision
 
     return collector_vision
+
+
+def _load_library():
+    """Import CollectorVision once and share the module with every consumer."""
+    global _library
+    if _library is not None:
+        return _library
+    with _library_lock:
+        if _library is None:
+            _library = _import_library()
+        return _library
+
+
+def _detector_state() -> tuple[Any | None, str | None]:
+    """The shared detector, or ``(None, reason)`` when it cannot be built."""
+    global _detector, _detector_reason
+    if _detector is not None:
+        return _detector, None
+    with _detector_lock:
+        if _detector is not None:
+            return _detector, None
+        if _detector_reason is not None:
+            return None, _detector_reason
+        try:
+            cvg = _load_library()
+            _detector = cvg.NeuralCornerDetector(provider="cpu")
+        except Exception as exc:  # noqa: BLE001 - absence is a 503, not a crash
+            _detector_reason = f"{type(exc).__name__}: {exc}"
+            logger.warning(
+                "CollectorVision is unavailable; detection and proposals fall back: %s",
+                _detector_reason,
+            )
+            return None, _detector_reason
+        return _detector, None
+
+
+def load_detector() -> tuple[Any | None, str | None]:
+    """The one corner detector shared by proposals and the detection endpoint.
+
+    Returns ``(detector, None)`` when it is available and ``(None, reason)``
+    when CollectorVision cannot be imported or its weights are missing. The
+    reason is cached, so a broken install costs one warning, not one per call.
+    """
+    return _detector_state()
 
 
 def _resolve_embedder(cvg, catalog) -> tuple[Any, Path]:
@@ -228,10 +316,13 @@ def _load_engine() -> "_Engine | None":
         if _unavailable_reason is not None:
             return None
         started = time.perf_counter()
+        detector, detector_reason = _detector_state()
+        if detector is None:
+            _unavailable_reason = detector_reason or "detector unavailable"
+            return None
         try:
-            cvg = _import_library()
+            cvg = _load_library()
             catalog = cvg.Catalog.load("pokemon", offline=True)
-            detector = cvg.NeuralCornerDetector(provider="cpu")
             embedder, embedder_path = _resolve_embedder(cvg, catalog)
             rotate_180 = getattr(cvg, "rotate_card_180", None)
             if rotate_180 is None:
@@ -584,6 +675,112 @@ def _restore_card_aspect(square: Image.Image) -> Image.Image:
     if (rgb.width, rgb.height) == (width, height):
         return rgb
     return rgb.resize((width, height), Image.Resampling.LANCZOS)
+
+
+def _number(value: Any) -> float | None:
+    """A finite float from a detector result, or ``None``."""
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def detect_card(
+    rgb_image: Image.Image, max_edge: int = DETECTION_MAX_EDGE
+) -> DetectionProbe:
+    """Locate the card's four corners without dewarping or identifying.
+
+    This mirrors the detection half of ``propose_with_collectorvision`` -- the
+    same 12% ``BORDER_REPLICATE`` retry when the card reaches the frame's edge
+    -- and stops at the corners. It never warps, embeds, searches a catalogue or
+    writes anything, so it works whenever the library and detector weights are
+    present even if the catalogue is not.
+
+    A long edge above ``max_edge`` is downscaled first for latency; the returned
+    corners are normalised, so they already describe the supplied image. Raises
+    ``DetectionUnavailable`` when CollectorVision cannot be loaded; a detector
+    error or unusable corners are reported as ``detected=False`` instead.
+    """
+    detector, reason = load_detector()
+    if detector is None:
+        raise DetectionUnavailable(reason or "CollectorVision detector unavailable")
+
+    rgb = rgb_image if rgb_image.mode == "RGB" else rgb_image.convert("RGB")
+    width, height = rgb.size
+    resized = False
+    if max_edge > 0 and max(width, height) > max_edge:
+        scale = max_edge / float(max(width, height))
+        rgb = rgb.resize(
+            (max(1, round(width * scale)), max(1, round(height * scale))),
+            Image.Resampling.LANCZOS,
+        )
+        resized = True
+    frame_width, frame_height = rgb.size
+
+    started = time.perf_counter()
+    try:
+        bgr = _to_bgr(rgb)
+        detection = detector.detect(bgr)
+        mode = DETECTION_AUTO
+        pad = 0
+        if not _detected(detection):
+            # The card reaches the frame's edge: replicate a border and retry.
+            padded = _pad_border(bgr)
+            pad = _padding_for((frame_height, frame_width))
+            detection = detector.detect(padded)
+            mode = DETECTION_RETRY
+    except Exception as exc:  # noqa: BLE001 - a comparison request must not 500
+        logger.warning(
+            "CollectorVision detection failed: %s: %s", type(exc).__name__, exc
+        )
+        detect_ms = (time.perf_counter() - started) * 1000.0
+        return DetectionProbe(
+            False, None, None, None, DETECTION_NONE, detect_ms, resized
+        )
+    detect_ms = (time.perf_counter() - started) * 1000.0
+
+    confidence = _number(getattr(detection, "confidence", None))
+    sharpness = _number(getattr(detection, "sharpness", None))
+    if not _detected(detection):
+        return DetectionProbe(
+            False, None, confidence, sharpness, DETECTION_NONE, detect_ms, resized
+        )
+
+    try:
+        import numpy as np
+
+        points = _corner_pixels(detection.corners, frame_width, frame_height, pad)
+        # Normalised coordinates are scale-invariant: dividing the padded frame's
+        # pixels by the detection frame's size maps them straight back onto the
+        # supplied image, downscaled or not. Clamp the retry's slight overhang.
+        normalised = np.asarray(points, dtype=np.float64) / np.array(
+            [frame_width, frame_height], dtype=np.float64
+        )
+        if not np.all(np.isfinite(normalised)):
+            raise ValueError("corners are not finite")
+        corners = [
+            [
+                round(float(np.clip(point[0], 0.0, 1.0)), 6),
+                round(float(np.clip(point[1], 0.0, 1.0)), 6),
+            ]
+            for point in normalised
+        ]
+    except Exception as exc:  # noqa: BLE001 - malformed corners are no detection
+        logger.warning(
+            "CollectorVision returned unusable corners: %s: %s",
+            type(exc).__name__,
+            exc,
+        )
+        return DetectionProbe(
+            False, None, confidence, sharpness, DETECTION_NONE, detect_ms, resized
+        )
+
+    return DetectionProbe(
+        True, corners, confidence, sharpness, mode, detect_ms, resized
+    )
 
 
 def propose_with_collectorvision(rgb_image: Image.Image | None) -> ProposalCrop | None:
