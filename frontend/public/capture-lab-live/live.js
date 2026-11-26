@@ -108,9 +108,15 @@ const els = {
 }
 
 const HARDWARE = navigator.hardwareConcurrency || 1
-// min(4, hardwareConcurrency) rounded down to an offered cap (a 3-core phone
-// gets 2, not a cap the worker cannot honour).
-const DEFAULT_CAP = THREAD_CAPS.filter(cap => cap <= Math.min(DEFAULT_THREAD_CAP, HARDWARE)).pop() || 1
+// Measured on the collector's phone (8 cores, Firefox Android): cap 2 gave the
+// best cadence (~205 ms, 3.5/s), while cap 4 was markedly worse (~264-385 ms,
+// 1.9-2.6/s) - oversubscribing a phone's big.LITTLE cores costs more in thread
+// contention than it wins in parallelism. Desktop-class core counts do scale
+// (cap 4 ~3x faster than cap 1 on 16 cores), so the default splits by cores
+// rather than always asking for four.
+const DEFAULT_CAP = THREAD_CAPS
+  .filter(cap => cap <= Math.min(HARDWARE <= 8 ? 2 : DEFAULT_THREAD_CAP, HARDWARE))
+  .pop() || 1
 
 const state = {
   running: false,
