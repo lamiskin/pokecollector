@@ -18,12 +18,36 @@ const conf = fs.readFileSync(path.join(root, 'nginx.conf'), 'utf8').replace(/\r\
 const snippet = fs.readFileSync(path.join(root, 'nginx-security-headers.conf'), 'utf8');
 const INCLUDE = /include\s+\/etc\/nginx\/snippets\/pc-security-headers\.conf;/;
 
-// Split the server block into its top-level location blocks (no nested braces in this file).
+// Split the server block into its top-level location blocks. Braces are counted
+// rather than matched with a regex because `/detector/` nests a `types` block;
+// a `[^}]*` body would stop at that inner brace and silently hide the location's
+// own headers from the checks below.
 function locations() {
-  return [...conf.matchAll(/^\s{4}location\s+([^{]+?)\s*\{([^}]*)\}/gm)].map((m) => ({
-    name: m[1],
-    body: m[2],
-  }));
+  const found = [];
+  const lines = conf.split('\n');
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = /^\s{4}location\s+([^{]+?)\s*\{/.exec(lines[index]);
+    if (!match) continue;
+
+    const body = [];
+    let depth = 0;
+    let lineIndex = index;
+    let cursor = lines[lineIndex].indexOf('{');
+    for (;;) {
+      const line = lines[lineIndex] ?? '';
+      for (let i = cursor; i < line.length; i += 1) {
+        if (line[i] === '{') depth += 1;
+        else if (line[i] === '}') depth -= 1;
+      }
+      if (depth === 0 || lineIndex + 1 >= lines.length) break;
+      lineIndex += 1;
+      cursor = 0;
+      body.push(lines[lineIndex]);
+    }
+    found.push({ name: match[1], body: body.join('\n') });
+    index = lineIndex;
+  }
+  return found;
 }
 
 test('security header snippet carries the CSP with script-src self', () => {
@@ -124,7 +148,16 @@ test('cv-js-lab is cross-origin isolated without losing the shared headers', () 
   // Missing lab files must 404 rather than fall back to the SPA shell.
   assert.match(lab.body, /try_files\s+\$uri\s+\$uri\/\s+=404;/);
 
-  // COEP server-wide would block third-party card art: it must stay scoped.
+  // COOP/COEP must not be literal at server level: COEP there would isolate the
+  // whole app and block third-party card art. The lab location sets both itself.
   const serverLevel = conf.split(/^\s{4}location\s/m)[0];
   assert.doesNotMatch(serverLevel, /Cross-Origin-(Opener|Embedder)-Policy/);
+
+  // The detector assets need their own COEP: the lab's multi-threaded WASM spawns
+  // nested pthread workers from /detector/, and Chromium refuses those responses
+  // without it (which hangs session creation silently).
+  const detector = locations().find((loc) => loc.name.includes('/detector/'));
+  assert.ok(detector, 'location ^~ /detector/ missing');
+  assert.match(detector.body, /add_header\s+Cross-Origin-Embedder-Policy\s+"require-corp"\s+always;/);
+  assert.match(detector.body, INCLUDE, 'location /detector/ must include the security headers');
 });

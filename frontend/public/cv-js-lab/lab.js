@@ -226,8 +226,11 @@ function stopWorker() {
     state.worker.terminate()
     state.worker = null
   }
+  // Release a pump that is awaiting a result that will never arrive.
+  const reject = state.pendingReject
   state.pendingResolve = null
   state.pendingReject = null
+  reject?.(new Error('stopped'))
 }
 
 // ---------------------------------------------------------------- camera
