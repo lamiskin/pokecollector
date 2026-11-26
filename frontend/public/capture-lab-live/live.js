@@ -79,7 +79,14 @@ const state = {
   frameSize: null,
   cameraMaximum: null,
   cameraSettings: null,
-  threads: { requested: 0, granted: 0, isolated: false, hasSAB: false, hardware: 1 },
+  threads: {
+    requested: 0,
+    granted: 0,
+    // Known before Start: the page is already isolated (or not) at load time.
+    isolated: window.crossOriginIsolated === true,
+    hasSAB: typeof SharedArrayBuffer !== 'undefined',
+    hardware: navigator.hardwareConcurrency || 1,
+  },
   quad: null,
   lastQuadAt: 0,
   lastUsableAt: 0,
@@ -327,8 +334,18 @@ function mapToStage(quad, rect) {
   ])
 }
 
+let lastTelemetryAt = 0
+
 function drawFrame() {
   window.requestAnimationFrame(drawFrame)
+  const now = performance.now()
+  // Keep detections/s honest when results stop arriving: it is recomputed from
+  // the timestamp window, so it needs a clock of its own, not just new results.
+  if (now - lastTelemetryAt > 500) {
+    lastTelemetryAt = now
+    renderTelemetry()
+  }
+
   const canvas = els.overlay
   const rect = els.stage.getBoundingClientRect()
   if (!rect.width || !rect.height) return
@@ -347,7 +364,7 @@ function drawFrame() {
 
   updatePhase()
 
-  const fresh = state.quad && performance.now() - state.lastQuadAt < QUAD_STALE_MS
+  const fresh = state.quad && now - state.lastQuadAt < QUAD_STALE_MS
   if (!fresh) {
     hideBlur()
     return
@@ -359,7 +376,7 @@ function drawFrame() {
     return
   }
 
-  const detected = performance.now() - state.lastUsableAt < SOLID_HOLD_MS
+  const detected = now - state.lastUsableAt < SOLID_HOLD_MS
   const path = toPath(points)
 
   ctx.save()
@@ -460,7 +477,16 @@ function onWorkerMessage(event) {
 
   if (message.type === 'error') {
     state.inFlight = false
-    if (message.seq != null && message.seq !== state.seq) return
+    // An init failure carries no seq: reject the ready promise so startCamera()
+    // reports it immediately instead of waiting out READY_TIMEOUT_MS.
+    if (message.seq == null) {
+      const reject = state.readyReject
+      state.readyResolve = null
+      state.readyReject = null
+      reject?.(new Error(message.message || 'The detector failed to load.'))
+      return
+    }
+    if (message.seq !== state.seq) return
     fail('Detection failed', message.message || 'The detector worker reported an error.')
   }
 }
@@ -500,8 +526,12 @@ async function startWorker() {
     state.readyReject = reject
   })
 
-  worker.onmessage = onWorkerMessage
+  worker.onmessage = event => {
+    if (state.worker !== worker) return
+    onWorkerMessage(event)
+  }
   worker.onerror = event => {
+    if (state.worker !== worker) return
     const error = new Error(event?.message || 'the detector worker crashed')
     state.readyReject?.(error)
     state.readyReject = null
@@ -584,7 +614,7 @@ async function tick() {
   const width = Math.max(1, Math.round(video.videoWidth * scale))
   const height = Math.max(1, Math.round(video.videoHeight * scale))
 
-  const canvas = document.getElementById('frame-source')
+  const canvas = els.frameSource || (els.frameSource = document.getElementById('frame-source'))
   if (canvas.width !== width) canvas.width = width
   if (canvas.height !== height) canvas.height = height
   canvas.getContext('2d').drawImage(video, 0, 0, width, height)
@@ -690,8 +720,10 @@ async function startCamera() {
   }
 
   try { state.cameraSettings = track?.getSettings?.() || {} } catch { state.cameraSettings = {} }
-  if (els.video.videoWidth && els.video.videoHeight) {
-    els.stage.style.aspectRatio = `${els.video.videoWidth} / ${els.video.videoHeight}`
+  const aspectWidth = state.cameraSettings.width || els.video.videoWidth
+  const aspectHeight = state.cameraSettings.height || els.video.videoHeight
+  if (aspectWidth && aspectHeight) {
+    els.stage.style.aspectRatio = `${aspectWidth} / ${aspectHeight}`
   }
   renderTelemetry()
 
@@ -743,6 +775,10 @@ function stopCamera() {
   hideBlur()
   clearOverlay()
   resetTelemetry()
+  // resetTelemetry() reads the video, whose intrinsic size may survive until the
+  // next metadata event; clear the two camera-derived readouts explicitly.
+  setStat(els.camera, '…')
+  setStat(els.frame, '…')
 
   els.start.disabled = false
   els.stop.disabled = true
@@ -755,7 +791,13 @@ function fail(title, detail) {
   // stopCamera() resets the camera, worker and ring but leaves the banner alone,
   // so the failure stays on screen until the next Start.
   stopCamera()
-  showBanner('error', title, `<p>${detail}</p>`)
+  const text = String(detail)
+  const hint = /wasm|compile|content security policy|unsafe-eval/i.test(text)
+    ? '<p>If this names a WebAssembly or CSP error, the deployment must be built with '
+      + '<code>DETECTOR_ENABLED=true</code>: that widens the policy with '
+      + "<code>'wasm-unsafe-eval'</code> and <code>worker-src 'self' blob:</code>.</p>"
+    : ''
+  showBanner('error', title, `<p>${text}</p>${hint}`)
 }
 
 // ---------------------------------------------------------------------- wiring

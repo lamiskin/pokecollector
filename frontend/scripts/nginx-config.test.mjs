@@ -161,3 +161,21 @@ test('cv-js-lab is cross-origin isolated without losing the shared headers', () 
   assert.match(detector.body, /add_header\s+Cross-Origin-Embedder-Policy\s+"require-corp"\s+always;/);
   assert.match(detector.body, INCLUDE, 'location /detector/ must include the security headers');
 });
+
+test('capture-lab-live is cross-origin isolated and never the SPA shell', () => {
+  const lab = locations().find((loc) => loc.name.includes('/capture-lab-live/'));
+  assert.ok(lab, 'location ^~ /capture-lab-live/ missing');
+
+  // Its own page (not the SPA) needs SharedArrayBuffer for a WASM thread pool.
+  assert.match(lab.body, /add_header\s+Cross-Origin-Opener-Policy\s+"same-origin"\s+always;/);
+  assert.match(lab.body, /add_header\s+Cross-Origin-Embedder-Policy\s+"require-corp"\s+always;/);
+
+  // Location-level add_header drops the inherited server headers, so the snippet
+  // include is what keeps CSP and Permissions-Policy (camera) on the page.
+  assert.match(lab.body, INCLUDE, 'location /capture-lab-live/ must include the security headers');
+
+  // A diagnostic must not be cached, and a missing file must 404 rather than
+  // fall back to the SPA shell (which has no COOP/COEP).
+  assert.match(lab.body, /expires\s+-1\s*;/);
+  assert.match(lab.body, /try_files\s+\$uri\s+\$uri\/\s+=404;/);
+});
