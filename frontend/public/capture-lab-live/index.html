@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<title>Capture lab live — detector</title>
+<link rel="stylesheet" href="./live.css">
+</head>
+<body>
+<header>
+  <h1>Capture lab live</h1>
+  <p class="sub">Our detector, our ring · Cornelius 2.12 · <code>/detector/</code> · detector only, nothing is captured or uploaded</p>
+</header>
+
+<div id="banner" class="banner" role="status" aria-live="polite" hidden></div>
+
+<div class="stage" id="stage">
+  <video id="video" playsinline muted autoplay></video>
+  <div id="blur" class="blur" aria-hidden="true"></div>
+  <canvas id="overlay"></canvas>
+  <div class="stage-hint" id="stage-hint">Press <strong>Start camera</strong> to measure this device.</div>
+  <div class="pill" id="pill" role="status" aria-live="polite" hidden>
+    <span class="pill-dot" aria-hidden="true"></span>
+    <span id="pill-text"></span>
+  </div>
+</div>
+
+<canvas id="frame-source" hidden aria-hidden="true"></canvas>
+
+<div class="controls">
+  <button id="start" class="primary" type="button">Start camera</button>
+  <button id="stop" type="button" disabled>Stop</button>
+</div>
+
+<dl class="stats">
+  <div class="stat"><dt class="k">crossOriginIsolated</dt><dd class="v" id="s-isolated">…</dd></div>
+  <div class="stat"><dt class="k">threads granted</dt><dd class="v" id="s-threads">…</dd></div>
+  <div class="stat"><dt class="k">detections / s</dt><dd class="v" id="s-rate">…</dd></div>
+  <div class="stat"><dt class="k">inference ms (median 20)</dt><dd class="v" id="s-ms">…</dd></div>
+  <div class="stat"><dt class="k">camera (resolved)</dt><dd class="v" id="s-camera">…</dd></div>
+  <div class="stat"><dt class="k">frame sent</dt><dd class="v" id="s-frame">…</dd></div>
+  <div class="stat"><dt class="k">detections</dt><dd class="v" id="s-count">0</dd></div>
+  <div class="stat"><dt class="k">sharpness</dt><dd class="v" id="s-sharp">…</dd></div>
+</dl>
+
+<footer>
+  <p>
+    The ring is dashed while the detector is tracking and solid for a moment when a usable
+    detection lands. The worker is the app's own <code>cardDetector.worker.js</code>, resolved
+    from the build manifest; it is asked for <code>min(4, hardwareConcurrency)</code> WASM
+    threads only when this document is cross-origin isolated and
+    <code>SharedArrayBuffer</code> exists. Blur outside the card: <span id="blur-state">…</span>.
+  </p>
+  <p class="worker">worker: <code id="worker-src">not loaded</code></p>
+</footer>
+
+<script type="module" src="./live.js"></script>
+</body>
+</html>

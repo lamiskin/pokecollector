@@ -5,8 +5,9 @@
 // Three modes are selectable per init: asyncify, plain simd, and experimental
 // webgpu. WebGPU is known to produce plausible-but-wrong quads on Android ARM,
 // so it is checked once per session against a plain-simd reference; that check
-// can degrade to "unverified" without stopping detection. Wasm modes keep
-// numThreads at 1 so no SharedArrayBuffer / COOP+COEP is needed.
+// can degrade to "unverified" without stopping detection. Wasm modes default to
+// numThreads 1 so no SharedArrayBuffer / COOP+COEP is needed; a cross-origin
+// isolated caller may opt in to a thread pool through the init message.
 
 // One ORT session cannot be run concurrently under asyncify. Chain every
 // detect and verification through this serial queue.
@@ -137,13 +138,16 @@ function isUsableQuad(corners) {
   return !(positive > 0 && negative > 0)
 }
 
-async function loadRuntime(runtime) {
+async function loadRuntime(runtime, threads = 1) {
   if (!runtimeModules.has(runtime)) {
     // One namespace per build URL: switching back reuses the imported module.
     runtimeModules.set(runtime, await import(/* @vite-ignore */ assetUrl(RUNTIME_URLS[runtime])))
   }
   const module = runtimeModules.get(runtime)
-  module.env.wasm.numThreads = 1
+  // The app keeps the historical single-thread session. Only a page that is
+  // cross-origin isolated (and therefore has SharedArrayBuffer) asks for more,
+  // and init() has already clamped that request.
+  module.env.wasm.numThreads = threads
   module.env.wasm.wasmPaths = assetUrl(WASM_DIR)
   return module
 }
@@ -158,7 +162,7 @@ async function getModelBuffer() {
   return modelBuffer
 }
 
-async function init(runtime = 'asyncify') {
+async function init(runtime = 'asyncify', requestedThreads = 1) {
   const selected = ['wasm', 'webgpu'].includes(runtime) ? runtime : 'asyncify'
   const isWebgpu = selected === 'webgpu'
   if (isWebgpu && (typeof navigator === 'undefined' || !navigator.gpu)) {
@@ -169,7 +173,17 @@ async function init(runtime = 'asyncify') {
     )
   }
 
-  ort = await loadRuntime(selected)
+  // Threads are opt-in and defensive: ORT cannot spawn a pool without
+  // SharedArrayBuffer (which needs cross-origin isolation), and asking for one
+  // otherwise throws at session creation. Clamp here and report what was
+  // actually granted after the session exists.
+  const isolated = self.crossOriginIsolated === true
+  const hasSAB = typeof SharedArrayBuffer !== 'undefined'
+  const hardwareConcurrency = self.navigator?.hardwareConcurrency || 1
+  const requested = Math.max(1, Math.min(Number(requestedThreads) || 1, hardwareConcurrency))
+  const threads = isolated && hasSAB ? requested : 1
+
+  ort = await loadRuntime(selected, threads)
   if (isWebgpu && ort.env.webgpu) ort.env.webgpu.forceFp16 = false
 
   let nextSession
@@ -195,6 +209,16 @@ async function init(runtime = 'asyncify') {
     } catch {
       // Older builds may not expose release(); replacing the reference is enough.
     }
+  }
+
+  return {
+    runtime: activeRuntime,
+    // What the runtime actually accepted, not what was requested.
+    threads: Number(ort.env.wasm.numThreads) || threads,
+    requested,
+    isolated,
+    hasSAB,
+    hardwareConcurrency,
   }
 }
 
@@ -370,8 +394,8 @@ self.onmessage = async event => {
   try {
     if (message.type === 'init') {
       assetBase = message.assetBase || ''
-      await init(message.runtime)
-      self.postMessage({ type: 'ready', runtime: activeRuntime })
+      const info = await init(message.runtime, message.numThreads)
+      self.postMessage({ type: 'ready', ...info })
       return
     }
     if (message.type === 'detect') {

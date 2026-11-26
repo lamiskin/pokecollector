@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>COEP credentialless check</title>
+<style>
+  :root { color-scheme: dark; --bg:#08080f; --panel:#12121c; --line:#26263a; --fg:#f3f4f6; --muted:#9ca3af; --ok:#4ade80; --warn:#fbbf24; --bad:#f87171; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg); font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  body { padding: 16px; max-width: 900px; margin: 0 auto; }
+  h1 { font-size: 1.15rem; margin: 0 0 2px; }
+  .sub { margin: 0 0 14px; color: var(--muted); font-size: .82rem; }
+  .sub code { color: var(--fg); }
+  .verdict { border-radius: 10px; padding: 12px 14px; margin: 0 0 14px; font-size: .92rem; line-height: 1.45; border: 1px solid; }
+  .verdict strong { display: block; font-size: 1rem; margin-bottom: 4px; }
+  .verdict.ok { background:#06281a; border-color: var(--ok); color:#bbf7d0; }
+  .verdict.bad { background:#3a0d0d; border-color: var(--bad); color:#fecaca; }
+  .verdict.warn { background:#3a2a06; border-color: var(--warn); color:#fde68a; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 8px; margin: 0 0 16px; }
+  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; }
+  .stat .k { display: block; color: var(--muted); font-size: .7rem; text-transform: uppercase; letter-spacing: .06em; margin-bottom: 3px; }
+  .stat .v { font-size: 1.05rem; font-variant-numeric: tabular-nums; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
+  .stat .v.ok { color: var(--ok); } .stat .v.bad { color: var(--bad); } .stat .v.warn { color: var(--warn); } .stat .v.muted { color: var(--muted); font-size: .85rem; }
+  h2 { font-size: .82rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 18px 0 8px; font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; font-size: .84rem; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; }
+  tr:last-child td { border-bottom: 0; }
+  td.url { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .76rem; word-break: break-all; }
+  td.state.ok { color: var(--ok); } td.state.bad { color: var(--bad); } td.state.pending { color: var(--muted); }
+  .strip { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 0; }
+  .strip figure { margin: 0; width: 96px; }
+  .strip img { width: 96px; height: 134px; object-fit: contain; background: #000; border: 1px solid var(--line); border-radius: 8px; display: block; }
+  .strip figcaption { color: var(--muted); font-size: .68rem; margin-top: 3px; line-height: 1.3; }
+  ul.failures { margin: 0; padding-left: 18px; font-size: .82rem; line-height: 1.5; }
+  ul.failures li { word-break: break-all; }
+  ul.failures .none { color: var(--ok); }
+  footer { margin-top: 18px; color: var(--muted); font-size: .76rem; line-height: 1.55; }
+  footer code { color: var(--fg); }
+</style>
+</head>
+<body>
+<header>
+  <h1>COEP <code>credentialless</code> check</h1>
+  <p class="sub">Does this origin isolate the document <em>and</em> still load third-party card art?</p>
+</header>
+
+<div id="verdict" class="verdict warn" role="status" aria-live="polite">
+  <strong>Waiting for the image probes…</strong>
+  <span>Both facts appear below once the probes finish.</span>
+</div>
+
+<dl class="grid">
+  <div class="stat"><dt class="k">crossOriginIsolated</dt><dd class="v" id="s-isolated">…</dd></div>
+  <div class="stat"><dt class="k">SharedArrayBuffer</dt><dd class="v" id="s-sab">…</dd></div>
+  <div class="stat"><dt class="k">tcgdex no-cors art</dt><dd class="v" id="s-nocors">…</dd></div>
+  <div class="stat"><dt class="k">tcgdex CORS-mode art</dt><dd class="v" id="s-cors">…</dd></div>
+  <div class="stat"><dt class="k">user agent</dt><dd class="v muted" id="s-ua">…</dd></div>
+</dl>
+
+<h2>Subresource probes</h2>
+<table>
+  <thead>
+    <tr><th>probe</th><th>URL</th><th>result</th></tr>
+  </thead>
+  <tbody id="probes">
+    <tr><td>same-origin control</td><td class="url">/cardback.jpg</td><td class="state pending">pending</td></tr>
+    <tr><td>tcgdex art (no-cors)</td><td class="url">https://assets.tcgdex.net/en/base/base1/1/high.webp</td><td class="state pending">pending</td></tr>
+    <tr><td>tcgdex art (CORS mode)</td><td class="url">https://assets.tcgdex.net/en/base/base1/1/high.webp</td><td class="state pending">pending</td></tr>
+  </tbody>
+</table>
+
+<div class="strip" id="strip"></div>
+
+<h2>Failed subresource loads</h2>
+<ul class="failures" id="failures"><li class="none">none yet</li></ul>
+
+<footer>
+  <p>
+    <strong>How to read this.</strong> <code>crossOriginIsolated=true</code> means COOP+COEP were both
+    applied to this document. If the tcgdex no-cors probe also loads, the policy is
+    <code>credentialless</code> (or the server sent CORP, which it does not). If the probe fails while
+    <code>crossOriginIsolated=true</code>, the policy in effect is <code>require-corp</code> and card art
+    is being blocked. If <code>crossOriginIsolated=false</code>, the headers never reached this document
+    (or the browser is Firefox/Safari, which do not implement <code>credentialless</code>).
+  </p>
+  <p>
+    Only images are probed on purpose: the CSP <code>connect-src</code> does not list
+    <code>assets.tcgdex.net</code>, so a <code>fetch()</code> here would be blocked by CSP and say nothing
+    about COEP. Images are also the real case (card art is loaded with a plain <code>&lt;img&gt;</code>).
+  </p>
+  <p>
+    This page is served by <code>location ^~ /coep-check/</code>, which mirrors the SPA's headers, and the
+    service worker is told never to answer for it, so the result is always this document and not the app
+    shell. Open it at <code>/coep-check/</code> (with the trailing slash).
+  </p>
+</footer>
+
+<script src="./check.js" defer></script>
+</body>
+</html>

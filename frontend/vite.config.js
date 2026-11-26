@@ -22,6 +22,12 @@ export default defineConfig({
     __APP_VERSION__: JSON.stringify(readAppVersion()),
     __PWA_DEFAULT__: JSON.stringify(process.env.VITE_PWA_DEFAULT === 'on' ? 'sw=1;queue=1' : 'sw=0;queue=0'),
   },
+  build: {
+    // The standalone /capture-lab-live/ page reuses the app's compiled detector
+    // worker. Its content-hashed filename is only discoverable at runtime through
+    // the build manifest, which the page fetches before starting the worker.
+    manifest: true,
+  },
   server: {
     proxy: {
       '/api': {
