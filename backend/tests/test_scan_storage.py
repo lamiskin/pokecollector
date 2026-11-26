@@ -142,7 +142,7 @@ class ScanSanitizationTests(unittest.TestCase):
 
         with Image.open(io.BytesIO(sanitized.data)) as result:
             self.assertEqual(result.format, "JPEG")
-            self.assertLessEqual(max(result.size), 2048)
+            self.assertLessEqual(max(result.size), scan_storage.MAX_IMAGE_EDGE)
             self.assertFalse(result.getexif())
         self.assertEqual(sanitized.content_type, "image/jpeg")
 
@@ -221,6 +221,54 @@ class ScanSanitizationTests(unittest.TestCase):
     def test_rejects_an_unsupported_rotation(self):
         with self.assertRaises(ScanUploadError):
             sanitize_image_bytes(_marker_image_bytes(), rotation_cw=45)
+
+    def test_twelve_megapixel_capture_keeps_aspect_at_the_storage_edge(self):
+        sanitized = sanitize_image_bytes(_image_bytes(size=(4000, 3000)))
+
+        with _decoded(sanitized.data) as result:
+            self.assertEqual(result.size, (3200, 2400))
+        self.assertEqual((sanitized.width, sanitized.height), (3200, 2400))
+
+    def test_photo_within_the_storage_edge_is_not_resized_or_upscaled(self):
+        sanitized = sanitize_image_bytes(_image_bytes(size=(3000, 2000)))
+
+        with _decoded(sanitized.data) as result:
+            self.assertEqual(result.size, (3000, 2000))
+        self.assertEqual((sanitized.width, sanitized.height), (3000, 2000))
+
+    def test_image_that_already_fits_is_not_resampled(self):
+        # The stored bytes are exactly one re-encode of the decoded pixels; any
+        # resample would change them.
+        raw = _image_bytes(size=(1600, 1200))
+
+        sanitized = sanitize_image_bytes(raw)
+        with Image.open(io.BytesIO(raw)) as source:
+            expected = io.BytesIO()
+            source.convert("RGB").save(
+                expected,
+                format="JPEG",
+                quality=scan_storage.JPEG_QUALITY,
+                optimize=True,
+                progressive=True,
+            )
+        self.assertEqual(sanitized.data, expected.getvalue())
+
+    def test_rejects_a_sixty_megapixel_photo(self):
+        with self.assertRaises(ScanUploadError):
+            sanitize_image_bytes(_image_bytes(size=(8000, 7500)))
+
+    def test_exif_orientation_and_rotation_apply_at_the_storage_edge(self):
+        # EXIF orientation 6 is a quarter turn: 3000x4000 becomes 4000x3000 and
+        # is then fitted to 3200x2400.
+        sanitized = sanitize_image_bytes(_image_bytes(size=(3000, 4000), exif=True))
+        with _decoded(sanitized.data) as result:
+            self.assertEqual(result.size, (3200, 2400))
+            self.assertFalse(result.getexif())
+
+        turned = sanitize_image_bytes(_image_bytes(size=(4000, 3000)), rotation_cw=90)
+        with _decoded(turned.data) as result:
+            self.assertEqual(result.size, (2400, 3200))
+        self.assertEqual((turned.width, turned.height), (2400, 3200))
 
 
 

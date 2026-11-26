@@ -75,7 +75,7 @@ import { edgeVariance, toGrayscale as toFocusGrayscale } from '../utils/focusSco
 const CONDITIONS = ['Bare card', 'Penny sleeve', 'Top loader', 'Holo or foil', 'Dark art', 'Dim room']
 const ROUTES = ['Phone browser', 'Phone native', 'Other']
 const RESOLUTION_PRESETS = [
-  { id: 'default', label: 'Default (1920×1080 request)', width: 1920, height: 1080 },
+  { id: 'default', label: 'Camera maximum', width: 1920, height: 1080 },
   { id: 'high', label: 'High (1920×2560)', width: 1920, height: 2560 },
   { id: 'max', label: 'Max (4000×3000)', width: 4000, height: 3000 },
 ]
@@ -109,9 +109,8 @@ const LIVE_SEQ_BASE = 1_000_000
 // used; a frozen feed must not be captured twice or reported as success.
 const CAPTURE_FRAME_WAIT_MS = 200
 // The crop is taken from the native frame around the card, not the whole frame.
-// Match the server's MAX_IMAGE_EDGE (2048) so an upload is stored without a
-// second LANCZOS resize after it arrives.
-const CAPTURE_SOURCE_MAX_EDGE = 2048
+// Bound staging memory while retaining high-resolution card photos.
+const CAPTURE_SOURCE_MAX_EDGE = 3200
 // Shared by capture and the re-arm signature so both compare the same region.
 const CAPTURE_BOX_PAD_FRACTION = 0.12
 // One bounded retry after a stale geometry result: request a fresh detection
@@ -462,6 +461,8 @@ export default function CaptureLab() {
   const [status, setStatus] = useState('idle')
   const [cameraError, setCameraError] = useState('')
   const [trackInfo, setTrackInfo] = useState(null)
+  const [cameraMaximum, setCameraMaximum] = useState(null)
+  const [largeUploadWarning, setLargeUploadWarning] = useState(false)
   const [resolutionPreset, setResolutionPreset] = useState('default')
   const [requestedResolution, setRequestedResolution] = useState(null)
   const [resolutionError, setResolutionError] = useState('')
@@ -1081,8 +1082,22 @@ export default function CaptureLab() {
         }
       }
       const track = stream.getVideoTracks()[0]
+      let capabilities = {}
+      try { capabilities = track?.getCapabilities?.() || {} } catch { capabilities = {} }
+      const widths = capabilities.width
+      const heights = capabilities.height
+      const maxWidth = typeof widths?.max === 'number' ? widths.max : Array.isArray(widths) ? Math.max(...widths) : null
+      const maxHeight = typeof heights?.max === 'number' ? heights.max : Array.isArray(heights) ? Math.max(...heights) : null
+      if (maxWidth && maxHeight && track?.applyConstraints) {
+        setCameraMaximum({ width: maxWidth, height: maxHeight })
+        try {
+          await track.applyConstraints({ width: { ideal: maxWidth }, height: { ideal: maxHeight } })
+        } catch {
+          // Keep the browser's initial 1920×1080 request when maximum is rejected.
+        }
+      } else setCameraMaximum(null)
       const settings = track?.getSettings?.() || {}
-      const capabilities = track?.getCapabilities?.() || {}
+      try { capabilities = track?.getCapabilities?.() || capabilities } catch { /* retain earlier capabilities */ }
       if (track) {
         track.onended = () => {
           if (!mountedRef.current) return
@@ -1113,11 +1128,12 @@ export default function CaptureLab() {
     if (!preset || !track) return
     setApplyingResolution(true)
     setResolutionError('')
-    setRequestedResolution({ width: preset.width, height: preset.height })
+    const target = preset.id === 'default' ? cameraMaximum || { width: 1920, height: 1080 } : preset
+    setRequestedResolution({ width: target.width, height: target.height })
     try {
       await track.applyConstraints({
-        width: { ideal: preset.width },
-        height: { ideal: preset.height },
+        width: { ideal: target.width },
+        height: { ideal: target.height },
       })
       const settings = track.getSettings?.() || {}
       const capabilities = track.getCapabilities?.() || {}
@@ -1303,6 +1319,10 @@ export default function CaptureLab() {
     const items = Array.from(files)
       .filter(file => file.type.startsWith('image/') || /\.(heic|heif)$/i.test(file.name))
       .map((file, index) => {
+        if (file.size > 3.5 * 1024 * 1024 && !largeUploadWarning) {
+          setLargeUploadWarning(true)
+          setCaptureNote('This photo is over 3.5 MB. It will use a larger upload and may make the scan slower.')
+        }
         const id = `${now}-${index}-${Math.random().toString(36).slice(2)}`
         const previewUrl = URL.createObjectURL(file)
         sequenceRef.current += 1
@@ -1436,7 +1456,7 @@ export default function CaptureLab() {
     const started = performance.now()
     const canvas = document.createElement('canvas')
     const context = canvas.getContext('2d')
-    const attempt = () => {
+    const attempt = async () => {
       const video = videoRef.current
       if (!video || !video.videoWidth || !video.videoHeight) {
         resolve({
@@ -1490,6 +1510,12 @@ export default function CaptureLab() {
         window.requestAnimationFrame(attempt)
         return
       }
+      // A camera-native still is deliberately not used for the crop. Its field
+      // of view can differ from the preview frame, so a quad measured on the
+      // preview cannot be mapped onto it by proportion, and a crop stitched from
+      // mismatched geometry is worse than a clean video frame. The camera is
+      // already asked for its maximum resolution, so the video frame carries the
+      // same pixels the still would.
       let cardLongEdge = 0
       for (let i = 0; i < 4; i += 1) {
         const [x1, y1] = nativeQuad[i]
@@ -1859,8 +1885,8 @@ export default function CaptureLab() {
         }
 
         // Focus proxy: annotation for manual captures, and a low-detail skip for
-        // automatic ones. The backend's 500 threshold is on sanitized 2048 px
-        // images, so this live number is not directly comparable to it.
+        // automatic ones. The backend's 500 threshold is measured on a 2048 px
+        // copy, so this live number is not directly comparable to it.
         let focusVariance = null
         try {
           const focusScale = Math.min(
@@ -3267,7 +3293,9 @@ export default function CaptureLab() {
               onChange={event => setResolutionPreset(event.target.value)}
             >
               {RESOLUTION_PRESETS.map(preset => (
-                <option key={preset.id} value={preset.id}>{preset.label}</option>
+                <option key={preset.id} value={preset.id}>{preset.id === 'default'
+                  ? `Camera maximum${cameraMaximum ? ` (${cameraMaximum.width}×${cameraMaximum.height})` : ''}`
+                  : preset.label}</option>
               ))}
             </select>
           </label>
@@ -3282,7 +3310,7 @@ export default function CaptureLab() {
           </button>
           {trackInfo?.settings?.width ? (
             <p className="pb-1 text-xs text-text-secondary">
-              Resolved: {trackInfo.settings.width}×{trackInfo.settings.height}
+              Capture size: {trackInfo.settings.width}×{trackInfo.settings.height}
             </p>
           ) : null}
           {requestedResolution ? (

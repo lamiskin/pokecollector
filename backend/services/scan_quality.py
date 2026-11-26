@@ -27,6 +27,14 @@ Threshold provenance: on sanitized 2048px-max card photos, pristine phone
 captures measured roughly 1900-2200 edge variance and a GaussianBlur(8)
 version of the same images measured roughly 110-126. ``BLUR_THRESHOLD`` sits
 between those populations (500) so ordinary focus variation is not flagged.
+
+That calibration is resolution-dependent: ``FIND_EDGES`` measures a gradient
+per pixel, so the same scene at 3200px scores lower than at 2048px. The
+sanitizer now stores up to 3200px, so sharpness is measured on a copy whose
+long edge is at most ``SHARPNESS_MEASURE_EDGE``. For photos the sanitizer used
+to produce (<= 2048px) that copy is the image itself, so their scores and
+verdicts are unchanged; larger photos are measured at the size the threshold
+was calibrated on.
 """
 
 from __future__ import annotations
@@ -55,6 +63,10 @@ MULTI_CARD_ASPECT_MIN = 1 / ROTATED_ASPECT_MAX
 
 # See the module docstring for the measured populations behind this value.
 BLUR_THRESHOLD = 500.0
+
+# The long edge sharpness is measured at, matching the size ``BLUR_THRESHOLD``
+# was calibrated on. Images already at or below it are measured as they are.
+SHARPNESS_MEASURE_EDGE = 2048
 
 OUTPUT_JPEG_QUALITY = 92
 
@@ -114,8 +126,19 @@ def assess_image_quality(image_bytes: bytes) -> ScanQuality:
     image = _decode_rgb(image_bytes)
     width, height = image.size
     aspect_ratio = (width / height) if height else 0.0
+    measured = image
+    if max(image.size) > SHARPNESS_MEASURE_EDGE:
+        # Keep the threshold's calibration: a larger stored image is measured
+        # at the reference edge instead of at its own finer pixel pitch.
+        measured = image.copy()
+        measured.thumbnail(
+            (SHARPNESS_MEASURE_EDGE, SHARPNESS_MEASURE_EDGE),
+            Image.Resampling.LANCZOS,
+        )
     sharpness = float(
-        ImageStat.Stat(image.convert("L").filter(ImageFilter.FIND_EDGES)).var[0]
+        ImageStat.Stat(
+            measured.convert("L").filter(ImageFilter.FIND_EDGES)
+        ).var[0]
     )
     return ScanQuality(
         orientation=_classify_orientation(aspect_ratio),

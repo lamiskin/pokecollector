@@ -2,7 +2,7 @@
  * Shrinks large photos in the browser before they are uploaded.
  *
  * Every photo the app uploads is re-encoded server-side anyway — scan photos to
- * a 2048px JPEG and collection photos to a 1400px JPEG (see
+ * a 3200px JPEG and collection photos to a 1400px JPEG (see
  * backend/services/scan_storage.py and collection_photos.py). What the server
  * cannot fix is the upload itself: a modern phone produces 3–15 MB files, and
  * sending fifty of those over mobile data is slow, costly, and can exceed the
@@ -22,8 +22,8 @@
 
 // Matches the backend scan sanitizer, which is the more quality-sensitive of
 // the two: the recognizer reads small print, so its input must not be shrunk
-// further than the server itself would shrink it.
-export const UPLOAD_MAX_EDGE = 2048
+// further than the server itself would shrink it (it stores up to 3200px).
+export const UPLOAD_MAX_EDGE = 3200
 export const UPLOAD_JPEG_QUALITY = 0.9
 
 // Below this, a phone photo is already close to what re-encoding would produce

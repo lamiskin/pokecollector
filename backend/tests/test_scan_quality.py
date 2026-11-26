@@ -109,6 +109,21 @@ class ScanQualitySharpnessTests(unittest.TestCase):
         self.assertTrue(quality.is_blurred)
         self.assertLess(quality.sharpness, BLUR_THRESHOLD)
 
+    def test_sharp_photo_at_the_storage_edge_is_not_flagged(self):
+        # Stored scans can now be 3200px on the long edge; the threshold keeps
+        # its 2048px calibration by measuring a normalised copy.
+        quality = assess_image_quality(_encoded(_card_image(3200, 4480)))
+
+        self.assertFalse(quality.is_blurred)
+        self.assertGreater(quality.sharpness, BLUR_THRESHOLD)
+
+    def test_heavily_blurred_photo_at_the_storage_edge_is_flagged(self):
+        blurred = _card_image(3200, 4480).filter(ImageFilter.GaussianBlur(12))
+        quality = assess_image_quality(_encoded(blurred))
+
+        self.assertTrue(quality.is_blurred)
+        self.assertLess(quality.sharpness, BLUR_THRESHOLD)
+
 
 @unittest.skipUnless(DEPS_AVAILABLE, "Pillow is not installed")
 class CorrectOrientationTests(unittest.TestCase):

@@ -38,7 +38,13 @@ MAX_FILES_PER_JOB = 50
 MAX_FILE_BYTES = 15 * 1024 * 1024
 MAX_JOB_BYTES = 200 * 1024 * 1024
 MAX_IMAGE_PIXELS = 50_000_000
-MAX_IMAGE_EDGE = 2048
+# The stored JPEG is what a capture can become the collector's own card image
+# from, so keep as much of the phone's detail as the hard pixel cap allows. A
+# 12 MP capture (4000x3000) is stored at 3200x2400; anything already smaller is
+# left at its own size (never upscaled). MAX_IMAGE_PIXELS still refuses more
+# than 50 MP before any pixels are decoded.
+MAX_IMAGE_EDGE = 3200
+# Quality of the one re-encode that produces the stored JPEG.
 JPEG_QUALITY = 90
 GEOMETRY_SIDECAR_SUFFIX = ".geometry.json"
 STRAIGHTEN_JPEG_QUALITY = 92

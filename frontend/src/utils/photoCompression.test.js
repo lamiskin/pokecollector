@@ -52,11 +52,11 @@ afterEach(() => {
 
 describe('scaledUploadDimensions', () => {
   it('scales the long edge down and keeps the aspect ratio', () => {
-    expect(scaledUploadDimensions(4000, 3000)).toEqual({ width: 2048, height: 1536 })
+    expect(scaledUploadDimensions(4000, 3000)).toEqual({ width: 3200, height: 2400 })
   })
 
   it('handles portrait photos', () => {
-    expect(scaledUploadDimensions(3024, 4032)).toEqual({ width: 1536, height: 2048 })
+    expect(scaledUploadDimensions(3024, 4032)).toEqual({ width: 2400, height: 3200 })
   })
 
   it('leaves images at or below the target edge untouched', () => {
@@ -68,7 +68,7 @@ describe('scaledUploadDimensions', () => {
   })
 
   it('never scales a side below one pixel', () => {
-    expect(scaledUploadDimensions(8000, 3)).toEqual({ width: 2048, height: 1 })
+    expect(scaledUploadDimensions(8000, 3)).toEqual({ width: 3200, height: 1 })
   })
 
   it('reports unusable sizes as unknown', () => {
@@ -115,9 +115,9 @@ describe('prepareImageForUpload', () => {
     expect(prepared.name).toBe('IMG_0001.jpg')
     expect(prepared.type).toBe('image/jpeg')
     expect(prepared.lastModified).toBe(1234)
-    expect(canvas.width).toBe(2048)
-    expect(canvas.height).toBe(1536)
-    expect(drawImage).toHaveBeenCalledWith(expect.anything(), 0, 0, 2048, 1536)
+    expect(canvas.width).toBe(3200)
+    expect(canvas.height).toBe(2400)
+    expect(drawImage).toHaveBeenCalledWith(expect.anything(), 0, 0, 3200, 2400)
     expect(close).toHaveBeenCalled()
   })
 

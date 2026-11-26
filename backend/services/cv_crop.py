@@ -60,8 +60,11 @@ CARD_ASPECT_WIDTH = 63
 CARD_ASPECT_HEIGHT = 88
 
 # A native warp can never be larger than the pixels the card actually covers.
-# The cap only matters for absurdly large captures; it is never an upscale.
-MAX_EDGE = 2048
+# The cap only matters for absurdly large captures; it is never an upscale. It
+# tracks the sanitizer's MAX_IMAGE_EDGE (``services.scan_storage``) so a
+# full-resolution capture yields a full-resolution proposal instead of being
+# held at the older 2048px storage size.
+MAX_EDGE = 3200
 
 # A little context outside the detected quad protects against corners that sit
 # a few pixels inside the card. It is clamped into the source raster, and a

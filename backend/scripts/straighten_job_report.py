@@ -84,7 +84,9 @@ def _quad_metrics(quad: list[tuple[float, float]]) -> dict:
     }
 
 
-MAX_EDGE = 2048
+# Longest output edge the report assumes, mirroring ``try_straighten``'s
+# default, which tracks the sanitizer's stored size.
+MAX_EDGE = 3200
 
 
 def _claimed_output_size(sides: list[float]) -> tuple[int, int]:

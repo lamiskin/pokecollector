@@ -122,6 +122,12 @@ MAX_ANGLE = 135.0
 MAX_OPPOSING_RATIO = 1.5
 MIN_OUTPUT_PX = 32
 
+# Longest output edge for a proposal. This tracks the sanitizer's stored size
+# (``services.scan_storage.MAX_IMAGE_EDGE``): the warp can never exceed the
+# pixels the card covers, so the cap only keeps an absurd claim from producing
+# an oversized artifact. It is never an upscale.
+DEFAULT_MAX_EDGE = 3200
+
 # Boundary-support thresholds; see assess_edge_support for the method.
 MIN_STEP = 8.0          # grey levels: minimum contrast across the claimed line
 SUPPORT_RATIO = 1.5     # claimed response / median inward response
@@ -996,7 +1002,7 @@ def _straighten_once(
     quad: Sequence[Tuple[float, float]],
     *,
     margin: float = MARGIN_FRACTION,
-    max_edge: int = 2048,
+    max_edge: int = DEFAULT_MAX_EDGE,
 ) -> Straightened | Abstained:
     """Warp a supplied quad into a portrait proposal, or abstain technically.
 
@@ -1251,7 +1257,7 @@ def try_straighten(
     quad: Sequence[Tuple[float, float]],
     *,
     margin: float = MARGIN_FRACTION,
-    max_edge: int = 2048,
+    max_edge: int = DEFAULT_MAX_EDGE,
 ) -> Straightened | Abstained:
     """Propose a warp, giving up padding before giving up the proposal.
 
