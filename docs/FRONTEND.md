@@ -255,25 +255,50 @@ the installation.
 
 ### Collection and Card Lists
 
+Collection has three layouts: the existing grid and list, and **By Pokémon**.
+The species layout groups the already filtered and sorted collection, with names
+from the existing Pokédex catalogue (`GET /api/pokedex/species`). Group headers
+show distinct localized printings, copy totals and the same canonical value used
+by the collection summary. Cards depicting several species appear once under
+the first valid species. Trainer, Energy, custom and unclassified cards remain
+available under **Other cards**. This organises owned cards; the Pokédex remains
+the separate discovery and completion view.
+
+Analytics retains the contributor's species-duplicates feature as an alternate
+view inside the existing **Duplicates** tab, not another top-level tab. The
+existing **By card** view stays the default; the **By Pokémon** icon uses the
+same Pikachu silhouette as Collection. Species data is requested only when that
+view is selected, and the chosen view and folds survive switching Analytics tabs. Species show distinct printings, combined copies and
+values, with every group initially open and independently foldable.
+Each printing opens the shared card dialog, including owner-supplied photos.
+Large printing lists use the same shared windowing component with measured rows;
+collection edits and photo changes invalidate the species summary. Multi-species
+Collection cards retain the contributor's extra-species badge.
+
+Every Collection species panel starts expanded and can be folded independently. Closed
+panels do not mount card controllers. Open panels pass their complete arrays to
+the shared `WindowedCardGrid` with `deferOffscreen`: an IntersectionObserver
+keeps distant grids as full-height placeholders without multiplying the card
+controller or scroll-observer budget. Inactive virtualizers retain their measured
+footprint; compact Analytics rows supply a conservative initial row estimate.
+Focused cards remain mounted. Do not replace this with mapped
+grids or truncate the data. The icon-only layout button retains a localized
+accessible name and tooltip. Its bundled Pikachu silhouette is derived from
+[PokeAPI dream-world artwork](https://github.com/PokeAPI/sprites/blob/master/sprites/pokemon/other/dream-world/25.svg),
+with all fills made monochrome. Pokémon artwork remains the property of
+Nintendo, Creatures, GAME FREAK and The Pokémon Company; this is not an
+assertion of an independent open-source artwork license.
+The existing collection tile renderer, edit dialog and full filtered selection
+scope are reused, including the 500-entry selection limit. Closing a panel does
+not discard selection. Group order is National Dex order; the selected collection
+sort applies within each group. No separate species analytics screen is added.
+API clients can obtain the same grouping through `GET /api/collection/by-species`.
+
+
 `pages/Collection.jsx` owns filtering, strict CSV import, export actions,
 printing-detail tags, and private owner-card photos. Owner photos are loaded
 through authenticated endpoints and can be preferred over catalogue artwork in
 the current user's UI.
-
-The grid toolbar's **Group by** control adds a **Pokémon** mode beside the
-default **None**. It groups the already filtered, searched and sorted rows by
-the first id in `card.dex_ids`, so a card that depicts several species appears
-once and carries a small marker instead of being duplicated. Species names come
-from `GET /api/pokedex/directory`, the static catalogue lookup, so enabling the
-mode never scans card availability. Each collapsible
-header shows the cached species sprite, its dex number, the species name in the
-UI language, the printing and copy counts, and the group's value; the first
-group starts expanded and the rest start collapsed. Cards without dex ids
-(Trainers, Energy, manual cards) stay reachable in a trailing **Other cards**
-section. The grouping is grid-only: the toolbar control is shown only in the
-grid view, and switching to the list view returns to **None**, so the list table
-stays exactly as it was.
-The choice is in-memory session state, like the sort order and view mode.
 
 The collection editor and card-detail Owned copies tab display the API's reason
 when an edit or removal is rejected. Active product links must be unlinked from
@@ -369,6 +394,36 @@ on private user-owned lists. Reverse-proxy installations must also allow the nar
 [`REVERSE_PROXY_AUTH.md`](REVERSE_PROXY_AUTH.md).
 
 ## Card UI
+
+### Card grid performance
+
+New features and updates that render card grids must reuse
+`components/WindowedCardGrid.jsx`, alongside the shared card renderer. This also
+applies to artist gallery tiles and each set group in the artist checklist.
+Pagination and lazy artwork are useful, but do not replace windowing: a window
+mounts only nearby rows while reserving space for the complete result.
+
+Pass the complete filtered page as `items`, a stable identity through `getKey`
+when an item has no card `id`, and the existing renderer as `renderItem`. Keep
+totals, grouping, sorting, API pagination and bulk selection based on the full
+data, never the currently mounted DOM. The 500-entry selection limit still
+applies. Do not change API responses to fit the visible window.
+
+The component detects the page or nearest constrained vertical scroller,
+preserves keyboard focus and fixed-card controllers during responsive reflow,
+and retains the existing CardImage viewport gate and Holo behaviour. Preserve
+these contracts rather than building a page-specific virtualizer. Use
+`measureRows` for composite tiles whose metadata is outside the standard card
+caption. `overscanItems` defaults to 40 extra items on either side; the artist
+gallery uses 12 tiles because each can contain three artworks. A genuinely
+small, fixed-size display can remain static, with its bound explained in the PR.
+
+For every new consumer, test desktop and mobile layouts, a large result with
+bounded mounted items, reaching the final item, scrolling back, resizing while
+scrolled, keyboard focus, dialogs and actions, and complete totals/selection.
+Check grouped and ungrouped layouts, image remounts and enabled Holo effects
+where applicable. Include Chromium and WebKit/Safari checks for layout or
+loading changes, and distinguish automated fixtures from real-backend checks.
 
 ### Shared card system
 

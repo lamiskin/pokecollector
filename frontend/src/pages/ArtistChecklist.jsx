@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Link, useParams, useSearchParams } from 'react-router-dom'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import {
   ArrowLeft,
@@ -12,10 +12,12 @@ import {
 } from 'lucide-react'
 import clsx from 'clsx'
 import { getArtistChecklist } from '../api/client'
+import WindowedCardGrid from '../components/WindowedCardGrid'
 import { useSettings } from '../contexts/SettingsContext'
 import { resolveCardImageUrl } from '../utils/imageUrl'
 import { normalizeTcgdexLanguage } from '../utils/tcgdexLanguages'
 import { CardDisplay } from '../components/card-system'
+import { getEffectiveCardPrice, priceFieldFromPrimary } from '../utils/prices'
 import { CardModal } from '../components/CardItem'
 import TcgdexLanguageSelect from '../components/TcgdexLanguageSelect'
 
@@ -23,6 +25,10 @@ const PAGE_SIZE = 60
 const SORT_OPTIONS = ['number', 'name', 'price']
 const OWNERSHIP_OPTIONS = ['owned', 'missing']
 const UNKNOWN_SET_KEY = '__unknown_set__'
+
+export function navigateBackFromArtist(navigate) {
+  navigate('/artists')
+}
 
 // React Router already decodes route params, so a name that legitimately
 // contains "%" must not be decoded again: that would throw or corrupt it.
@@ -94,9 +100,10 @@ function Stat({ value, label, tone = 'text-text-primary' }) {
 }
 
 export default function ArtistChecklist() {
+  const navigate = useNavigate()
   const { artistName } = useParams()
   const [searchParams, setSearchParams] = useSearchParams()
-  const { t, formatPrice } = useSettings()
+  const { t, formatPrice, settings } = useSettings()
 
   const artistQuery = decodeArtistParam(artistName)
   const { lang, ownership, sortBy, sortOrder, page } = useMemo(
@@ -124,13 +131,15 @@ export default function ArtistChecklist() {
 
   const queryParams = useMemo(() => ({
     artist: artistQuery,
+    artist_match: searchParams.get('artist_match') === 'contains' ? 'contains' : 'exact',
     lang,
     ownership: ownership || undefined,
     page,
     page_size: PAGE_SIZE,
     sort_by: sortBy,
     sort_order: sortOrder,
-  }), [artistQuery, lang, ownership, page, sortBy, sortOrder])
+    price_field: priceFieldFromPrimary(settings?.price_primary),
+  }), [artistQuery, lang, ownership, page, sortBy, sortOrder, settings?.price_primary, searchParams])
 
   const { data, isLoading, isFetching, error, refetch } = useQuery({
     queryKey: ['artist-checklist', queryParams],
@@ -208,7 +217,7 @@ export default function ArtistChecklist() {
 
   const renderCard = (card) => {
     const printings = Array.isArray(card.printings) ? card.printings : []
-    const price = card.price_market ?? card.price_trend ?? null
+    const price = getEffectiveCardPrice(card, null, priceFieldFromPrimary(settings?.price_primary))
     return (
       <CardDisplay
         key={card.id}
@@ -253,9 +262,9 @@ export default function ArtistChecklist() {
     return (
       <div className="space-y-4 pb-2">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-          <Link to="/search" className="btn-ghost text-sm py-1.5">
-            <ArrowLeft size={14} /> {t('artistChecklist.backToSearch')}
-          </Link>
+          <button type="button" onClick={() => navigateBackFromArtist(navigate)} className="btn-ghost text-sm py-1.5">
+            <ArrowLeft size={14} /> {t('common.back')}
+          </button>
           <Link
             to="/artists"
             className="text-xs font-medium text-text-muted transition-colors hover:text-brand-red"
@@ -277,9 +286,9 @@ export default function ArtistChecklist() {
   return (
     <div className="space-y-4 pb-2">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-        <Link to="/search" className="btn-ghost text-sm py-1.5">
-          <ArrowLeft size={14} /> {t('artistChecklist.backToSearch')}
-        </Link>
+        <button type="button" onClick={() => navigateBackFromArtist(navigate)} className="btn-ghost text-sm py-1.5">
+          <ArrowLeft size={14} /> {t('common.back')}
+        </button>
         <Link
           to="/artists"
           className="text-xs font-medium text-text-muted transition-colors hover:text-brand-red"
@@ -292,9 +301,19 @@ export default function ArtistChecklist() {
       <div className="card">
         <div className="flex flex-col gap-4 md:flex-row md:items-start">
           <div className="min-w-0 flex-1">
-            <h1 className="truncate text-xl font-bold text-text-primary" title={displayArtist}>
-              {displayArtist}
-            </h1>
+            <div className="flex min-w-0 items-center gap-2">
+              <h1 className="min-w-0 truncate text-xl font-bold text-text-primary" title={displayArtist}>
+                {displayArtist}
+              </h1>
+              <Link
+                to={searchLink}
+                className="btn-ghost h-11 w-11 shrink-0 p-0"
+                aria-label={`${t('nav.cardSearch')}: ${displayArtist}`}
+                title={`${t('nav.cardSearch')}: ${displayArtist}`}
+              >
+                <Search size={16} aria-hidden="true" />
+              </Link>
+            </div>
             <p className="mt-0.5 text-sm text-text-secondary">
               {rootTotal.toLocaleString()} {t('artistChecklist.cards')}
             </p>
@@ -341,12 +360,6 @@ export default function ArtistChecklist() {
                 <Stat value={formatPrice(missingValue)} label={t('artistChecklist.missingValue')} />
               )}
             </div>
-          </div>
-
-          <div className="flex flex-shrink-0 flex-col gap-2 md:w-44">
-            <Link to={searchLink} className="btn-ghost justify-center text-sm whitespace-nowrap">
-              <Search size={14} /> {t('artistChecklist.searchTheseCards')}
-            </Link>
           </div>
         </div>
       </div>
@@ -436,9 +449,6 @@ export default function ArtistChecklist() {
       {cards.length === 0 ? (
         <div className="card py-12 text-center">
           <p className="text-text-secondary">{emptyMessage}</p>
-          <Link to={searchLink} className="btn-ghost mt-4 mx-auto">
-            <Search size={14} /> {t('artistChecklist.searchTheseCards')}
-          </Link>
         </div>
       ) : grouped ? (
         <div className="space-y-5">
@@ -464,16 +474,22 @@ export default function ArtistChecklist() {
                   {group.owned}/{group.total}
                 </span>
               </div>
-              <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-2">
-                {group.cards.map(renderCard)}
-              </div>
+              <WindowedCardGrid
+                items={group.cards}
+                renderItem={renderCard}
+                label={group.setName || t('artistChecklist.unknownSet')}
+                className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-2"
+              />
             </section>
           ))}
         </div>
       ) : (
-        <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-2">
-          {cards.map(renderCard)}
-        </div>
+        <WindowedCardGrid
+          items={cards}
+          renderItem={renderCard}
+          label={artistQuery}
+          className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-2"
+        />
       )}
 
       {totalPages > 1 && (

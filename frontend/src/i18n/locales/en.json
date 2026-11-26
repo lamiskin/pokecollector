@@ -485,9 +485,12 @@
     "ownershipMissing": "Missing"
   },
   "artists": {
+    "galleryView": "Gallery view",
+    "listView": "List view",
+    "featuredCards": "Featured cards",
     "title": "Artists",
     "count": "artists",
-    "subtitle": "Every artist in the catalogue, with how many of their cards you own.",
+    "subtitle": "Every artist in the catalogue, with how many of their cards you own. Each gallery preview shows up to three of their most valuable cards.",
     "searchPlaceholder": "Search artists",
     "language": "Language",
     "allLanguages": "All languages",
@@ -555,6 +558,7 @@
     "pageOf": "Page {page} of {pages}"
   },
   "collection": {
+    "byPokemon": "By Pokémon",
     "title": "Collection",
     "userCollection": "Collection",
     "ownPhoto": "Your own photo of this card",
@@ -637,9 +641,6 @@
     "noCollectionBinders": "No collection binders yet",
     "binderView": "Binder view",
     "listView": "List view",
-    "groupBy": "Group by",
-    "groupNone": "None",
-    "groupPokemon": "Pokémon",
     "filterSet": "Set",
     "filterType": "Type",
     "filterEnergyType": "Element",
@@ -660,7 +661,8 @@
     "clearFilters": "Clear filters",
     "foundIn": "Found in",
     "otherCards": "Other cards",
-    "multiSpeciesHint": "This card depicts more than one species"
+    "multiSpeciesHint": "This card depicts more than one species",
+    "speciesHint": "Cards with several Pokémon appear once, under the first listed species."
   },
   "printingDetails": {
     "label": "Printing details",
@@ -1036,6 +1038,8 @@
     "retreatSupport": "Retreat Support"
   },
   "analytics": {
+    "byCard": "By card",
+    "duplicateView": "Duplicate view",
     "title": "Analytics",
     "subtitle": "Deep insights into your collection",
     "newSetsDetected": "new sets detected",
@@ -1881,7 +1885,7 @@
     "manualCardHandled": "Added to your collection as a custom card",
     "searchSets": "Search sets",
     "searchSetsPlaceholder": "Set name, code or ID",
-    "noSetMatch": "No sets match your search. Choose \u201cEnter other set ID\u2026\u201d below.",
+    "noSetMatch": "No sets match your search. Choose “Enter other set ID…” below.",
     "newSetName": "Set name (optional)",
     "setRequired": "Choose a set, or enter a new set ID.",
     "scanAgain": "Scan again",

@@ -311,6 +311,73 @@ class ArtistChecklistTests(unittest.TestCase):
                 return card
         self.fail(f"{tcg_card_id} not in checklist: {[c['tcg_card_id'] for c in payload['cards']]}")
 
+    def test_exact_artist_match_keeps_similarly_named_artists_separate(self):
+        self.db.add(Card(id="studio-1_en", tcg_card_id="studio-1", name="Studio", lang="en",
+                         artist="Mitsuhiro Arita Studio", is_custom=False))
+        self.db.commit()
+        payload = self._checklist(artist="Mitsuhiro Arita", artist_match="exact", page_size=200)
+        self.assertEqual(payload["artists"], ["Mitsuhiro Arita"])
+        self.assertNotIn("studio-1_en", [card["id"] for card in payload["cards"]])
+        self.assertEqual(self._checklist(artist="arita", artist_match="exact")["total_count"], 0)
+        response = self.client.get("/api/cards/artist-checklist",
+                                   params={"artist": "arita", "artist_match": "bogus"})
+        self.assertEqual(response.status_code, 400)
+
+    def test_missing_values_and_price_sort_use_shared_valuation(self):
+        self.db.add_all([
+            Card(id="quote-1_en", tcg_card_id="quote-1", name="TCG fallback", artist="Quote Artist",
+                 lang="en", is_custom=False, price_market=0, price_tcg_normal_market=10,
+                 price_tcg_usd_to_eur=0.9),
+            Card(id="quote-1_de", tcg_card_id="quote-1", name="TCG fallback", artist="Quote Artist",
+                 lang="de", is_custom=False, price_market=0, price_tcg_normal_market=20,
+                 price_tcg_usd_to_eur=0.9),
+            Card(id="quote-2_de", tcg_card_id="quote-2", name="Native trend", artist="Quote Artist",
+                 lang="de", is_custom=False, price_market=0, price_trend=12),
+            Card(id="quote-3_en", tcg_card_id="quote-3", name="No conversion", artist="Quote Artist",
+                 lang="en", is_custom=False, price_tcg_normal_market=100),
+        ])
+        self.db.commit()
+        for language, expected in [("all", 21), ("de", 30)]:
+            with self.subTest(language=language):
+                payload = self._checklist(artist="Quote Artist", lang=language,
+                                          sort_by="price", sort_order="desc", price_field="price_trend")
+                self.assertEqual(payload["missing_value"], expected)
+                index = self.client.get("/api/cards/artists", params={"q": "Quote Artist",
+                                        "lang": language, "price_field": "price_trend"}).json()
+                self.assertEqual(index["artists"][0]["missing_value"], expected)
+        self.assertEqual([card["tcg_card_id"] for card in self._checklist(
+            artist="Quote Artist", sort_by="price", sort_order="desc")["cards"]],
+            ["quote-2", "quote-1", "quote-3"])
+        self.db.add(Setting(key="cross_language_price_fallback", value="false"))
+        self.db.commit()
+        payload = self._checklist(artist="Quote Artist", lang="de")
+        self.assertEqual(payload["missing_value"], 12)
+        index = self.client.get("/api/cards/artists", params={"q": "Quote Artist", "lang": "de"}).json()
+        self.assertEqual(index["artists"][0]["missing_value"], 12)
+
+    def test_manual_value_backs_missing_totals_and_price_ranking(self):
+        self.db.add_all([
+            Card(id="manual-1_en", tcg_card_id="manual-1", name="Manual only",
+                 artist="Manual Artist", lang="en", is_custom=False,
+                 price_market=None, manual_value_override=9.5),
+            Card(id="manual-2_en", tcg_card_id="manual-2", name="Market priced",
+                 artist="Manual Artist", lang="en", is_custom=False, price_market=4.0),
+        ])
+        self.db.commit()
+        payload = self._checklist(artist="Manual Artist", lang="all",
+                                  sort_by="price", sort_order="desc",
+                                  price_field="price_trend")
+        # The lightweight artist rows must resolve the fork's manual fallback,
+        # otherwise the unpriced card would silently drop out of the total.
+        self.assertEqual(payload["missing_value"], 13.5)
+        self.assertEqual(
+            [card["tcg_card_id"] for card in payload["cards"]],
+            ["manual-1", "manual-2"],
+        )
+        group = self._group(payload, "manual-1")
+        self.assertIsNone(group["price_market"])
+        self.assertEqual(group["manual_value_override"], 9.5)
+
     def test_all_languages_group_printings_and_aggregate_ownership(self):
         payload = self._checklist(artist="arita", lang="all")
 

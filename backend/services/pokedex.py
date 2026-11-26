@@ -28,22 +28,6 @@ def pokedex_by_id() -> dict[int, dict]:
     return {int(entry["dex_id"]): entry for entry in load_pokedex()}
 
 
-def species_directory() -> list[dict]:
-    """Return the static species catalogue for names and sprites in the UI."""
-    return [
-        {
-            "dex_id": int(entry["dex_id"]),
-            "name_en": entry["name_en"],
-            "name_de": entry["name_de"],
-            "slug": entry["slug"],
-            "generation": int(entry["generation"]),
-            "region": entry["region"],
-            "types": entry["types"],
-        }
-        for entry in load_pokedex()
-    ]
-
-
 def normalize_dex_ids(value) -> list[int]:
     if not isinstance(value, list):
         return []
@@ -154,6 +138,11 @@ def _catalogue_for_mode(mode: str, available: dict[str, set[str]]) -> list[dict]
     # Do not make completion impossible for game forms without physical cards.
     catalogue.extend(dict(row) for row in form_catalogue() if row["entry_id"] in available)
     return sorted(catalogue, key=lambda row: (int(row["dex_id"]), row.get("form", "base")))
+
+
+def species_directory() -> list[dict]:
+    """Static species names shared with the Pokédex, without collection data."""
+    return [dict(entry) for entry in load_pokedex()]
 
 
 def aggregate_pokedex(

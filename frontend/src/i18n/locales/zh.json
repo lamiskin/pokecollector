@@ -285,7 +285,10 @@
     "allTypes": "所有类型",
     "searchCards": "搜索卡牌...",
     "clearFilters": "清空筛选",
-    "foundIn": "获得自"
+    "foundIn": "获得自",
+    "otherCards": "其他卡牌",
+    "byPokemon": "按宝可梦",
+    "speciesHint": "包含多只宝可梦的卡牌仅在第一个种类下显示一次。"
   },
   "printingDetails": {
     "label": "Printing details",
@@ -459,7 +462,11 @@
     "statusSold": "已售出 ✓",
     "statusOwned": "在库存中",
     "soldFor": "售出价格",
-    "profit": "利润"
+    "profit": "利润",
+    "printing": "种版本",
+    "printings": "种版本",
+    "copy": "张",
+    "copies": "张"
   },
   "products": {
     "title": "产品投资",
@@ -922,6 +929,31 @@
     "searchLangFilter": "按语言筛选搜索"
   },
   "variants": {
+    "label": "版本",
+    "none": "- 无版本 -",
+    "Normal": "普通",
+    "Holo": "全息",
+    "Reverse Holo": "反闪",
+    "First Edition": "初版",
+    "Full Art": "全图",
+    "Alt Art": "异画",
+    "Gold": "金色",
+    "Rainbow": "彩虹",
+    "Illustration Rare": "手绘稀有",
+    "Special Illustration Rare": "特别手绘稀有",
+    "Crown Rare": "皇冠稀有",
+    "Promo": "促销",
+    "Art Rare": "艺术稀有",
+    "Ultra Rare": "超稀有",
+    "Secret Rare": "秘密稀有",
+    "Shiny": "闪光",
+    "allVariants": "所有版本",
+    "filterVariant": "版本"
+  },
+  "artists": {
+    "galleryView": "画廊视图",
+    "listView": "列表视图",
+    "featuredCards": "精选卡牌",
     "label": "版本",
     "none": "- 无版本 -",
     "Normal": "普通",

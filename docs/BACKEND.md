@@ -78,9 +78,12 @@ recognizes code-number pairs such as `PFL 001` or `30C 001`. Set codes may start
 with a digit. A code that matches no set falls back to the name search, so card
 names that look like a code-number pair (`151 025`) stay reachable.
 
-`GET /api/cards/artist-checklist` takes `artist` (accent-insensitive substring),
-`lang`, `ownership`, `sort_by` (`number`, `name`, `price`), `sort_order`, `page`
-and `page_size`. Rows are grouped by card identity (`tcg_card_id`), so one card
+`GET /api/cards/artist-checklist` takes `artist`, `artist_match`, `lang`,
+`ownership`, `sort_by` (`number`, `name`, `price`), `sort_order`, `price_field`,
+`page` and `page_size`. The artist page sends `artist_match=exact`, matching the
+trimmed catalogue name exactly so similarly named artists stay separate. API
+clients can use `artist_match=contains` (the compatibility default) for an
+accent-insensitive substring search; unknown matching modes return HTTP 400. Rows are grouped by card identity (`tcg_card_id`), so one card
 with several language printings appears once; with `lang=all` a card counts as
 owned when any printing is owned, while a specific `lang` judges only that
 printing. Ownership filters the returned page only: the response reports
@@ -95,8 +98,39 @@ ownership.
 returns one row per artist with `total_count`, `owned_count`, `missing_count`,
 `progress`, `missing_value` and the artist's `languages`. Card identities are
 grouped exactly as in the checklist, so a single matching artist reports the
-same totals on both pages; a substring that matches several artists is merged
-into one checklist scope but listed as separate directory rows.
+same totals on both pages. Only an explicit substring checklist scope can merge
+several artists; directory links always request the exact artist. The default sort
+is completion descending (`sort_by=progress&sort_order=desc`), with artist names
+ascending as the stable tie-breaker. Explicit sort parameters override it.
+
+Each artist also includes `preview_cards`, the three highest-valued distinct
+card identities in the visible catalogue, independent of ownership. `lang`
+restricts both the counts and previews. For `lang=all`, the highest-valued visible
+language printing represents each identity, so translated versions cannot take
+multiple slots. Ties use the canonical identity and printing ID for stable order.
+Artists with fewer than three identities return fewer cards; unpriced identities
+fill any remaining slots after priced cards, with a null amount rather than zero.
+
+On both endpoints, the optional `price_field` query parameter selects the shared valuation field
+(default `price_trend`, with the same Cardmarket fallbacks and matching-variant
+TCGplayer EUR conversion as other valuations). German TCGplayer fallback respects
+`cross_language_price_fallback`; other non-English languages do not gain it.
+Missing-value totals and checklist price sorting use those same resolved EUR
+values, not raw provider amounts. For a grouped identity, the first priced visible
+printing is selected in display-language, English, Japanese, then canonical
+language order. Unknown prices contribute nothing to the missing-value estimate
+and sort last, without changing the printing's stored prices. The frontend sends
+the account's price preference to both endpoints.
+
+The directory scans lightweight visible catalogue columns once per request,
+with bounded ownership/settings queries, and values gallery artwork only for
+the requested artist page. Rendering windowing does not eliminate that backend
+scan; larger installations should measure API latency separately from rendering.
+
+Preview entries include `id`, `tcg_card_id`, `name`, `lang`, `images_small`,
+`images_large`, and a `valuation` object with its amount and price provenance.
+Artwork can be requested through `/api/images/card/{id}/small`. Ranking uses
+locally synchronized prices and does not trigger provider requests or updates.
 
 Custom cards belong to exactly one user. Owners may publish a card as a shared template, but other users must clone it before using it in collections, wishlists, binders, products, or trades. Clones have independent IDs, metadata, images, and prices. Manual image URLs must use public HTTPS destinations and are fetched through the size-limited image proxy. Migrating a custom card to its API card keeps the manual image as `custom_image_url` when the official card has no artwork yet (real API art always wins); `upsert_card` clears that fallback once TCGdex publishes art. During upgrade, existing custom cards become shared templates owned by the first-created admin account, while each other referencing user receives one private clone and keeps their existing references.
 
@@ -135,6 +169,7 @@ so time-zone conversion cannot move a release into the preceding month.
 | Method | Path | Notes |
 |--------|------|-------|
 | GET | `/api/collection/` | User-scoped collection |
+| GET | `/api/collection/by-species` | Owner-scoped groups with collection rows, copies and canonical value; accepts `price_field`, `rule_text`, and species-name `language` (`en` or `de`). Every visible row occurs once, under its first valid species, or in `other` for Trainer, Energy, custom and unclassified cards. `groups` use National Dex order; each group includes `dex_id`, `name`, `printing_count`, `copies`, `total_value`, `items`. `other` contains `copies`, `total_value`, `items`; `summary` covers `entries`, `copies`, `total_value`. The existing collection endpoint remains unchanged. |
 | GET | `/api/collection/user/{user_id}` | View another user's collection (read-only, auth required) |
 | POST | `/api/collection/` | Add to collection |
 | POST | `/api/collection/bulk-add` | Bulk-add selected cards; commits each item independently and reports added/updated/failed counts |
@@ -213,8 +248,8 @@ responses.
 | GET | `/api/analytics/rarity-stats` | Rarity distribution |
 | GET | `/api/analytics/trades-summary` | Aggregate trade counts, totals, and deltas |
 | GET | `/api/analytics/investment-tracker` | Portfolio history |
+| GET | `/api/analytics/species-duplicates` | Owner-scoped species with at least two distinct language-specific printings; accepts `price_field` and returns printing quantities, weighted unit prices, values and owner-photo flags |
 | GET | `/api/analytics/new-sets` | Analytics new sets |
-| GET | `/api/analytics/species-duplicates` | Species owned in two or more printings, with per-printing quantities and values |
 | GET | `/api/social/leaderboard` | Multi-user leaderboard |
 | GET | `/api/social/compare/{user_id}` | Multi-user comparison |
 | GET | `/api/social/achievements/{user_id}` | Achievement progress |
@@ -222,23 +257,22 @@ responses.
 | GET | `/api/community/supporters` | Fresh, strictly validated public supporter registry projection; returns `503` with `Cache-Control: no-store` on any upstream or validation failure |
 | GET | `/api/github/rescue-donations` | Rescue donation total from `RESCUE_DONATIONS.csv` |
 
-`/api/analytics/species-duplicates` groups the collection by species and keeps only
-species with at least two distinct printings. A printing is a language-specific
-card row, not an individual collection row: condition/variant rows of one card add
-up as one printing with a quantity-weighted unit price, while the same card in
-English and German counts as two printings. Card-identity completion views such
-as the Pokédex instead group by `tcg_card_id`, so one owned language covers the
-card. Cards mapped to several dex ids count under each species. Species sort by
-printing count, then value; printings sort by value. The summary counts each
-distinct printing once. `/api/pokedex/directory` returns the
-same catalogue order as `/api/pokedex`, without per-user ownership data.
+`/api/analytics/species-duplicates` counts distinct language-specific cards,
+not separate condition/variant collection entries: their quantities and values
+are combined. English and German copies of the same card count as two printings.
+This differs from identity-based Pokédex completion. Multi-species cards count
+under each depicted species; the summary counts each distinct printing once.
+Species sort by printing count, then value, then dex number; printings sort by
+value, set, name and card ID. Trainers without species and custom cards are not
+included in these species statistics, but remain reachable in Collection.
 
 ### Pokédex, Profiles, and Public Sharing
 
 | Method | Path | Notes |
 |--------|------|-------|
 | GET | `/api/pokedex` | Grouped or exact-form completion overview with generation/status/search/form filters |
-| GET | `/api/pokedex/directory` | Static species catalogue (names, slug, generation, region, types) for UI lookups; no database access |
+| GET | `/api/pokedex/directory` | Original contributor API: `{ species: [...] }`, using the same static catalogue without per-user ownership |
+| GET | `/api/pokedex/species` | Authenticated static species directory reused by Collection; includes localized names and no ownership data |
 | GET | `/api/pokedex/{entry_id}` | One species/form with ownership, related forms, and printing summary |
 | GET | `/api/pokedex/images/{kind}/{entry_id}.png` | Cached `sprites` or `artwork` image, including form artwork |
 | GET | `/api/profile/` | Current user's public-profile, value, and Wishlist-visibility preferences and handle |
