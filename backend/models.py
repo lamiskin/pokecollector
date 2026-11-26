@@ -204,6 +204,8 @@ class User(Base):
     is_profile_public = Column(Boolean, default=False, nullable=False)
     public_show_values = Column(Boolean, default=False, nullable=False)
     wishlist_visibility = Column(String, default="private", nullable=False)
+    public_default_new_binders = Column(Boolean, default=False, nullable=False)
+    public_show_all_owned_cards = Column(Boolean, default=False, nullable=False)
     must_change_password = Column(Boolean, default=False)
     created_at = Column(DateTime, default=func.now())
 

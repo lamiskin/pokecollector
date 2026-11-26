@@ -770,6 +770,8 @@ class ProfileUpdate(BaseModel):
     is_profile_public: Optional[bool] = None
     public_show_values: Optional[bool] = None
     wishlist_visibility: Optional[Literal["private", "trade_matches", "public"]] = None
+    public_default_new_binders: Optional[bool] = None
+    public_show_all_owned_cards: Optional[bool] = None
 
 
 class BulkRemoveRequest(BaseModel):

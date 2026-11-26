@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import {
   RefreshCw, TrendingUp, TrendingDown, Layers, Star, Wallet, LogOut,
-  Search, Library, Grid2X2, BarChart3, Settings, Trophy, ArrowRightLeft, ListOrdered, Info, Layers3, Palette,
+  Search, Library, Grid2X2, BarChart3, Settings, Trophy, ArrowRightLeft, ListOrdered, Info, Layers3, Palette, BookOpen,
 } from 'lucide-react'
 import {
   AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer,
@@ -21,6 +21,7 @@ import {
   scanAttentionCount,
 } from '../utils/scanJobs'
 import { mapPortfolioChartData, portfolioApiPeriod, PORTFOLIO_PERIODS } from '../utils/portfolioChart'
+import { isPublicProfilesFeatureEnabled } from '../utils/publicCards'
 
 // Compact number formatter for mobile (1.2k, 3.4M, etc.)
 function compactNum(n) {
@@ -231,6 +232,7 @@ export default function HomeScreen() {
     { to: '/pokedex',    icon: ListOrdered, label: t('nav.pokedex'),    color: '#ffb74d' },
     { to: '/artists',    icon: Palette,     label: t('nav.artists'),    color: '#4db6ac' },
     { to: '/binders',    icon: Layers3,     label: t('nav.binders'),    color: '#7986cb' },
+    ...(isPublicProfilesFeatureEnabled(settings) ? [{ to: '/u', icon: BookOpen, label: t('publicProfiles.directory'), color: '#80cbc4' }] : []),
     { to: '/analytics',  icon: BarChart3,  label: t('nav.analytics'),   color: '#f5c842' },
     { to: '/trades',     icon: ArrowRightLeft, label: t('nav.trades'),   color: '#ff8a65' },
     ...(multiUser ? [{ to: '/leaderboard', icon: Trophy, label: t('nav.leaderboard'), color: '#ffd54f' }] : []),

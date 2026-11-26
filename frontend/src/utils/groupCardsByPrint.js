@@ -12,6 +12,7 @@ export function groupCardsByPrint(cards) {
         name: c.name,
         image: c.image,
         set_name: c.set_name,
+        set_id: c.set_id,
         number: c.number,
         rarity: c.rarity,
         is_custom: Boolean(c.is_custom),

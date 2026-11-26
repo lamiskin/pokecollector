@@ -37,6 +37,9 @@ def _serialize_owner(db: Session, user: User, feature_enabled: bool) -> dict:
         "is_profile_public": bool(user.is_profile_public),
         "public_show_values": bool(user.public_show_values),
         "wishlist_visibility": user.wishlist_visibility or "private",
+        "public_default_new_binders": bool(user.public_default_new_binders),
+        "public_show_all_owned_cards": bool(user.public_show_all_owned_cards),
+        "private_collection_binder_count": pp.count_private_collection_binders(db, user),
         "feature_enabled": feature_enabled,
     }
 
@@ -72,6 +75,12 @@ def update_profile(payload: ProfileUpdate, db: Session = Depends(get_db),
         current_user.public_show_values = payload.public_show_values
     if payload.wishlist_visibility is not None:
         current_user.wishlist_visibility = payload.wishlist_visibility
+    # Stored independently of is_profile_public: switching a profile off must not
+    # erase the preference, and new binders made while off stay private.
+    if payload.public_default_new_binders is not None:
+        current_user.public_default_new_binders = payload.public_default_new_binders
+    if payload.public_show_all_owned_cards is not None:
+        current_user.public_show_all_owned_cards = payload.public_show_all_owned_cards
     try:
         db.commit()
     except IntegrityError as exc:

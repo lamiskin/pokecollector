@@ -44,6 +44,13 @@ export default function PublicProfile() {
           </div>
         )
       ) : <>
+        <Link to={`/u/${handle}/cards`} className="mb-4 flex items-center justify-between gap-3 rounded-2xl border border-brand-red/30 bg-brand-red/10 p-4 transition hover:bg-brand-red/15 focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand-red">
+          <span>
+            <span className="block font-semibold">{t('publicProfiles.allCards')}</span>
+            <span className="mt-0.5 block text-sm text-text-secondary">{t('publicProfiles.allCardsLinkDesc')}</span>
+          </span>
+          <span aria-hidden="true" className="text-xl text-brand-red">→</span>
+        </Link>
         {profile.binders.length === 0 && (
           <div className="rounded-2xl border border-border bg-bg-secondary p-8 text-center text-text-secondary">
             {t('publicProfiles.noSharedBinders')}
