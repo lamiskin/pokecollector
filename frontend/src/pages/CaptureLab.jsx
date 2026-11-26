@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Camera, Check, Download, Eye, EyeOff, ImagePlus, Loader2, RefreshCw, Save, ScanLine, Trash2, VideoOff, Volume2, VolumeX, X } from 'lucide-react'
-import {
+import api, {
   deleteCaptureLabEntry,
   enqueueScanJob,
   fetchCaptureLabFileBlob,
@@ -31,7 +31,14 @@ import {
   setCaptureSoundEnabled,
 } from '../utils/captureSound'
 import { quadAreaFraction } from '../utils/perspectiveWarp'
-import { signatureDistance, signatureOf, nextRearmStreak, shouldRearmByChange, REARM_CHANGED_COOLDOWN_MS } from '../utils/patchSignature'
+import {
+  signatureDistance,
+  signatureOf,
+  nextRearmStreak,
+  shouldRearmByChange,
+  REARM_CHANGED_COOLDOWN_MS,
+  REARM_SIGNATURE_DIFF,
+} from '../utils/patchSignature'
 import {
   cornerAgreement,
   createTracker,
@@ -178,6 +185,104 @@ const AUTO_TRACK_OBS_MAX_AGE_MS = 1500
 // How long the overlay's success beat stays on screen; the overlay itself fades
 // the ring inside this window, so it only needs to outlive that animation.
 const CAPTURE_BEAT_MS = 230
+
+// Every capture attempt (automatic fire or manual tap) is kept in memory for the
+// session outcome panel and the POSTed session report. Oldest go first.
+const ATTEMPT_LOG_LIMIT = 200
+
+// Which gates each policy actually applies. The quad policy keeps the historical
+// full set; the framing policy keeps freshness, presence, edge containment, size
+// and the stability hold, and drops only the aspect heuristic and the separate
+// detector-corroboration requirement. Manual capture keeps the quad geometry
+// gates but never requires corroboration, area or a hold.
+const POLICY_GATES = {
+  quad: [
+    'fresh-geometry',
+    'edge-containment',
+    'aspect',
+    'corroboration',
+    'min-area',
+    'stability-hold',
+  ],
+  framing: [
+    'fresh-geometry',
+    'presence',
+    'edge-containment',
+    'min-area',
+    'stability-hold',
+  ],
+}
+
+function gatesAppliedFor(policy, trigger) {
+  // Manual capture keeps today's behaviour: it only enforces fresh geometry and
+  // falls back to the full frame when that refuses, so it never claims the
+  // automatic policy's gates.
+  if (trigger === 'manual') return ['fresh-geometry']
+  return [...(POLICY_GATES[policy] || POLICY_GATES.quad)]
+}
+
+// The pill owns the copy for the two containment causes; every other refusal is
+// an internal reason with no dedicated pill string, so it is recorded as-is.
+const REFUSAL_PILL_TEXT = {
+  aspect: 'Show the whole card',
+  edge: 'Move the card away from the edge',
+  rechecking: 'Checking the card…',
+}
+
+function refusalReasonText(reason) {
+  return REFUSAL_PILL_TEXT[reason] || reason
+}
+
+// Per-side padding actually left around the card in the delivered crop, plus
+// whether the padded box was large enough to contain every corner unclipped.
+function regionCheckFor(corners, acquisition) {
+  const frameWidth = acquisition?.frameWidth
+  const frameHeight = acquisition?.frameHeight
+  const box = acquisition?.sourceRect
+  if (!corners || corners.length !== 4 || !box || !frameWidth || !frameHeight) return null
+  const xs = corners.map(([x]) => x * frameWidth)
+  const ys = corners.map(([, y]) => y * frameHeight)
+  const quadMinX = Math.min(...xs)
+  const quadMaxX = Math.max(...xs)
+  const quadMinY = Math.min(...ys)
+  const quadMaxY = Math.max(...ys)
+  const boxWidth = Math.max(1, quadMaxX - quadMinX)
+  const boxHeight = Math.max(1, quadMaxY - quadMinY)
+  return {
+    quadInsideBox: quadMinX >= box.x && quadMaxX <= box.x + box.width
+      && quadMinY >= box.y && quadMaxY <= box.y + box.height,
+    boxPaddingFraction: {
+      left: Number(((quadMinX - box.x) / boxWidth).toFixed(4)),
+      top: Number(((quadMinY - box.y) / boxHeight).toFixed(4)),
+      right: Number(((box.x + box.width - quadMaxX) / boxWidth).toFixed(4)),
+      bottom: Number(((box.y + box.height - quadMaxY) / boxHeight).toFixed(4)),
+    },
+  }
+}
+
+// Compare the delivered crop against the last staged capture's signature. The
+// signature is the existing patchSignature one; similarity is 1 - its distance,
+// clamped to 0..1, and a duplicate is the existing re-arm threshold on distance.
+function appearanceAgainstLast(canvas, lastSignature) {
+  if (!canvas) return { similarity: null, duplicate: null, signature: null }
+  let signature = null
+  try {
+    signature = signatureOf(canvas, 0, 0, canvas.width, canvas.height)
+  } catch {
+    signature = null
+  }
+  if (!signature) return { similarity: null, duplicate: null, signature: null }
+  // The first staged capture has nothing to compare against, but its signature
+  // still becomes the baseline for the next one.
+  if (!lastSignature) return { similarity: null, duplicate: null, signature }
+  const distance = signatureDistance(lastSignature, signature)
+  if (!Number.isFinite(distance)) return { similarity: null, duplicate: null, signature }
+  return {
+    similarity: Number(Math.max(0, Math.min(1, 1 - distance)).toFixed(4)),
+    duplicate: distance <= REARM_SIGNATURE_DIFF,
+    signature,
+  }
+}
 
 function formatBytes(bytes) {
   if (!bytes && bytes !== 0) return 'unknown size'
@@ -461,6 +566,14 @@ export default function CaptureLab() {
   const autoFireTimerRef = useRef(null)
   const autoFireRef = useRef(null)
   const autoStateRef = useRef(newAutoState())
+  // First observation of the card currently in view, for time-to-stage.
+  const presenceSincePerfRef = useRef(null)
+  // Last staged crop's appearance signature, retained across re-arms so the
+  // duplicate check can compare against the previous capture, not just the
+  // current re-arm baseline.
+  const lastStagedSignatureRef = useRef(null)
+  const attemptLogRef = useRef([])
+  const attemptByItemIdRef = useRef(new Map())
 
   const [status, setStatus] = useState('idle')
   const [cameraError, setCameraError] = useState('')
@@ -491,6 +604,8 @@ export default function CaptureLab() {
   const [trackerStats, setTrackerStats] = useState({ hits: 0, attempts: 0, reason: 'frame' })
   const [diagCount, setDiagCount] = useState({ samples: 0, frames: 0, events: 0 })
   const [diagSend, setDiagSend] = useState({ status: 'idle', message: '', error: '' })
+  const [attempts, setAttempts] = useState([])
+  const [reportSend, setReportSend] = useState({ status: 'idle', message: '', error: '', id: null })
   const [detectAgeMs, setDetectAgeMs] = useState(null)
   // Auto-capture is the mode this page exists for; forgetting it on every reload
   // costs the user a step they will not always remember. Persisted like the other
@@ -503,8 +618,10 @@ export default function CaptureLab() {
     }
   })
   // Which rule decides when automatic capture fires. 'quad' is the historical
-  // gate (aspect, edge containment, detector corroboration); 'framing' keeps
-  // only presence, stability and size. Persisted like the other preferences.
+  // gate (fresh geometry, edge containment, aspect, detector corroboration);
+  // 'framing' keeps fresh geometry, presence, edge containment, size and the
+  // stability hold, dropping only the aspect heuristic and the separate
+  // detector-corroboration requirement. Persisted like the other preferences.
   const [capturePolicy, setCapturePolicyState] = useState(() => {
     try {
       return window.localStorage.getItem(CAPTURE_POLICY_STORAGE_KEY) === 'framing'
@@ -733,14 +850,17 @@ export default function CaptureLab() {
       // guard when no recent detector quad is available.
       framing_presence_hits: TRACKER_FALLBACK_HITS,
       // The quad policy's automatic-capture gate, including that its aspect
-      // band is compared against min(r, 1/r). Under 'framing' these numbers are
-      // still recorded for provenance but not enforced.
+      // band is compared against min(r, 1/r). Under 'framing' only edge_min is
+      // enforced; the aspect band and detector corroboration are dropped.
       capture_gate: {
         edge_min: CAPTURE_EDGE_MIN,
         aspect_min: CAPTURE_ASPECT_MIN,
         aspect_max: CAPTURE_ASPECT_MAX,
         aspect_orientation_normalised: true,
       },
+      // Exactly which gates each policy applies, so a recording cannot be read
+      // against the wrong rule.
+      policy_gates: POLICY_GATES,
       // Hold-window thresholds, so a recording can be read against the rule that
       // produced its hold-reset events.
       auto_hold: {
@@ -1036,6 +1156,7 @@ export default function CaptureLab() {
     lastDetectionAtRef.current = null
     lastModelFrameAtRef.current = null
     lastUsableAtRef.current = null
+    presenceSincePerfRef.current = null
     liveInFlightRef.current = false
     liveLastTsRef.current = null
     liveIntervalRef.current = null
@@ -1427,9 +1548,86 @@ export default function CaptureLab() {
     setDockAnnouncement(`Removed #${target.sequence} · ${Math.max(0, pendingRef.current.length - 1)} in tray`)
   }
 
-  const captureFullFrame = ({ mode = 'manual' } = {}) => {
+  // ── capture outcome instrumentation ────────────────────────────────────
+  // One record per trigger (an automatic fire or a manual tap), not per internal
+  // retry: a geometry retry and the manual full-frame fallback belong to the
+  // same attempt.
+  const createCaptureAttempt = trigger => {
+    const nowPerf = performance.now()
+    const nowWall = Date.now()
+    const presencePerf = presenceSincePerfRef.current
+    const record = {
+      at: null,
+      policy: capturePolicyRef.current,
+      trigger,
+      outcome: null,
+      refusalReason: null,
+      presenceAt: presencePerf == null
+        ? null
+        : new Date(nowWall - (nowPerf - presencePerf)).toISOString(),
+      attemptedAt: new Date(nowWall).toISOString(),
+      stagedAt: null,
+      timeToStageMs: null,
+      quadSource: 'none',
+      quadAgeMs: null,
+      contained: null,
+      quadArea: null,
+      stagedBox: null,
+      regionCheck: null,
+      appearanceSimilarity: null,
+      duplicateSuspected: null,
+      upload: null,
+      gatesApplied: gatesAppliedFor(capturePolicyRef.current, trigger),
+    }
+    // Non-enumerable so neither the POST nor the summary carries bookkeeping.
+    Object.defineProperty(record, '__meta', {
+      value: { presencePerf, attemptPerf: nowPerf, stagedPerf: null, itemId: null },
+      enumerable: false,
+      writable: true,
+    })
+    return record
+  }
+
+  const pushAttempt = record => {
+    const log = attemptLogRef.current
+    log.push(record)
+    while (log.length > ATTEMPT_LOG_LIMIT) log.shift()
+    setAttempts([...log])
+  }
+
+  const finalizeCaptureAttempt = (record, fields = {}) => {
+    if (!record || record.outcome) return
+    Object.assign(record, fields)
+    record.at = new Date().toISOString()
+    if (record.outcome === 'staged' && record.__meta.stagedPerf != null
+      && record.__meta.presencePerf != null) {
+      record.timeToStageMs = Math.max(
+        0,
+        Math.round(record.__meta.stagedPerf - record.__meta.presencePerf),
+      )
+    }
+    pushAttempt(record)
+    recordDiagEvent('capture-outcome', { ...record })
+  }
+
+  const markAttemptStaged = (record, fields = {}) => {
+    if (!record) return
+    record.__meta.stagedPerf = performance.now()
+    record.stagedAt = new Date().toISOString()
+    finalizeCaptureAttempt(record, { outcome: 'staged', refusalReason: null, ...fields })
+  }
+
+  const captureFullFrame = ({ mode = 'manual', attemptRecord = null } = {}) => {
+    const record = attemptRecord || createCaptureAttempt('manual')
     const video = videoRef.current
-    if (!video || !video.videoWidth || !video.videoHeight) return
+    if (!video || !video.videoWidth || !video.videoHeight) {
+      finalizeCaptureAttempt(record, {
+        outcome: 'refused',
+        refusalReason: refusalReasonText('no-video'),
+        quadSource: 'none',
+      })
+      return
+    }
     // No trustworthy geometry: use the centred card guide, with the same
     // generous margin as a detected-card crop. Never silently save the frame.
     const frameWidth = video.videoWidth
@@ -1454,9 +1652,24 @@ export default function CaptureLab() {
     canvas.height = Math.max(1, Math.round(sourceRect.height * scale))
     canvas.getContext('2d').drawImage(video, sourceRect.x, sourceRect.y, sourceRect.width, sourceRect.height, 0, 0, canvas.width, canvas.height)
     canvas.toBlob(blob => {
-      if (!blob) return
+      if (!blob) {
+        setCaptureNote('The capture could not be encoded; nothing captured.')
+        finalizeCaptureAttempt(record, {
+          outcome: 'refused',
+          refusalReason: refusalReasonText('encode'),
+          quadSource: 'none',
+          stagedBox: { ...sourceRect },
+        })
+        return
+      }
       if (trayUnsentCount() >= TRAY_CAPACITY) {
         setCaptureNote(`Tray full · Review & send ${TRAY_CAPACITY}`)
+        finalizeCaptureAttempt(record, {
+          outcome: 'refused',
+          refusalReason: refusalReasonText('tray-full'),
+          quadSource: 'none',
+          stagedBox: { ...sourceRect },
+        })
         return
       }
       const file = new File([blob], `capture-${Date.now()}.jpg`, { type: 'image/jpeg' })
@@ -1465,7 +1678,20 @@ export default function CaptureLab() {
       })
       if (created[0]) {
         stageDock(created[0], null, null, pendingRef.current.length + 1)
+        attemptByItemIdRef.current.set(created[0].id, record)
       }
+      const appearance = appearanceAgainstLast(canvas, lastStagedSignatureRef.current)
+      if (appearance.signature) lastStagedSignatureRef.current = appearance.signature
+      markAttemptStaged(record, {
+        quadSource: 'none',
+        quadAgeMs: null,
+        contained: null,
+        quadArea: null,
+        stagedBox: { ...sourceRect },
+        regionCheck: null,
+        appearanceSimilarity: appearance.similarity,
+        duplicateSuspected: appearance.duplicate,
+      })
       if (soundOn) playCaptureSuccess()
       recordDiagEvent('capture', {
         mode,
@@ -1474,6 +1700,7 @@ export default function CaptureLab() {
         // The whole frame is this capture's crop; no card quad was involved.
         cropRect: sourceRect,
         cropQuad: null,
+        gatesApplied: record.gatesApplied,
       })
     }, 'image/jpeg', 0.92)
   }
@@ -1623,13 +1850,26 @@ export default function CaptureLab() {
     liveScheduleRef.current?.(0)
   })
 
-  const captureWithFreshGeometry = async ({ auto = false } = {}) => {
+  const captureWithFreshGeometry = async ({ auto = false, attemptRecord = null } = {}) => {
     if (captureInFlightRef.current) return false
     captureInFlightRef.current = true
     const mode = auto ? 'auto' : 'manual'
     // The policy only decides when automatic capture fires; a manual tap keeps
     // today's quad gates and fallback behaviour.
     const framing = auto && capturePolicyRef.current === 'framing'
+    const record = attemptRecord || createCaptureAttempt(mode)
+    // A manual attempt is finalised by its caller after the full-frame fallback
+    // has had its turn; only an automatic attempt ends here on refusal.
+    const finishRefusal = (reason, extra = {}) => {
+      if (record.trigger === 'auto') {
+        finalizeCaptureAttempt(record, {
+          outcome: 'refused',
+          refusalReason: refusalReasonText(reason),
+          ...extra,
+        })
+      }
+      return false
+    }
     try {
       // Two passes at most: the first may fail on stale geometry, then a fresh
       // detection is requested and the capture is retried once.
@@ -1671,9 +1911,20 @@ export default function CaptureLab() {
           ? now - lastModelFrameAtRef.current
           : null
         const modelUsable = Boolean(liveResultRef.current?.usable)
-        // The framing policy drops the tracker-freshness gate. Its presence
-        // guard also names the quad to capture: a proven tracker, else the
-        // recent detector quad.
+        // Both policies keep fresh geometry: a tracked quad must be younger than
+        // CAPTURE_QUAD_MAX_AGE_MS, otherwise the model quad must be younger than
+        // CAPTURE_MODEL_MAX_AGE_MS. This is the freshness gate the framing policy
+        // previously dropped.
+        const freshness = shouldAcceptCapture({
+          hasTracked,
+          trackedAgeMs,
+          modelAgeMs,
+          modelUsable,
+        })
+        // The framing policy's presence guard names the quad to capture: a proven
+        // tracker, else the recent detector quad. It keeps freshness, edge
+        // containment, size and the hold, and drops only the aspect heuristic and
+        // the separate detector-corroboration requirement.
         const presence = framing
           ? framingPresence({
             hasTrackedQuad: hasTracked,
@@ -1683,18 +1934,18 @@ export default function CaptureLab() {
             trackerHits: trackerStatsRef.current.hits,
           })
           : null
-        const decision = framing
-          ? {
-            ok: presence.ok,
-            reason: presence.ok ? 'ok' : 'no-presence',
-            source: presence.source === 'tracked' ? 'tracked' : 'model',
+        let decision
+        if (framing) {
+          if (!presence.ok) {
+            decision = { ok: false, reason: 'no-presence', source: presence.source }
+          } else if (!freshness.ok) {
+            decision = { ok: false, reason: freshness.reason, source: freshness.source }
+          } else {
+            decision = { ok: true, reason: 'ok', source: freshness.source }
           }
-          : shouldAcceptCapture({
-            hasTracked,
-            trackedAgeMs,
-            modelAgeMs,
-            modelUsable,
-          })
+        } else {
+          decision = freshness
+        }
         const quadAgeMs = decision.source === 'tracked'
           ? (trackedAgeMs == null ? null : Math.round(trackedAgeMs))
           : (modelAgeMs == null ? null : Math.round(modelAgeMs))
@@ -1736,7 +1987,10 @@ export default function CaptureLab() {
             })
           }
           if (auto) rearmAutoCapture()
-          return false
+          return finishRefusal(decision.reason, {
+            quadSource: decision.source === 'tracked' ? 'tracker' : (decision.source === 'model' ? 'model' : 'none'),
+            quadAgeMs,
+          })
         }
         const corners = decision.source === 'tracked'
           ? trackedQuadRef.current
@@ -1758,7 +2012,7 @@ export default function CaptureLab() {
           })
           // The held quad disappeared before the frame could be cropped.
           if (auto) rearmAutoCapture()
-          return false
+          return finishRefusal('no-quad', { quadSource: 'none', quadAgeMs })
         }
 
         const confirmAgeMs = lastConfirmTsRef.current == null
@@ -1784,23 +2038,27 @@ export default function CaptureLab() {
           attempt.quadAspect = Number(contain.quadAspect.toFixed(4))
           attempt.orientationRatio = Number(contain.orientationRatio.toFixed(4))
           lastAttemptFieldsRef.current = attemptFields()
-          // The framing policy keeps these numbers as provenance but does not
-          // gate on them: aspect and edge containment are the gates it drops.
-          if (auto && !framing) {
+          // Both policies require the whole card to be inside the frame. The
+          // framing policy drops only the aspect band; the quad policy keeps it.
+          const edgeOk = contain.edgeContainment >= CAPTURE_EDGE_MIN
+          const containedOk = framing ? edgeOk : contain.ok
+          const containCheck = framing
+            ? (edgeOk ? null : 'edge')
+            : (contain.check ?? 'aspect')
+          if (auto) {
             // The pill names this cause for as long as the gate keeps refusing;
             // the next passing attempt or a different phase clears it.
-            setCaptureRefusal(contain.ok ? null : (contain.check ?? 'aspect'))
+            setCaptureRefusal(containedOk ? null : containCheck)
           }
-          if (auto && !framing && !contain.ok) {
+          if (auto && !containedOk) {
             // The gate names the comparison that failed; the aspect band is
             // applied to the orientation-normalised ratio, so a sideways card
             // passes and its log describes the same number the gate compared.
-            const check = contain.check ?? 'aspect'
             recordDiagEvent('capture-attempt', {
               ok: false,
               retry,
               reason: 'not-containable',
-              check,
+              check: containCheck,
               waitedMs: null,
               quadAgeMs,
               frameTime: null,
@@ -1812,7 +2070,12 @@ export default function CaptureLab() {
               ...attemptFields(),
             })
             liveScheduleRef.current?.(0)
-            return false
+            return finishRefusal(containCheck, {
+              quadSource: decision.source === 'tracked' ? 'tracker' : 'model',
+              quadAgeMs,
+              contained: edgeOk,
+              quadArea: Number(quadAreaFraction(corners).toFixed(4)),
+            })
           }
 
         // The framing policy already established presence; it drops the
@@ -1822,7 +2085,7 @@ export default function CaptureLab() {
         let trackerCorroborated = false
         let corroborationSource = 'none'
         if (framing) {
-          corroborationSource = presence.source === 'tracked' ? 'tracker' : 'model'
+          corroborationSource = decision.source === 'tracked' ? 'tracker' : 'model'
         } else {
           corroborated = decision.source === 'model' || isCorroborated({
             lastConfirmTs: lastConfirmTsRef.current,
@@ -1888,7 +2151,12 @@ export default function CaptureLab() {
             // This block only runs for auto-capture, which only starts after a
             // completed hold, so the refusal cue is never a positioning nudge.
             rearmAutoCapture()
-            return false
+            return finishRefusal('uncorroborated', {
+              quadSource: decision.source === 'tracked' ? 'tracker' : 'model',
+              quadAgeMs,
+              contained: contain.edgeContainment >= CAPTURE_EDGE_MIN,
+              quadArea: Number(quadAreaFraction(corners).toFixed(4)),
+            })
           }
         }
 
@@ -1919,7 +2187,12 @@ export default function CaptureLab() {
           // A completed hold ended with nothing captured: the camera never
           // produced a fresh frame, which the user cannot see.
           if (auto) rearmAutoCapture()
-          return false
+          return finishRefusal(acquisition.reason, {
+            quadSource: decision.source === 'tracked' ? 'tracker' : 'model',
+            quadAgeMs,
+            contained: contain.edgeContainment >= CAPTURE_EDGE_MIN,
+            quadArea: Number(quadAreaFraction(corners).toFixed(4)),
+          })
         }
 
         // The frame is now committed to this capture attempt; a retry must wait
@@ -1946,7 +2219,13 @@ export default function CaptureLab() {
             ...attemptFields(),
           })
           if (auto) rearmAutoCapture()
-          return false
+          return finishRefusal('encode', {
+            quadSource: decision.source === 'tracked' ? 'tracker' : 'model',
+            quadAgeMs,
+            contained: contain.edgeContainment >= CAPTURE_EDGE_MIN,
+            quadArea: Number(quadAreaFraction(corners).toFixed(4)),
+            stagedBox: { ...acquisition.sourceRect },
+          })
         }
 
         // Focus proxy: annotation for manual captures, and a low-detail skip for
@@ -1991,13 +2270,25 @@ export default function CaptureLab() {
           })
           lastAttemptFieldsRef.current = attemptFields()
           liveScheduleRef.current?.(0)
-          return false
+          return finishRefusal('low-detail', {
+            quadSource: decision.source === 'tracked' ? 'tracker' : 'model',
+            quadAgeMs,
+            contained: contain.edgeContainment >= CAPTURE_EDGE_MIN,
+            quadArea: Number(quadAreaFraction(corners).toFixed(4)),
+            stagedBox: { ...acquisition.sourceRect },
+          })
         }
 
         if (trayUnsentCount() >= TRAY_CAPACITY) {
           setCaptureNote(`Tray full · Review & send ${TRAY_CAPACITY}`)
           if (auto) disarmAutoCapture()
-          return false
+          return finishRefusal('tray-full', {
+            quadSource: decision.source === 'tracked' ? 'tracker' : 'model',
+            quadAgeMs,
+            contained: contain.edgeContainment >= CAPTURE_EDGE_MIN,
+            quadArea: Number(quadAreaFraction(corners).toFixed(4)),
+            stagedBox: { ...acquisition.sourceRect },
+          })
         }
         // Geometry provenance for this exact acquisition. The quad is the one
         // this capture used, mapped into the encoded crop's integer, clamped
@@ -2031,27 +2322,30 @@ export default function CaptureLab() {
             acquisition.sourceRect,
             pendingRef.current.length + 1,
           )
+          attemptByItemIdRef.current.set(created[0].id, record)
         }
         // A capture resets hunting to full speed for the next card.
         lastUsableAtRef.current = performance.now()
-        // Remember the captured look so a new card in the same quad can re-arm.
-        try {
-          capturedSignatureRef.current = signatureOf(
-            acquisition.canvas,
-            0,
-            0,
-            acquisition.canvas.width,
-            acquisition.canvas.height,
-          )
-        } catch {
-          capturedSignatureRef.current = null
-        }
+        // Reuse the existing appearance signature for both the re-arm baseline
+        // and the duplicate check against the previous staged capture.
+        const appearance = appearanceAgainstLast(acquisition.canvas, lastStagedSignatureRef.current)
+        capturedSignatureRef.current = appearance.signature
+        if (appearance.signature) lastStagedSignatureRef.current = appearance.signature
+        record.quadSource = decision.source === 'tracked' ? 'tracker' : 'model'
+        record.quadAgeMs = quadAgeMs
+        record.contained = contain.edgeContainment >= CAPTURE_EDGE_MIN
+        record.quadArea = Number(quadAreaFraction(corners).toFixed(4))
+        record.stagedBox = { ...acquisition.sourceRect }
+        record.regionCheck = regionCheckFor(corners, acquisition)
+        record.appearanceSimilarity = appearance.similarity
+        record.duplicateSuspected = appearance.duplicate
         rearmChangedStreakRef.current = 0
         lastRearmCheckAtRef.current = 0
         lastRearmFrameTimeRef.current = null
         // The success beat starts only once the File exists and is staged.
         setCaptureBeatAt(performance.now())
         if (soundOn) playCaptureSuccess()
+        markAttemptStaged(record)
         recordDiagEvent('capture', {
           mode,
           rectified: false,
@@ -2067,6 +2361,7 @@ export default function CaptureLab() {
           quadSource: decision.source,
           edgeVariance: focusVariance,
           corroboration: corroborationSource,
+          gatesApplied: record.gatesApplied,
           ...(corroborationSource === 'tracker'
             ? {
               trackerHits: trackerStatsRef.current.hits,
@@ -2105,10 +2400,13 @@ export default function CaptureLab() {
 
   const captureFrame = () => {
     primeCaptureAudio()
+    // One manual attempt spans the geometry capture and its full-frame fallback:
+    // the tap is the attempt, not each internal step.
+    const record = createCaptureAttempt('manual')
     if (liveDetectionRef.current) {
       // A tap is a decision: if freshness or the automatic gates refuse, stage
       // a full frame rather than refusing the collector.
-      void captureWithFreshGeometry({ auto: false }).then(ok => {
+      void captureWithFreshGeometry({ auto: false, attemptRecord: record }).then(ok => {
         if (ok) return
         recordDiagEvent('capture-attempt', {
           ok: false,
@@ -2124,11 +2422,13 @@ export default function CaptureLab() {
           corroboration: 'none',
           ...(lastAttemptFieldsRef.current || {}),
         })
-        captureFullFrame()
+        captureFullFrame({ attemptRecord: record })
       })
       return
     }
-    captureFullFrame()
+    // No live geometry to check: the full-frame path applies no policy gate.
+    record.gatesApplied = []
+    captureFullFrame({ attemptRecord: record })
   }
 
   const stopAutoFireTimer = () => {
@@ -2269,6 +2569,9 @@ export default function CaptureLab() {
       )
       if (shouldRearmByChange(distance, rearmChangedStreakRef.current, suppressed)) {
         recordDiagEvent('auto-rearm', { reason: 'changed' })
+        // A changed look inside the same quad is a new card: its presence clock
+        // starts now, not when the previous card first appeared.
+        presenceSincePerfRef.current = performance.now()
         rearmAutoCapture()
       }
     } catch {
@@ -2280,13 +2583,27 @@ export default function CaptureLab() {
   // Deliberate physical-presentation heuristic, not card identity: two identical
   // copies in a row still require the card to be removed and replaced.
   const evaluateAutoCapture = result => {
+    const now = performance.now()
+    // Presence is the first observation of the card currently in view, used for
+    // time-to-stage. It survives a capture in flight and a paused sheet; it
+    // resets only when neither a usable model quad nor a live tracked quad
+    // describes a card.
+    const trackedNow = trackedQuadRef.current
+    const trackerPresent = trackedNow != null
+      && trackerLastTsRef.current != null
+      && now - trackerLastTsRef.current <= AUTO_TRACK_OBS_MAX_AGE_MS
+    const modelPresent = result.usable && result.area >= MIN_CARD_AREA
+    if (modelPresent || trackerPresent) {
+      if (presenceSincePerfRef.current == null) presenceSincePerfRef.current = now
+    } else {
+      presenceSincePerfRef.current = null
+    }
     if (captureInFlightRef.current) return
     // The inspection sheet is an explicit pause: it neither accumulates nor
     // re-arms a hold while the collector is looking at a capture.
     if (sheetOpenRef.current) return
     const state = autoStateRef.current
-    const now = performance.now()
-    const qualifies = result.usable && result.area >= MIN_CARD_AREA
+    const qualifies = modelPresent
     const resetWindow = () => {
       state.anchorCorners = null
       state.anchorTs = null
@@ -3182,6 +3499,20 @@ export default function CaptureLab() {
     if (inFlightRef.current.has(item.id)) return
     inFlightRef.current.add(item.id)
     updatePending(item.id, { status: 'uploading', progress: 0, error: '' })
+    // Link this upload back to the capture attempt that staged the file, so the
+    // outcome log can report whether it reached the server.
+    const attemptRecord = attemptByItemIdRef.current.get(item.id)
+    if (attemptRecord) {
+      attemptRecord.upload = { ok: null, status: 'uploading' }
+      setAttempts([...attemptLogRef.current])
+      recordDiagEvent('capture-upload', {
+        attemptedAt: attemptRecord.attemptedAt,
+        policy: attemptRecord.policy,
+        trigger: attemptRecord.trigger,
+        outcome: attemptRecord.outcome,
+        upload: attemptRecord.upload,
+      })
+    }
     const trackSettings = trackInfo
       ? JSON.stringify({ settings: trackInfo.settings, capabilities: trackInfo.capabilities })
       : ''
@@ -3199,10 +3530,32 @@ export default function CaptureLab() {
       )
       if (!mountedRef.current) return
       updatePending(item.id, { status: 'saved', progress: 100, savedName: created.name })
+      if (attemptRecord) {
+        attemptRecord.upload = { ok: true, status: 'saved' }
+        setAttempts([...attemptLogRef.current])
+        recordDiagEvent('capture-upload', {
+          attemptedAt: attemptRecord.attemptedAt,
+          policy: attemptRecord.policy,
+          trigger: attemptRecord.trigger,
+          outcome: attemptRecord.outcome,
+          upload: attemptRecord.upload,
+        })
+      }
       queryClient.invalidateQueries({ queryKey: CAPTURE_LAB_QUERY_KEY })
     } catch (error) {
       if (!mountedRef.current) return
       updatePending(item.id, { status: 'error', error: errorMessage(error) })
+      if (attemptRecord) {
+        attemptRecord.upload = { ok: false, status: 'error' }
+        setAttempts([...attemptLogRef.current])
+        recordDiagEvent('capture-upload', {
+          attemptedAt: attemptRecord.attemptedAt,
+          policy: attemptRecord.policy,
+          trigger: attemptRecord.trigger,
+          outcome: attemptRecord.outcome,
+          upload: attemptRecord.upload,
+        })
+      }
     } finally {
       inFlightRef.current.delete(item.id)
     }
@@ -3262,6 +3615,73 @@ export default function CaptureLab() {
     item.scanStatus !== 'done' && item.scanStatus !== 'uploading'
   ))
   const listDisabled = listError?.response?.status === 404
+
+  // Session outcome summary for the compact panel and the POSTed report. The
+  // median is over staged attempts only; a refused attempt has no stage time.
+  const attemptSummary = useMemo(() => {
+    const staged = attempts.filter(entry => entry.outcome === 'staged')
+    const refused = attempts.filter(entry => entry.outcome === 'refused')
+    const refusedByReason = {}
+    for (const entry of refused) {
+      const reason = entry.refusalReason || 'unknown'
+      refusedByReason[reason] = (refusedByReason[reason] || 0) + 1
+    }
+    const times = staged
+      .map(entry => entry.timeToStageMs)
+      .filter(value => Number.isFinite(value))
+      .sort((a, b) => a - b)
+    let medianTimeToStageMs = null
+    if (times.length) {
+      const middle = Math.floor(times.length / 2)
+      medianTimeToStageMs = times.length % 2
+        ? times[middle]
+        : Math.round((times[middle - 1] + times[middle]) / 2)
+    }
+    return {
+      attempts: attempts.length,
+      staged: staged.length,
+      refused: refused.length,
+      refusedByReason,
+      medianTimeToStageMs,
+      duplicatesSuspected: attempts.filter(entry => entry.duplicateSuspected === true).length,
+      policy: capturePolicy,
+    }
+  }, [attempts, capturePolicy])
+
+  const sendSessionReport = async () => {
+    if (reportSend.status === 'sending') return
+    setReportSend({ status: 'sending', message: '', error: '', id: null })
+    const payload = {
+      page: 'capture-lab',
+      mode: 'session',
+      device: {
+        ua: navigator.userAgent,
+        hardwareConcurrency: navigator.hardwareConcurrency ?? null,
+      },
+      settings: {
+        policy: capturePolicyRef.current,
+        autoCapture: autoCaptureRef.current,
+      },
+      summary: attemptSummary,
+      attempts: attempts.slice(-ATTEMPT_LOG_LIMIT).map(entry => ({ ...entry })),
+    }
+    try {
+      const response = await api.post('/capture-lab/experiments', payload, { timeout: 120000 })
+      setReportSend({
+        status: 'sent',
+        message: '',
+        error: '',
+        id: response?.data?.id ?? null,
+      })
+    } catch (error) {
+      setReportSend({
+        status: 'error',
+        message: '',
+        error: scanErrorMessage(error),
+        id: null,
+      })
+    }
+  }
 
   // What the overlay is showing. The lifecycle phases come from the auto-capture
   // window, including the brief 'locked' phase each accepted detection earns;
@@ -3849,6 +4269,81 @@ export default function CaptureLab() {
         ) : null}
         {diagSend.status === 'error' ? (
           <p className="mt-1 text-xs text-brand-red">{diagSend.error}</p>
+        ) : null}
+      </section>
+
+      <section className="rounded-lg border border-border bg-bg-card p-4">
+        <div className="flex flex-wrap items-center gap-2">
+          <h2 className="mr-auto text-sm font-semibold text-text-primary">
+            Capture outcomes
+          </h2>
+          <button
+            type="button"
+            className="btn-ghost-sm"
+            disabled={attempts.length === 0 || reportSend.status === 'sending'}
+            onClick={sendSessionReport}
+          >
+            <Save size={14} aria-hidden />
+            {reportSend.status === 'sending'
+              ? 'Sending…'
+              : reportSend.status === 'error'
+                ? 'Retry session report'
+                : 'Send session report'}
+          </button>
+        </div>
+        <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 text-xs sm:grid-cols-3 lg:grid-cols-5">
+          <p className="text-text-secondary">
+            Attempts{' '}
+            <span className="font-mono text-text-primary">{attemptSummary.attempts}</span>
+          </p>
+          <p className="text-text-secondary">
+            Staged{' '}
+            <span className="font-mono text-text-primary">{attemptSummary.staged}</span>
+          </p>
+          <p className="text-text-secondary">
+            Refused{' '}
+            <span className="font-mono text-text-primary">{attemptSummary.refused}</span>
+          </p>
+          <p className="text-text-secondary">
+            Median to stage{' '}
+            <span className="font-mono text-text-primary">
+              {attemptSummary.medianTimeToStageMs == null
+                ? '—'
+                : `${(attemptSummary.medianTimeToStageMs / 1000).toFixed(2)} s`}
+            </span>
+          </p>
+          <p className="text-text-secondary">
+            Duplicates suspected{' '}
+            <span className="font-mono text-text-primary">
+              {attemptSummary.duplicatesSuspected}
+            </span>
+          </p>
+          <p className="text-text-secondary">
+            Policy{' '}
+            <span className="font-mono text-text-primary">
+              {capturePolicy === 'framing' ? 'framing' : 'quad'}
+            </span>
+          </p>
+        </div>
+        {attemptSummary.refused > 0 ? (
+          <div className="mt-2 text-xs text-text-secondary">
+            <span className="text-text-muted">Refused by reason: </span>
+            {Object.entries(attemptSummary.refusedByReason).map(([reason, count]) => (
+              <span key={reason} className="mr-3 font-mono text-text-primary">
+                {reason} ×{count}
+              </span>
+            ))}
+          </div>
+        ) : null}
+        {reportSend.status === 'sent' ? (
+          <p className="mt-2 break-all text-xs text-green">
+            Session report stored{reportSend.id ? ` as ${reportSend.id}` : ''}.
+          </p>
+        ) : null}
+        {reportSend.status === 'error' ? (
+          <p className="mt-2 text-xs text-brand-red">
+            {reportSend.error} The attempts are kept; retry when ready.
+          </p>
         ) : null}
       </section>
 

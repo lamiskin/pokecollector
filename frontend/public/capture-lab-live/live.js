@@ -208,7 +208,10 @@ const state = {
   // eases it to each server quad over ASSIST_BLEND_MS.
   ring: { quad: null, blend: null },
   assist: {
-    mode: 'auto',
+    // Parked: `off` is the default. `auto` and `on` still work as instruments;
+    // see the defect list at the head of the server-assist section before
+    // making either of them the default again.
+    mode: 'off',
     active: false,
     inFlight: false,
     timer: null,
@@ -1394,6 +1397,25 @@ async function runAtSettings(cap, edge) {
 }
 
 // ---------------------------------------------------------------- server assist
+//
+// PARKED — the default mode is `off`. `auto` and `on` remain fully wired, but
+// re-enabling assist as default behaviour means fixing these four known defects
+// first. They are left in place deliberately: this is a bookmark, not a repair.
+//
+//   1. Freshness is stamped when the response arrives, not when the frame was
+//      exposed: handleAssistResponse sets `assist.serverAt = performance.now()`,
+//      so a slow round trip still counts as fresh for ASSIST_STALE_MS after it
+//      lands, and the ring can show a stale shape as if it were current.
+//   2. The server quad replaces the ring's absolute position while it is fresh:
+//      syncRingToAssist/ringQuadAt stop copying `state.quad` into the ring
+//      whenever assist owns the shape, so local movement cannot correct, follow
+//      or move the ring until the server quad goes stale.
+//   3. The disagreement overlay (drawFrame, near ASSIST_SERVER_STROKE) compares
+//      the server quad against a ring that has already converged to that same
+//      quad, so the pair it is meant to expose is not the pair it draws.
+//   4. Failure paths skip the backoff: pollAssist's non-ok and throw branches set
+//      assist.error but never call beginAssistBackoff, so a 429/500/timeout is
+//      retried every ASSIST_POLL_MS instead of waiting ASSIST_BACKOFF_MS.
 
 function pushWindow(list, value, cap) {
   list.push(value)
@@ -1984,7 +2006,9 @@ function stopAssist() {
 
 function setAssistMode(mode) {
   const assist = state.assist
-  const next = mode === 'off' || mode === 'on' ? mode : 'auto'
+  // An unrecognised mode is treated as `off`: the parked default, and the
+  // fail-safe choice (no polling) rather than silently polling in `auto`.
+  const next = mode === 'auto' || mode === 'on' ? mode : 'off'
   assist.mode = next
   if (els.assistMode) els.assistMode.value = next
   if (assist.timer != null) window.clearTimeout(assist.timer)

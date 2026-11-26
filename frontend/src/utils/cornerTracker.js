@@ -208,8 +208,9 @@ export function trackerFallbackEligible({
 // Presence guard for the framing capture policy. A card counts as present when
 // the detector produced a usable quad recently, or the tracker has held a
 // tracked quad for the same consecutive-frame count the quad policy's fallback
-// already requires. It deliberately says nothing about aspect, edge containment
-// or detector/tracker agreement: those are the gates framing drops. The tracker
+// already requires. Presence is only one gate: freshness and full-card edge
+// containment are still applied by the capture path, while the aspect band and
+// detector/tracker corroboration are the gates framing drops. The tracker
 // branch needs a live quad, and a stationary background has none, so it cannot
 // satisfy presence without a detector seed and a sustained track.
 export function framingPresence({

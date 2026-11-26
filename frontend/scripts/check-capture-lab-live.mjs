@@ -107,7 +107,13 @@ for (const mode of ['auto', 'off', 'on']) {
     `index.html must offer server assist mode ${mode}`,
   )
 }
-expect(/<option value="auto"[^>]*selected/.test(html), 'server assist must default to auto')
+// Assist is parked: it stays available as an instrument, but `off` is the
+// default in both the control and the script state, and the page says so.
+expect(/<option value="off"[^>]*selected/.test(html), 'server assist must default to off (parked)')
+expect(!/<option value="auto"[^>]*selected/.test(html), 'server assist must not default to auto')
+expect(script.includes("mode: 'off'"), 'live.js must default state.assist.mode to off')
+expect(/parked/i.test(html), 'index.html must say the server assist is parked')
+expect(html.includes('<code>on</code> is for experiments only'), 'index.html must scope on to experiments')
 expect(html.includes('id="s-assist"'), 'index.html must show the server assist state')
 expect(html.includes('id="assist-frame"'), 'index.html must contain the assist upload canvas')
 expect(script.includes("'/api/capture-lab/cv-detect'"), 'live.js must poll the capture-lab cv-detect endpoint')

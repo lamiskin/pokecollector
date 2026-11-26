@@ -29,6 +29,12 @@
 <canvas id="frame-source" hidden aria-hidden="true"></canvas>
 <canvas id="assist-frame" hidden aria-hidden="true"></canvas>
 
+<p class="sub">
+  Server assist is parked: it replaces the ring's shape with the server's when a network
+  round trip is faster than local inference, which has not been shown to improve capture.
+  Leave it off; <code>on</code> is for experiments only.
+</p>
+
 <div class="controls">
   <button id="start" class="primary" type="button">Start camera</button>
   <button id="stop" type="button" disabled>Stop</button>
@@ -62,8 +68,8 @@
   <label class="cap" for="assist-mode">
     <span>server assist</span>
     <select id="assist-mode">
-      <option value="auto" selected>auto</option>
-      <option value="off">off</option>
+      <option value="off" selected>off</option>
+      <option value="auto">auto</option>
       <option value="on">on</option>
     </select>
   </label>
