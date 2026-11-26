@@ -102,6 +102,13 @@ intentionally excludes tests, documentation and translation catalogs.
 
 ## Verification
 
+- For nontrivial behavioral changes and PR preparation, use
+  [docs/PR_CHECKLIST.md](docs/PR_CHECKLIST.md) alongside current contribution and
+  architecture guidance. Apply only relevant checks: map shared contracts and
+  affected paths before implementation, then hand off the claim, coverage,
+  verification evidence, and remaining limits. Trivial edits need no ceremonial
+  document or extra agents. Keep personal-fork preferences distinct from agreed
+  upstream behavior; historical audit examples are not permanent requirements.
 - Run focused tests during implementation; one integration owner runs the
   required full gates after reconciling changes. Use current package scripts
   and CI, not guessed tools. Documentation-only edits need link/command review
