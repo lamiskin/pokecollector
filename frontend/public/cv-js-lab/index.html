@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<title>CV JS lab — detector threading</title>
+<style>
+  :root { color-scheme: dark; --bg:#08080f; --panel:#12121c; --line:#26263a; --fg:#f3f4f6; --muted:#9ca3af; --ok:#4ade80; --warn:#fbbf24; --bad:#f87171; --accent:#60a5fa; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg); font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  body { padding: 16px; max-width: 980px; margin: 0 auto; }
+  h1 { font-size: 1.15rem; margin: 0 0 2px; letter-spacing: .01em; }
+  .sub { margin: 0 0 14px; color: var(--muted); font-size: .82rem; }
+  .sub code { color: var(--fg); }
+  .banner { border-radius: 10px; padding: 12px 14px; margin: 0 0 14px; font-size: .9rem; line-height: 1.45; border: 1px solid; }
+  .banner[hidden] { display: none; }
+  .banner strong { display: block; font-size: .95rem; margin-bottom: 3px; }
+  .banner.warn { background: #3a2a06; border-color: var(--warn); color: #fde68a; }
+  .banner.error { background: #3a0d0d; border-color: var(--bad); color: #fecaca; }
+  .banner.ok { background: #06281a; border-color: var(--ok); color: #bbf7d0; }
+  .banner ul { margin: 6px 0 0; padding-left: 18px; }
+  .banner code { font-size: .82em; word-break: break-all; }
+  .stage { position: relative; width: 100%; aspect-ratio: 4 / 3; background: #000; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+  .stage video, .stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  .stage video { object-fit: contain; }
+  .stage canvas { pointer-events: none; }
+  .stage-hint { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: .9rem; text-align: center; padding: 24px; }
+  .stage-hint[hidden] { display: none; }
+  .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 14px 0; }
+  button { font: inherit; font-size: .9rem; padding: 9px 16px; border-radius: 9px; border: 1px solid var(--line); background: var(--panel); color: var(--fg); cursor: pointer; }
+  button:disabled { opacity: .45; cursor: default; }
+  button.primary { background: #1d4ed8; border-color: #2563eb; }
+  label { font-size: .82rem; color: var(--muted); display: inline-flex; align-items: center; gap: 7px; }
+  select { font: inherit; font-size: .85rem; background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-radius: 7px; padding: 6px 8px; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(155px, 1fr)); gap: 8px; margin: 0; }
+  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; }
+  .stat .k { display: block; color: var(--muted); font-size: .7rem; text-transform: uppercase; letter-spacing: .06em; margin-bottom: 3px; }
+  .stat .v { font-size: 1.12rem; font-variant-numeric: tabular-nums; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .stat .v.ok { color: var(--ok); } .stat .v.bad { color: var(--bad); } .stat .v.warn { color: var(--warn); }
+  footer { margin-top: 18px; color: var(--muted); font-size: .76rem; line-height: 1.5; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Detector threading lab</h1>
+  <p class="sub">Cornelius 2.12 · onnxruntime-web · 384×384 · <code>/detector/</code></p>
+</header>
+
+<div id="banner" class="banner" role="status" aria-live="polite" hidden></div>
+
+<div class="stage" id="stage">
+  <video id="video" playsinline muted autoplay></video>
+  <canvas id="overlay"></canvas>
+  <div class="stage-hint" id="stage-hint">Press <strong>Start camera</strong> to measure this device.</div>
+</div>
+
+<div class="controls">
+  <button id="start" class="primary" type="button">Start camera</button>
+  <button id="stop" type="button" disabled>Stop</button>
+  <label>thread cap
+    <select id="thread-cap">
+      <option value="1">1</option>
+      <option value="2">2</option>
+      <option value="4" selected>4</option>
+      <option value="8">8</option>
+    </select>
+  </label>
+</div>
+
+<dl class="stats">
+  <div class="stat"><dt class="k">crossOriginIsolated</dt><dd class="v" id="s-isolated">…</dd></div>
+  <div class="stat"><dt class="k">threads granted</dt><dd class="v" id="s-threads">…</dd></div>
+  <div class="stat"><dt class="k">detections / s</dt><dd class="v" id="s-dps">…</dd></div>
+  <div class="stat"><dt class="k">inference ms (median 20)</dt><dd class="v" id="s-ms">…</dd></div>
+  <div class="stat"><dt class="k">loop ms (median 20)</dt><dd class="v" id="s-loop">…</dd></div>
+  <div class="stat"><dt class="k">detections</dt><dd class="v" id="s-count">0</dd></div>
+  <div class="stat"><dt class="k">sharpness</dt><dd class="v" id="s-sharp">…</dd></div>
+</dl>
+
+<footer>
+  Inference ms is <code>session.run()</code> only; loop ms adds frame capture, downscale and tensor prep.
+  Threads granted is the onnxruntime-web <code>env.wasm.numThreads</code> it was configured with, which
+  is forced to 1 unless the document is cross-origin isolated and <code>SharedArrayBuffer</code> exists.
+</footer>
+
+<script type="module" src="./lab.js"></script>
+</body>
+</html>

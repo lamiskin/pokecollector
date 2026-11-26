@@ -38,6 +38,7 @@ import {
   derivePhase,
   evaluateTentative,
   FIRST_TRACK_RADIUS,
+  framingPresence,
   isCorroborated,
   CAPTURE_QUAD_MAX_AGE_MS,
   isContainableQuad,
@@ -53,6 +54,7 @@ import {
   trackerFallbackEligible,
   TENTATIVE_CONFIRM_TRACKS,
   TENTATIVE_MAX_MISSES,
+  TRACKER_FALLBACK_HITS,
   TRACK_AGREE_MAX,
   TRACK_KEEP_MS,
   TRACK_LOST_AFTER,
@@ -80,6 +82,7 @@ const RESOLUTION_PRESETS = [
   { id: 'max', label: 'Max (4000×3000)', width: 4000, height: 3000 },
 ]
 const CAPTURE_LAB_QUERY_KEY = ['capture-lab', 'entries']
+const CAPTURE_POLICY_STORAGE_KEY = 'capture-lab-capture-policy'
 
 // Live-detection recording: two seconds per sample, three minutes of ring
 // buffer, and a small JPEG every fifth sample for a visual cross-check.
@@ -454,6 +457,7 @@ export default function CaptureLab() {
   const overlayRef = useRef(null)
   const quadSourceRef = useRef(null)
   const autoCaptureRef = useRef(false)
+  const capturePolicyRef = useRef('quad')
   const autoFireTimerRef = useRef(null)
   const autoFireRef = useRef(null)
   const autoStateRef = useRef(newAutoState())
@@ -496,6 +500,18 @@ export default function CaptureLab() {
       return window.localStorage.getItem('capture-lab-auto-capture') === '1'
     } catch {
       return false
+    }
+  })
+  // Which rule decides when automatic capture fires. 'quad' is the historical
+  // gate (aspect, edge containment, detector corroboration); 'framing' keeps
+  // only presence, stability and size. Persisted like the other preferences.
+  const [capturePolicy, setCapturePolicyState] = useState(() => {
+    try {
+      return window.localStorage.getItem(CAPTURE_POLICY_STORAGE_KEY) === 'framing'
+        ? 'framing'
+        : 'quad'
+    } catch {
+      return 'quad'
     }
   })
   const [autoDisarmed, setAutoDisarmed] = useState(false)
@@ -551,6 +567,7 @@ export default function CaptureLab() {
   pendingRef.current = pending
   liveDetectionRef.current = liveDetection
   autoCaptureRef.current = autoCapture
+  capturePolicyRef.current = capturePolicy
   const inspectedItem = inspectedId
     ? pending.find(item => item.id === inspectedId) || null
     : null
@@ -711,9 +728,13 @@ export default function CaptureLab() {
       screen: { width: window.screen?.width ?? null, height: window.screen?.height ?? null },
       detector_runtime: detectorRuntimeActive || detectorRuntime,
       min_card_area: MIN_CARD_AREA,
-      // The automatic-capture gate as it was applied, including that its aspect
-      // band is compared against min(r, 1/r). Without this a refusal log cannot
-      // be read back against the rule that produced it.
+      capture_policy: capturePolicyRef.current,
+      // Consecutive tracked frames that satisfy the framing policy's presence
+      // guard when no recent detector quad is available.
+      framing_presence_hits: TRACKER_FALLBACK_HITS,
+      // The quad policy's automatic-capture gate, including that its aspect
+      // band is compared against min(r, 1/r). Under 'framing' these numbers are
+      // still recorded for provenance but not enforced.
       capture_gate: {
         edge_min: CAPTURE_EDGE_MIN,
         aspect_min: CAPTURE_ASPECT_MIN,
@@ -792,9 +813,15 @@ export default function CaptureLab() {
     try {
       const diag = diagRef.current
       if (diag.startedAt == null) return
+      // Capture events must always say which policy produced them, so the
+      // policy is attached here instead of at every call site.
+      const policyFields = type === 'capture' || type === 'capture-attempt'
+        ? { policy: capturePolicyRef.current }
+        : {}
       diag.events.push({
         t: Math.round(performance.now() - diag.startedAt),
         type,
+        ...policyFields,
         ...payload,
       })
       while (diag.events.length > DIAG_MAX_EVENTS) diag.events.shift()
@@ -920,7 +947,11 @@ export default function CaptureLab() {
     try {
       const result = await uploadCaptureLabDiagnostics({
         // Build the toggle state at send time: it can change during recording.
-        meta: { ...(diag.meta || buildDiagMeta()), auto_capture: autoCaptureRef.current },
+        meta: {
+          ...(diag.meta || buildDiagMeta()),
+          auto_capture: autoCaptureRef.current,
+          capture_policy: capturePolicyRef.current,
+        },
         samples: diag.samples,
         events: diag.events,
       })
@@ -1596,6 +1627,9 @@ export default function CaptureLab() {
     if (captureInFlightRef.current) return false
     captureInFlightRef.current = true
     const mode = auto ? 'auto' : 'manual'
+    // The policy only decides when automatic capture fires; a manual tap keeps
+    // today's quad gates and fallback behaviour.
+    const framing = auto && capturePolicyRef.current === 'framing'
     try {
       // Two passes at most: the first may fail on stale geometry, then a fresh
       // detection is requested and the capture is retried once.
@@ -1636,12 +1670,31 @@ export default function CaptureLab() {
         const modelAgeMs = lastModelFrameAtRef.current != null
           ? now - lastModelFrameAtRef.current
           : null
-        const decision = shouldAcceptCapture({
-          hasTracked,
-          trackedAgeMs,
-          modelAgeMs,
-          modelUsable: Boolean(liveResultRef.current?.usable),
-        })
+        const modelUsable = Boolean(liveResultRef.current?.usable)
+        // The framing policy drops the tracker-freshness gate. Its presence
+        // guard also names the quad to capture: a proven tracker, else the
+        // recent detector quad.
+        const presence = framing
+          ? framingPresence({
+            hasTrackedQuad: hasTracked,
+            modelAgeMs: lastUsableModelAtRef.current == null
+              ? null
+              : now - lastUsableModelAtRef.current,
+            trackerHits: trackerStatsRef.current.hits,
+          })
+          : null
+        const decision = framing
+          ? {
+            ok: presence.ok,
+            reason: presence.ok ? 'ok' : 'no-presence',
+            source: presence.source === 'tracked' ? 'tracked' : 'model',
+          }
+          : shouldAcceptCapture({
+            hasTracked,
+            trackedAgeMs,
+            modelAgeMs,
+            modelUsable,
+          })
         const quadAgeMs = decision.source === 'tracked'
           ? (trackedAgeMs == null ? null : Math.round(trackedAgeMs))
           : (modelAgeMs == null ? null : Math.round(modelAgeMs))
@@ -1731,12 +1784,14 @@ export default function CaptureLab() {
           attempt.quadAspect = Number(contain.quadAspect.toFixed(4))
           attempt.orientationRatio = Number(contain.orientationRatio.toFixed(4))
           lastAttemptFieldsRef.current = attemptFields()
-          if (auto) {
+          // The framing policy keeps these numbers as provenance but does not
+          // gate on them: aspect and edge containment are the gates it drops.
+          if (auto && !framing) {
             // The pill names this cause for as long as the gate keeps refusing;
             // the next passing attempt or a different phase clears it.
             setCaptureRefusal(contain.ok ? null : (contain.check ?? 'aspect'))
           }
-          if (auto && !contain.ok) {
+          if (auto && !framing && !contain.ok) {
             // The gate names the comparison that failed; the aspect band is
             // applied to the orientation-normalised ratio, so a sideways card
             // passes and its log describes the same number the gate compared.
@@ -1760,57 +1815,46 @@ export default function CaptureLab() {
             return false
           }
 
-        const corroborated = decision.source === 'model' || isCorroborated({
-          lastConfirmTs: lastConfirmTsRef.current,
-          now: performance.now(),
-          quadAgreement: cornerAgreement({
-            trackedCorners: corners,
-            modelCorners: lastConfirmCornersRef.current,
-          }),
-        })
-        // A tracker that has followed this quad for a dozen consecutive frames
-        // is strong evidence of a card even while the detector's confidence is
-        // too soft. It is a fallback, not a replacement for a fresh model result.
-        const trackerCorroborated = trackerFallbackEligible({
-          source: decision.source,
-          hits: trackerStatsRef.current.hits,
-          failures: trackerFailuresRef.current,
-          quadAgeMs,
-          sinceDisagreementMs,
-          sinceAgreementMs,
-          maxQuadAgeMs: CAPTURE_QUAD_MAX_AGE_MS,
-          disagreementWindowMs: CAPTURE_DISAGREE_MS,
-          agreementWindowMs: CAPTURE_AGREE_MS,
-        })
-        const corroborationSource = corroborated
-          ? 'model'
-          : (trackerCorroborated ? 'tracker' : 'none')
-        if (auto && !corroborated && !trackerCorroborated) {
-          recordDiagEvent('capture-attempt', {
-            ok: false,
-            retry,
-            reason: 'uncorroborated',
-            waitedMs: null,
-            quadAgeMs,
-            frameTime: null,
-            sharpness: captureSharpness,
-            corroborateAgeMs,
-            sourceLongEdge: null,
-            cardLongEdge: null,
-            corroboration: 'none',
-            ...attemptFields(),
+        // The framing policy already established presence; it drops the
+        // detector-corroboration requirement, including detector/tracker
+        // agreement. The quad policy keeps the full check.
+        let corroborated = false
+        let trackerCorroborated = false
+        let corroborationSource = 'none'
+        if (framing) {
+          corroborationSource = presence.source === 'tracked' ? 'tracker' : 'model'
+        } else {
+          corroborated = decision.source === 'model' || isCorroborated({
+            lastConfirmTs: lastConfirmTsRef.current,
+            now: performance.now(),
+            quadAgreement: cornerAgreement({
+              trackedCorners: corners,
+              modelCorners: lastConfirmCornersRef.current,
+            }),
           })
-          if (!retry && liveDetectionRef.current) {
-            setCaptureRechecking(true)
-            const retryStarted = performance.now()
-            const landed = await waitForModelResult(performance.now() + CAPTURE_RETRY_MS)
-            setCaptureRechecking(false)
-            if (landed) continue
+          // A tracker that has followed this quad for a dozen consecutive frames
+          // is strong evidence of a card even while the detector's confidence is
+          // too soft. It is a fallback, not a replacement for a fresh model result.
+          trackerCorroborated = trackerFallbackEligible({
+            source: decision.source,
+            hits: trackerStatsRef.current.hits,
+            failures: trackerFailuresRef.current,
+            quadAgeMs,
+            sinceDisagreementMs,
+            sinceAgreementMs,
+            maxQuadAgeMs: CAPTURE_QUAD_MAX_AGE_MS,
+            disagreementWindowMs: CAPTURE_DISAGREE_MS,
+            agreementWindowMs: CAPTURE_AGREE_MS,
+          })
+          corroborationSource = corroborated
+            ? 'model'
+            : (trackerCorroborated ? 'tracker' : 'none')
+          if (auto && !corroborated && !trackerCorroborated) {
             recordDiagEvent('capture-attempt', {
               ok: false,
-              retry: true,
-              reason: 'retry-timeout',
-              waitedMs: Math.round(performance.now() - retryStarted),
+              retry,
+              reason: 'uncorroborated',
+              waitedMs: null,
               quadAgeMs,
               frameTime: null,
               sharpness: captureSharpness,
@@ -1820,11 +1864,32 @@ export default function CaptureLab() {
               corroboration: 'none',
               ...attemptFields(),
             })
+            if (!retry && liveDetectionRef.current) {
+              setCaptureRechecking(true)
+              const retryStarted = performance.now()
+              const landed = await waitForModelResult(performance.now() + CAPTURE_RETRY_MS)
+              setCaptureRechecking(false)
+              if (landed) continue
+              recordDiagEvent('capture-attempt', {
+                ok: false,
+                retry: true,
+                reason: 'retry-timeout',
+                waitedMs: Math.round(performance.now() - retryStarted),
+                quadAgeMs,
+                frameTime: null,
+                sharpness: captureSharpness,
+                corroborateAgeMs,
+                sourceLongEdge: null,
+                cardLongEdge: null,
+                corroboration: 'none',
+                ...attemptFields(),
+              })
+            }
+            // This block only runs for auto-capture, which only starts after a
+            // completed hold, so the refusal cue is never a positioning nudge.
+            rearmAutoCapture()
+            return false
           }
-          // This block only runs for auto-capture, which only starts after a
-          // completed hold, so the refusal cue is never a positioning nudge.
-          rearmAutoCapture()
-          return false
         }
 
         // Native-resolution crop of a generous box around the card: no warp, no
@@ -2849,6 +2914,28 @@ export default function CaptureLab() {
     }
   }
 
+  const setCapturePolicy = policy => {
+    const next = policy === 'framing' ? 'framing' : 'quad'
+    capturePolicyRef.current = next
+    setCapturePolicyState(next)
+    try {
+      window.localStorage.setItem(CAPTURE_POLICY_STORAGE_KEY, next)
+    } catch {
+      // A blocked localStorage only costs the preference, never the capture.
+    }
+    // A hold window started under one policy must not fire under another, and
+    // a refusal named by the old gates no longer applies.
+    setAutoHoldStartTs(null)
+    stopAutoFireTimer()
+    autoStateRef.current = newAutoState()
+    setAutoDisarmed(false)
+    setCaptureRefusal(null)
+    if (autoCaptureRef.current) {
+      liveParkedRef.current = false
+      liveScheduleRef.current?.(0)
+    }
+  }
+
   const verifyWebgpuNow = () => {
     const worker = detectorWorkerRef.current
     if (!worker || detectorRuntimeActive !== 'webgpu' || webgpuVerifying) return
@@ -3343,9 +3430,27 @@ export default function CaptureLab() {
             />
             Auto-capture when ready
           </label>
+          <label className="flex items-center gap-2">
+            <span>Policy</span>
+            <select
+              className="select-sm w-auto"
+              aria-label="Capture policy"
+              value={capturePolicy}
+              onChange={event => setCapturePolicy(event.target.value)}
+            >
+              <option value="quad">Quad-driven</option>
+              <option value="framing">Framing only</option>
+            </select>
+          </label>
           {liveDetection ? (
             <span className="text-text-muted">detector running</span>
           ) : null}
+          <span
+            className="text-text-muted"
+            aria-label={`Capture policy: ${capturePolicy === 'framing' ? 'framing only' : 'quad'}`}
+          >
+            {capturePolicy === 'framing' ? 'framing only' : 'quad'}
+          </span>
         </div>
 
         <div className="relative mt-3 flex justify-center overflow-hidden rounded">

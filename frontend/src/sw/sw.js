@@ -33,6 +33,11 @@ function classify(req, url) {
   if (req.headers.has('Range') || req.headers.has('Authorization')) return 'none'
   if (url.pathname === '/sw.js' || /^\/sw\.[a-z]+\.js$/.test(url.pathname)) return 'none'
   if (url.searchParams.has('pc_sw')) return 'none'
+  // The cross-origin-isolated detector lab is a static diagnostic served outside
+  // the SPA (and with its own COOP/COEP response). The navigation fallback would
+  // replace it with the cached app shell, so it must never be classified as a
+  // navigate.
+  if (url.pathname === '/cv-js-lab' || url.pathname.startsWith('/cv-js-lab/')) return 'none'
   if (precacheUrls.has(url.pathname)) return 'precache'
   if (req.mode === 'navigate' && !url.pathname.startsWith('/api/') && !url.pathname.startsWith('/assets/')
     && !hasExtension(url.pathname)) return 'navigate'

@@ -34,6 +34,10 @@ export const TRACK_PHASE_MAX_AGE_MS = 1000
 // live tracker; two failures discard it and leave the live tracker alone.
 export const TENTATIVE_CONFIRM_TRACKS = 2
 export const TENTATIVE_MAX_MISSES = 2
+// Consecutive tracked frames that count as proof of a card. The tracker
+// fallback has always used this count; the framing capture policy reuses it as
+// its presence guard, so a stationary background cannot satisfy it.
+export const TRACKER_FALLBACK_HITS = 12
 // Capture geometry may not be older than the frame it is applied to. A tracked
 // quad is cheap and fresh; a model quad is only a fallback and only when no
 // tracked quad exists at all.
@@ -193,12 +197,34 @@ export function trackerFallbackEligible({
 } = {}) {
   return source === 'tracked'
     && failures === 0
-    && hits >= 12
+    && hits >= TRACKER_FALLBACK_HITS
     && quadAgeMs != null
     && quadAgeMs <= maxQuadAgeMs
     && (sinceDisagreementMs == null || sinceDisagreementMs > disagreementWindowMs)
     && sinceAgreementMs != null
     && sinceAgreementMs <= agreementWindowMs
+}
+
+// Presence guard for the framing capture policy. A card counts as present when
+// the detector produced a usable quad recently, or the tracker has held a
+// tracked quad for the same consecutive-frame count the quad policy's fallback
+// already requires. It deliberately says nothing about aspect, edge containment
+// or detector/tracker agreement: those are the gates framing drops. The tracker
+// branch needs a live quad, and a stationary background has none, so it cannot
+// satisfy presence without a detector seed and a sustained track.
+export function framingPresence({
+  hasTrackedQuad = false,
+  modelAgeMs = null,
+  trackerHits = 0,
+  modelMaxAgeMs = CAPTURE_MODEL_MAX_AGE_MS,
+  requiredTrackerHits = TRACKER_FALLBACK_HITS,
+} = {}) {
+  const detector = modelAgeMs != null && modelAgeMs <= modelMaxAgeMs
+  const tracker = hasTrackedQuad && trackerHits >= requiredTrackerHits
+  return {
+    ok: detector || tracker,
+    source: tracker ? 'tracked' : (detector ? 'model' : 'none'),
+  }
 }
 
 // True when a detected geometry looks like a fully-in-frame card region.

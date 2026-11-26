@@ -107,3 +107,24 @@ test('HTML shell, manifest and SPA fallback revalidate; hashed assets stay immut
   const assets = locations().find((loc) => loc.name.startsWith('~*'));
   assert.match(assets.body, /public, immutable/);
 });
+
+test('cv-js-lab is cross-origin isolated without losing the shared headers', () => {
+  const lab = locations().find((loc) => loc.name.includes('/cv-js-lab/'));
+  assert.ok(lab, 'location ^~ /cv-js-lab/ missing');
+
+  // Isolation is what makes SharedArrayBuffer (and multi-threaded WASM) available.
+  assert.match(lab.body, /add_header\s+Cross-Origin-Opener-Policy\s+"same-origin"\s+always;/);
+  assert.match(lab.body, /add_header\s+Cross-Origin-Embedder-Policy\s+"require-corp"\s+always;/);
+
+  // A location-level add_header suppresses every inherited server header, so the
+  // snippet include is the only thing keeping CSP and Permissions-Policy (camera)
+  // on this page.
+  assert.match(lab.body, INCLUDE, 'location /cv-js-lab/ must include the security headers');
+
+  // Missing lab files must 404 rather than fall back to the SPA shell.
+  assert.match(lab.body, /try_files\s+\$uri\s+\$uri\/\s+=404;/);
+
+  // COEP server-wide would block third-party card art: it must stay scoped.
+  const serverLevel = conf.split(/^\s{4}location\s/m)[0];
+  assert.doesNotMatch(serverLevel, /Cross-Origin-(Opener|Embedder)-Policy/);
+});

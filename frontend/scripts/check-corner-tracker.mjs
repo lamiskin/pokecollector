@@ -10,6 +10,7 @@ import {
   createTracker,
   derivePhase,
   evaluateTentative,
+  framingPresence,
   isCorroborated,
   isContainableQuad,
   quadAspect,
@@ -17,6 +18,7 @@ import {
   shouldAcceptCapture,
   shouldKeepTracking,
   trackerFallbackEligible,
+  TRACKER_FALLBACK_HITS,
   TRACK_LOST_AFTER,
 } from '../src/utils/cornerTracker.js'
 import { autoHoldDecision, AUTO_STEP_DT_MAX_MS, AUTO_STEP_SPEED, AUTO_TOTAL_MOVE } from '../src/utils/autoHold.js'
@@ -395,6 +397,32 @@ assert.equal(isPatchMatchAcceptable(676, 300), false)
   assert.equal(trackerFallbackEligible({ ...eligible, sinceDisagreementMs: 100 }), false)
   assert.equal(trackerFallbackEligible({ ...eligible, sinceAgreementMs: 4000 }), false)
   assert.equal(trackerFallbackEligible({ ...eligible, quadAgeMs: 400 }), false)
+}
+
+// Framing presence: a recent detector quad or a sustained tracker, nothing else.
+{
+  assert.equal(TRACKER_FALLBACK_HITS, 12)
+  assert.deepEqual(framingPresence({ modelAgeMs: 200 }), { ok: true, source: 'model' })
+  assert.deepEqual(
+    framingPresence({ hasTrackedQuad: true, trackerHits: 12 }),
+    { ok: true, source: 'tracked' },
+  )
+  // A tracker needs a live quad and the same consecutive-frame count.
+  assert.deepEqual(
+    framingPresence({ hasTrackedQuad: false, trackerHits: 12 }),
+    { ok: false, source: 'none' },
+  )
+  assert.deepEqual(
+    framingPresence({ hasTrackedQuad: true, trackerHits: 11 }),
+    { ok: false, source: 'none' },
+  )
+  // Stale detector plus no tracker is a stationary background, not presence.
+  assert.deepEqual(framingPresence({ modelAgeMs: 2000 }), { ok: false, source: 'none' })
+  // A proven tracker wins over a detector quad.
+  assert.deepEqual(
+    framingPresence({ hasTrackedQuad: true, trackerHits: 12, modelAgeMs: 200 }),
+    { ok: true, source: 'tracked' },
+  )
 }
 
 // Candidate containment and card aspect.
