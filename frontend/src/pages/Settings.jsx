@@ -6,12 +6,13 @@ import api, {
   downloadBackup, restoreBackup, exportCSV, clearImageCache,
   getSetting, setSetting, getTelegramStatus, setAuthMode,
   getUsers, createUser, updateUser, deleteUser, changePassword, changeAvatar, changeUsername,
-  getContributors, getSupporters, downloadDebugLog,
-  getProfile, updateProfile, deleteScanDiagnostics,
+  getContributors, getSupporters, getCustomMatches, downloadDebugLog,
+  getProfile, updateProfile, publishAllCollectionBinders, deleteScanDiagnostics,
   deleteAllCollectionCardPhotos,
   getOidcIdentity, linkOidcIdentity, unlinkOidcIdentity,
 } from '../api/client'
 import { useTheme } from '../hooks/useTheme'
+import { buildPublicProfileUpdate } from '../utils/publicProfileSettings'
 import { useSettings } from '../contexts/SettingsContext'
 import { useAuth } from '../contexts/AuthContext'
 import { useConfirmDialog } from '../contexts/ConfirmDialogContext'
@@ -360,6 +361,9 @@ export default function Settings() {
   const [profilePublic, setProfilePublic] = useState(false)
   const [publicShowValues, setPublicShowValues] = useState(false)
   const [wishlistVisibility, setWishlistVisibility] = useState('private')
+  const [publicDefaultNewBinders, setPublicDefaultNewBinders] = useState(false)
+  const [publicShowAllOwnedCards, setPublicShowAllOwnedCards] = useState(false)
+  const [publishAllPending, setPublishAllPending] = useState(false)
   const [profileDirty, setProfileDirty] = useState(false)
   const [publicFeatureSaving, setPublicFeatureSaving] = useState(false)
 
@@ -373,6 +377,8 @@ export default function Settings() {
       setProfilePublic(!!profileData.is_profile_public)
       setPublicShowValues(!!profileData.public_show_values)
       setWishlistVisibility(profileData.wishlist_visibility || 'private')
+      setPublicDefaultNewBinders(!!profileData.public_default_new_binders)
+      setPublicShowAllOwnedCards(!!profileData.public_show_all_owned_cards)
     }
   }, [profileData, profileDirty])
 
@@ -479,6 +485,8 @@ export default function Settings() {
       setProfilePublic(!!data.is_profile_public)
       setPublicShowValues(!!data.public_show_values)
       setWishlistVisibility(data.wishlist_visibility || 'private')
+      setPublicDefaultNewBinders(!!data.public_default_new_binders)
+      setPublicShowAllOwnedCards(!!data.public_show_all_owned_cards)
       setProfileDirty(false)
       toast.success(t('settings.saved'))
     },
@@ -486,11 +494,44 @@ export default function Settings() {
   })
 
   const savePublicProfile = () => {
-    profileMutation.mutate({
-      is_profile_public: profilePublic,
-      public_show_values: publicShowValues,
-      wishlist_visibility: wishlistVisibility,
+    profileMutation.mutate(buildPublicProfileUpdate({ profilePublic, showValues: publicShowValues, defaultNewBinders: publicDefaultNewBinders, showAllOwnedCards: publicShowAllOwnedCards, wishlistVisibility }))
+  }
+
+  const privateCollectionBinderCount = Math.max(0, Number(profileData?.private_collection_binder_count) || 0)
+  const confirmAndPublishExistingBinders = async () => {
+    if (!privateCollectionBinderCount || publishAllPending) return
+    const confirmDescriptionKey = privateCollectionBinderCount === 1
+      ? 'settings.publishExistingBinderConfirmDesc'
+      : 'settings.publishExistingBindersConfirmDesc'
+    const confirmed = await confirmDialog({
+      title: t('settings.publishExistingBindersConfirmTitle'),
+      message: t(confirmDescriptionKey).replace('{count}', String(privateCollectionBinderCount)),
+      confirmLabel: t('settings.publishExistingBindersConfirm'),
+      cancelLabel: t('common.cancel'),
+      destructive: false,
     })
+    if (!confirmed) return
+
+    setPublishAllPending(true)
+    try {
+      await publishAllCollectionBinders()
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['profile'] }),
+        queryClient.invalidateQueries({ queryKey: ['binders'] }),
+      ])
+      toast.success(t('settings.publishExistingBindersSuccess'))
+    } catch (err) {
+      toast.error(err.response?.data?.detail || t('settings.publishExistingBindersFailed'))
+    } finally {
+      setPublishAllPending(false)
+    }
+  }
+
+  const changeDefaultNewBinders = async (enabled) => {
+    const shouldOfferPublish = enabled && !publicDefaultNewBinders && privateCollectionBinderCount > 0
+    setPublicDefaultNewBinders(enabled)
+    setProfileDirty(true)
+    if (shouldOfferPublish) await confirmAndPublishExistingBinders()
   }
 
   const publicHandle = profileData?.public_handle || ''
@@ -1146,6 +1187,31 @@ export default function Settings() {
                   onChange={(val) => { setPublicShowValues(val); setProfileDirty(true) }}
                   label={t('settings.publicShowValues')}
                 />
+              </SettingsRow>}
+              {publicProfilesEnabled && <SettingsRow label={t('settings.publicShowAllOwnedCards')} description={t('settings.publicShowAllOwnedCardsDesc')}>
+                <Toggle
+                  value={publicShowAllOwnedCards}
+                  onChange={(val) => { setPublicShowAllOwnedCards(val); setProfileDirty(true) }}
+                  label={t('settings.publicShowAllOwnedCards')}
+                />
+              </SettingsRow>}
+              {publicProfilesEnabled && <SettingsRow label={t('settings.publicDefaultNewBinders')} description={t('settings.publicDefaultNewBindersDesc')} last={!(profilePublic && publicHandle)}>
+                <Toggle
+                  value={publicDefaultNewBinders}
+                  onChange={changeDefaultNewBinders}
+                  label={t('settings.publicDefaultNewBinders')}
+                />
+              </SettingsRow>}
+              {publicProfilesEnabled && privateCollectionBinderCount > 0 && <SettingsRow label={t('settings.privateCollectionBinders')} description={t('settings.publishExistingBindersDesc').replace('{count}', String(privateCollectionBinderCount))}>
+                <button
+                  type="button"
+                  onClick={confirmAndPublishExistingBinders}
+                  disabled={publishAllPending}
+                  className="rounded-lg border border-brand-red/30 bg-brand-red/10 px-3 py-2 text-xs font-semibold text-brand-red transition hover:bg-brand-red/15 disabled:opacity-50"
+                  aria-busy={publishAllPending}
+                >
+                  {publishAllPending ? t('settings.publishingExistingBinders') : t('settings.publishExistingBinders').replace('{count}', String(privateCollectionBinderCount))}
+                </button>
               </SettingsRow>}
               {publicProfilesEnabled && profilePublic && publicHandle && (
                 <SettingsRow label={t('settings.publicProfileLink')} description={publicProfileUrl} last>

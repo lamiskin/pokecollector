@@ -613,6 +613,21 @@ def get_binders(
     return result
 
 
+def _new_collection_binder_is_public(db: Session, current_user: User, binder_type: str | None) -> bool:
+    """Whether a newly created binder inherits the owner's public default.
+
+    The stored preference only applies to new collection binders, and only while
+    the global feature is enabled and this profile is public. Callers must not
+    use this for updates or conversions: existing binders never change here.
+    """
+    return bool(
+        (binder_type or "collection") == "collection"
+        and current_user.public_default_new_binders
+        and current_user.is_profile_public
+        and public_profiles_enabled(db)
+    )
+
+
 @router.post("/", response_model=BinderResponse)
 def create_binder(
     binder: BinderCreate,
@@ -632,6 +647,7 @@ def create_binder(
         format=_clean_binder_format(binder.format) if binder_type in DECK_TYPES else None,
         target_size=target_size or (60 if binder_type in DECK_TYPES else None),
         icon_pokemon_id=binder.icon_pokemon_id,
+        is_public=_new_collection_binder_is_public(db, current_user, binder.binder_type),
         user_id=current_user.id,
         created_at=datetime.datetime.utcnow(),
         updated_at=datetime.datetime.utcnow(),
@@ -640,6 +656,24 @@ def create_binder(
     db.commit()
     db.refresh(db_binder)
     return _binder_response(db_binder, 0)
+
+
+@router.post("/publish-all-collection")
+def publish_all_collection_binders(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Publish every private collection binder owned by the current user."""
+    if not public_profiles_enabled(db):
+        raise HTTPException(status_code=403, detail="Public profiles are disabled by the administrator")
+
+    published = db.query(Binder).filter(
+        Binder.user_id == current_user.id,
+        or_(Binder.is_public.is_(False), Binder.is_public.is_(None)),
+        or_(Binder.binder_type == "collection", Binder.binder_type.is_(None)),
+    ).update({Binder.is_public: True}, synchronize_session=False)
+    db.commit()
+    return {"published": int(published or 0)}
 
 
 @router.put("/{binder_id}", response_model=BinderResponse)
@@ -712,7 +746,10 @@ def update_binder(
     if "icon_pokemon_id" in update.model_fields_set:
         binder.icon_pokemon_id = update.icon_pokemon_id
     if "is_public" in update.model_fields_set:
-        binder.is_public = update.is_public
+        # A type conversion always stays private; sharing is a separate,
+        # explicit decision after the conversion. The default preference never
+        # republishes an existing binder.
+        binder.is_public = False if type_changed else update.is_public
     if requested_type in DECK_TYPES:
         binder.target_size = binder.target_size or 60
         binder.format = binder.format or "Casual"
@@ -1526,6 +1563,7 @@ def add_owned_set_to_auto_binder(
             binder_type="collection",
             color="#EE1515",
             auto_owned_set_id=set_obj.id,
+            is_public=_new_collection_binder_is_public(db, current_user, "collection"),
             created_at=datetime.datetime.utcnow(),
         )
         db.add(binder)

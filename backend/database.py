@@ -470,10 +470,16 @@ def _run_migrations(conn):
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_profile_public BOOLEAN DEFAULT FALSE",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS public_show_values BOOLEAN DEFAULT FALSE",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS wishlist_visibility VARCHAR DEFAULT 'private'",
+        # Private-by-default opt-in for newly created collection binders.
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS public_default_new_binders BOOLEAN DEFAULT FALSE",
+        # Opt-in to publish all owned collection cards instead of public-binder allocations.
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS public_show_all_owned_cards BOOLEAN DEFAULT FALSE",
         "ALTER TABLE binders ADD COLUMN IF NOT EXISTS is_public BOOLEAN DEFAULT FALSE",
         # Enforce NOT NULL on new boolean columns for upgraded installs (ADD COLUMN with DEFAULT backfills existing rows first)
         "ALTER TABLE users ALTER COLUMN is_profile_public SET NOT NULL",
         "ALTER TABLE users ALTER COLUMN public_show_values SET NOT NULL",
+        "ALTER TABLE users ALTER COLUMN public_default_new_binders SET NOT NULL",
+        "ALTER TABLE users ALTER COLUMN public_show_all_owned_cards SET NOT NULL",
         "UPDATE users SET wishlist_visibility = 'private' WHERE wishlist_visibility IS NULL OR wishlist_visibility NOT IN ('private', 'trade_matches', 'public')",
         "ALTER TABLE users ALTER COLUMN wishlist_visibility SET DEFAULT 'private'",
         "ALTER TABLE users ALTER COLUMN wishlist_visibility SET NOT NULL",

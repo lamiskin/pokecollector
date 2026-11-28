@@ -5,7 +5,7 @@ from urllib.parse import quote
 from sqlalchemy import and_, exists, func, or_, select
 from sqlalchemy.orm import joinedload
 
-from models import User, Binder, BinderCard, Card, Set as CardSet, Setting, WishlistItem
+from models import User, Binder, BinderCard, Card, CollectionItem, Set as CardSet, Setting, WishlistItem
 from services.card_numbers import natural_card_number_key
 from services.card_values import effective_market_price
 
@@ -512,4 +512,129 @@ def serialize_profile(db, user: User) -> dict:
             for binder in binders
         ],
         "decks": [serialize_deck_summary(deck) for deck in decks],
+    }
+
+
+def count_private_collection_binders(db, user: User) -> int:
+    """Count the owner's collection binders that are not shared."""
+    return int(
+        db.query(func.count(Binder.id)).filter(
+            Binder.user_id == user.id,
+            or_(Binder.is_public.is_(False), Binder.is_public.is_(None)),
+            or_(Binder.binder_type == "collection", Binder.binder_type.is_(None)),
+        ).scalar()
+        or 0
+    )
+
+
+def _grouped_card_sort_key(entry: dict) -> tuple:
+    card = entry["card"]
+    return (
+        card.set_id or "",
+        natural_card_number_key(card.number),
+        entry["variant"] or "",
+    )
+
+
+def _add_grouped_card(
+    grouped: dict[tuple[str, str | None], dict],
+    card: Card,
+    variant: str | None,
+    quantity: int,
+) -> None:
+    if not card:
+        return
+    key = (card.id, variant)
+    entry = grouped.get(key)
+    if entry is None:
+        entry = {"card": card, "variant": variant, "quantity": 0}
+        grouped[key] = entry
+    entry["quantity"] += quantity
+
+
+def _owned_collection_items(db, user: User) -> list[CollectionItem]:
+    return (
+        db.query(CollectionItem)
+        .options(joinedload(CollectionItem.card).joinedload(Card.set_ref))
+        .filter(CollectionItem.user_id == user.id)
+        .all()
+    )
+
+
+def serialize_profile_cards(db, user: User) -> dict:
+    """Serialize the owner's public card view.
+
+    By default this is the union of public collection binder rows (allocations
+    only). With ``public_show_all_owned_cards`` enabled it is every owned
+    collection item at full quantity, plus unlinked public-binder rows so
+    binder-only entries do not disappear. Linked binder rows are not added
+    again, avoiding double counting. Variant is kept exact, so an unlinked
+    binder row (variant None) stays distinct from an owned item's default
+    "Normal" variant. Wishlist items and other users' cards never enter here.
+    """
+    show_values = bool(user.public_show_values)
+    all_owned_cards = bool(user.public_show_all_owned_cards)
+    binders = public_collection_binders(db, user)
+    cards_by_binder = _binder_cards_for_binders(db, binders)
+
+    grouped: dict[tuple[str, str | None], dict] = {}
+    binder_rows = [
+        bc
+        for binder in binders
+        for bc in cards_by_binder.get(binder.id, [])
+        if bc.card
+    ]
+
+    if all_owned_cards:
+        for item in _owned_collection_items(db, user):
+            _add_grouped_card(
+                grouped,
+                item.card,
+                item.variant,
+                int(item.quantity or 0),
+            )
+        for bc in binder_rows:
+            if bc.collection_item_id is not None:
+                continue  # already represented by the full owned item quantity
+            _add_grouped_card(
+                grouped,
+                bc.card,
+                None,
+                bc.required_quantity or 1,
+            )
+    else:
+        for bc in binder_rows:
+            _add_grouped_card(
+                grouped,
+                bc.card,
+                _card_variant(bc),
+                bc.required_quantity or 1,
+            )
+
+    entries = sorted(grouped.values(), key=_grouped_card_sort_key)
+    cards = [
+        _serialize_catalogue_card(
+            entry["card"],
+            entry["quantity"],
+            show_values,
+            variant=entry["variant"],
+        )
+        for entry in entries
+    ]
+    total_value = None
+    if show_values:
+        total_value = round(sum(
+            effective_market_price(entry["card"], entry["variant"], _PRICE_FIELD) * entry["quantity"]
+            for entry in entries
+        ), 2)
+
+    return {
+        "handle": user.public_handle,
+        "trainer_name": trainer_name_for(db, user),
+        "show_values": show_values,
+        "all_owned_cards": all_owned_cards,
+        "cards": cards,
+        "card_count": sum(entry["quantity"] for entry in entries),
+        "unique_card_count": len(entries),
+        "total_value": total_value,
     }

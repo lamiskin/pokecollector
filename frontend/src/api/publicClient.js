@@ -17,6 +17,9 @@ export const getPublicProfiles = () =>
 export const getPublicBinder = (handle, binderId) =>
   publicApi.get(`/profiles/${encodeURIComponent(handle)}/binders/${binderId}`).then(r => r.data)
 
+export const getPublicProfileCards = (handle) =>
+  publicApi.get(`/profiles/${encodeURIComponent(handle)}/cards`).then(r => r.data)
+
 export const getPublicBinderLayout = (handle, binderId) =>
   publicApi.get(`/profiles/${encodeURIComponent(handle)}/binders/${binderId}/layout`).then(r => r.data)
 

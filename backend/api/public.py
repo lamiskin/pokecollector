@@ -121,6 +121,17 @@ class PublicDeckDetail(PublicDeckSummary):
     analysis: dict[str, Any]
 
 
+class PublicProfileCards(BaseModel):
+    handle: str
+    trainer_name: str
+    show_values: bool
+    all_owned_cards: bool
+    cards: List[PublicCard]
+    card_count: int
+    unique_card_count: int
+    total_value: Optional[float] = None
+
+
 # Public sharing can be disabled globally or per owner. Require revalidation so a
 # previously opened profile cannot remain visible from a browser cache after either
 # control is switched off. Reverse proxies may still validate their stored response.
@@ -226,6 +237,16 @@ def get_public_profile(handle: str, db: Session = Depends(get_db), response: Res
         raise _not_found("Profile not found")
     _set_public_cache(response)
     return pp.serialize_profile(db, user)
+
+
+@router.get("/profiles/{handle}/cards", response_model=PublicProfileCards)
+def get_public_profile_cards(handle: str, db: Session = Depends(get_db), response: Response = None):
+    _require_public_profiles_enabled(db)
+    user = pp.get_live_profile(db, handle.lower())
+    if not user:
+        raise _not_found("Profile not found")
+    _set_public_cache(response)
+    return pp.serialize_profile_cards(db, user)
 
 
 @router.get("/profiles/{handle}/binders/{binder_id}", response_model=PublicBinderDetail)
