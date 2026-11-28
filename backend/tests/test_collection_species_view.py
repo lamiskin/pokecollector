@@ -28,9 +28,13 @@ class CollectionSpeciesViewTests(unittest.TestCase):
     def test_grouped_endpoint_counts_a_card_once_and_preserves_rows(self):
         # A synchronous in-memory SQLite session cannot cross the worker thread.
         # Invoke the matched endpoint directly after checking route registration.
-        route = next((r for r in self.app.routes if r.path == '/api/collection/by-species'), None)
-        assert route is not None, 'The collection grouping must be available through the API'
-        result = route.endpoint(current_user=self.user, db=self.db, price_field='price_trend', rule_text=None, language='en')
+        # FastAPI 0.165 exposes included routers as `_IncludedRouter` wrappers in
+        # `app.routes` (no `.path`), so assert through the OpenAPI schema instead.
+        assert '/api/collection/by-species' in self.app.openapi()['paths'], (
+            'The collection grouping must be available through the API'
+        )
+        from api.collection import get_collection_by_species
+        result = get_collection_by_species(current_user=self.user, db=self.db, price_field='price_trend', rule_text=None, language='en')
         self.assertEqual(len(result['groups']), 1)
         self.assertEqual(result['groups'][0]['dex_id'], 25)
         self.assertEqual(result['groups'][0]['name'], 'Pikachu')

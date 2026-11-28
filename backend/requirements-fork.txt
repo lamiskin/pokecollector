@@ -1,0 +1,3 @@
+# Fork-only dependencies for personal features. Upstream requirements.txt stays
+# byte-identical so auth/OIDC and other upstream-owned files sync cleanly.
+beautifulsoup4==4.12.3

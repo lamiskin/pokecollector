@@ -13,8 +13,6 @@ pillow==13.0.0
 pillow-heif>=0.20.0,<2
 bcrypt
 slowapi==0.1.9
-# Fork-only Suruga-ya price fetcher (services/suruga_ya_pricing.py).
-beautifulsoup4==4.12.3
 pywebpush==2.5.0
 Authlib>=1.9.3,<2
 joserfc>=1.6.8

@@ -72,9 +72,10 @@ the auth surface are:
   `lock_user_card_allocations`, because explicit account erasure must clean up
   the fork's binder locations.
 - Fork deployment configuration: `docker-compose.yml`, `.env.dev.example`,
-  `.env.prod.example`, `scripts/instance.sh` and the `FORK_*.md` documents keep
-  the instance/project layout and pass upstream `AUTH_MODE`/`OIDC_*` variables
-  through unchanged.
+  `.env.prod.example`, `scripts/instance.sh`, `backend/Dockerfile` and the
+  `FORK_*.md` documents keep the instance/project layout, install
+  `backend/requirements-fork.txt` for non-auth personal features, and pass
+  upstream `AUTH_MODE`/`OIDC_*` variables through unchanged.
 - Settings panels unrelated to authentication (artwork, scanner, binders)
   remain fork-only.
 
