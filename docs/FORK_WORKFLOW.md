@@ -60,6 +60,28 @@ and release PR branches use `release/*`. The `Pull Request Title` workflow
 (`.github/workflows/pr-title.yml`, `scripts/check-pr-title.mjs`) fails a PR whose
 title does not follow this format.
 
+## Authentication and OIDC are upstream-owned
+
+Native authentication and OIDC are upstream's implementation, not a fork
+feature. A `sync/*` branch takes upstream's auth code, migrations, tests, docs,
+nginx handling and frontend auth UI wholesale; do not keep a parallel OIDC
+implementation or blend an earlier fork version back in. The only fork deltas in
+the auth surface are:
+
+- `backend/api/auth.py` `delete_user` also purges `BinderPlacement` rows under
+  `lock_user_card_allocations`, because explicit account erasure must clean up
+  the fork's binder locations.
+- Fork deployment configuration: `docker-compose.yml`, `.env.dev.example`,
+  `.env.prod.example`, `scripts/instance.sh` and the `FORK_*.md` documents keep
+  the instance/project layout and pass upstream `AUTH_MODE`/`OIDC_*` variables
+  through unchanged.
+- Settings panels unrelated to authentication (artwork, scanner, binders)
+  remain fork-only.
+
+Everything else in the auth/OIDC surface must match the synced upstream tag.
+This note is fork-only: it is not upstream documentation and must never be sent
+upstream.
+
 ## Stages and destinations
 
 1. **Implement:** one scoped working branch, with focused tests.
