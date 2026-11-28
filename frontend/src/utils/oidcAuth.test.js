@@ -46,6 +46,18 @@ describe('oidc_error handling', () => {
     expect(oidcErrorTranslationKey('expired')).toBe('auth.oidcErrors.expired')
   })
 
+  it('maps every code the backend can actually emit', () => {
+    // Mirrors _OIDC_ALLOWED_ERROR_CODES in backend/api/auth.py: a code the
+    // backend sends must never fall through to the generic message.
+    expect(oidcErrorTranslationKey('provider_denied')).toBe('auth.oidcErrors.accessDenied')
+    expect(oidcErrorTranslationKey('restart')).toBe('auth.oidcErrors.expired')
+    expect(oidcErrorTranslationKey('reauth_required')).toBe('auth.oidcErrors.reauthRequired')
+    expect(oidcErrorTranslationKey('invalid_state')).toBe('auth.oidcErrors.expired')
+    expect(oidcErrorTranslationKey('invalid_request')).toBe('auth.oidcErrors.expired')
+    expect(oidcErrorTranslationKey('provider_unavailable')).toBe('auth.oidcErrors.unavailable')
+    expect(oidcErrorTranslationKey('provider_error')).toBe('auth.oidcErrors.unavailable')
+  })
+
   it('maps unknown codes to the generic message instead of echoing provider text', () => {
     expect(readOidcError('?oidc_error=<script>alert(1)</script>')).toBe('<script>alert(1)</script>')
     expect(oidcErrorTranslationKey('<script>alert(1)</script>')).toBe('auth.oidcErrors.generic')

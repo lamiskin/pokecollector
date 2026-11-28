@@ -22,6 +22,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Fork-only dependencies (Suruga-ya price fetcher); keep upstream
+# requirements.txt untouched so future syncs stay clean.
+COPY backend/requirements-fork.txt .
+RUN pip install --no-cache-dir -r requirements-fork.txt
+
 COPY VERSION /app/VERSION
 COPY backend/ .
 

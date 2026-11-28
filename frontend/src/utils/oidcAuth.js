@@ -22,6 +22,9 @@ const OIDC_ERROR_TRANSLATION_KEYS = Object.freeze(Object.assign(Object.create(nu
   invalid_state: 'auth.oidcErrors.expired',
   invalid_transaction: 'auth.oidcErrors.expired',
   link_failed: 'auth.oidcErrors.failed',
+  // Codes the backend actually emits (`_OIDC_ALLOWED_ERROR_CODES`).
+  provider_denied: 'auth.oidcErrors.accessDenied',
+  restart: 'auth.oidcErrors.expired',
   provider_error: 'auth.oidcErrors.unavailable',
   provider_unavailable: 'auth.oidcErrors.unavailable',
   reauth_required: 'auth.oidcErrors.reauthRequired',

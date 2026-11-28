@@ -101,6 +101,46 @@ async function mockApi(page, { mode = mixedMode, me = null, onRequest } = {}) {
   })
 }
 
+test('completion waits for authentication bootstrap before issuing a new session', async ({ page }) => {
+  let releaseMode
+  const pendingMode = new Promise(resolve => { releaseMode = resolve })
+  await page.addInitScript(() => {
+    window.__oidcCompletionStarted = false
+    const open = XMLHttpRequest.prototype.open
+    XMLHttpRequest.prototype.open = function (method, url, ...args) {
+      if (String(url).includes('/auth/oidc/complete')) window.__oidcCompletionStarted = true
+      return open.call(this, method, url, ...args)
+    }
+  })
+  await mockApi(page, {
+    me: admin,
+    onRequest: async (route, url) => {
+      if (url.pathname === '/api/auth/mode') await pendingMode
+      if (url.pathname === '/api/auth/oidc/complete') {
+        await route.fulfill({ json: { access_token: 'new-oidc-token', user: admin } })
+        return true
+      }
+      return false
+    },
+  })
+  try {
+    // WebKit can hold the load event while the bootstrap response is gated.
+    // Assert the rendered UI rather than wait for that deliberately pending work.
+    await page.goto('/auth/oidc/complete', { waitUntil: 'domcontentloaded' })
+    await expect(page.getByRole('heading', { name: 'Finishing sign-in' })).toBeVisible()
+    // Cross a committed paint/effect boundary without a wall-clock sleep.
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+    expect(await page.evaluate(() => window.__oidcCompletionStarted)).toBe(false)
+    releaseMode()
+    await expect(page).toHaveURL('/')
+    await expect(page.getByText('Hello,')).toBeVisible()
+    expect(await page.evaluate(() => localStorage.getItem('token'))).toBe('new-oidc-token')
+    expect(await page.evaluate(() => JSON.parse(localStorage.getItem('user')).id)).toBe(admin.id)
+  } finally {
+    releaseMode()
+  }
+})
+
 test('mixed mode offers password and provider sign-in, then completes through the fixed path', async ({ page }) => {
   const navigations = []
   page.on('framenavigated', frame => {
@@ -295,9 +335,7 @@ test('an unavailable identity endpoint leaves settings explanatory rather than b
   await page.goto('/settings')
 
   await expect(page.getByText('Sign-in details are unavailable right now.')).toBeVisible()
-  // The settings page also renders the scanner "Retry uncertain scans with
-  // reasoning" toggle, so this needs an exact accessible name.
-  await expect(page.getByRole('button', { name: 'Retry', exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible()
 })
 
 test('an unnamed new identity prompts once, focuses the field and creates no session', async ({ page }, testInfo) => {

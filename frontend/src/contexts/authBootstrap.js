@@ -1,11 +1,11 @@
 const MAX_RETRY_DELAY_MS = 10_000
 
-const KNOWN_AUTH_MODES = new Set(['local', 'mixed', 'oidc-only'])
-
 // iOS keeps requests pending while offline instead of failing them, so the
 // startup check must give up on its own. A timeout is a network error (no
 // response), never a 401, so it takes the existing degraded/offline path.
 export const AUTH_STARTUP_TIMEOUT_MS = 5_000
+
+const KNOWN_AUTH_MODES = new Set(['local', 'mixed', 'oidc-only'])
 
 export function authRetryDelay(attempt) {
   const safeAttempt = Number.isInteger(attempt) && attempt > 0 ? attempt : 0
@@ -73,7 +73,9 @@ export function normalizeAuthCapabilities(mode) {
 }
 
 export async function loadAuthState({ token, getAuthMode, getMe }) {
-  const capabilities = normalizeAuthCapabilities(await getAuthMode({ timeout: AUTH_STARTUP_TIMEOUT_MS }))
+  const capabilities = normalizeAuthCapabilities(
+    await getAuthMode({ timeout: AUTH_STARTUP_TIMEOUT_MS }),
+  )
 
   if (capabilities.multiUser && !token) {
     return {
@@ -92,6 +94,8 @@ export async function loadAuthState({ token, getAuthMode, getMe }) {
       // Bootstrap decides whether a 401 is an expired session. The shared
       // interceptor must not redirect or clear storage before that decision.
       preserveSession: true,
+      // Without an explicit budget the client default (30 s) applies and an
+      // offline iOS client never reaches the degraded/retry path.
       timeout: AUTH_STARTUP_TIMEOUT_MS,
     })
     return {

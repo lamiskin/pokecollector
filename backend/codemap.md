@@ -60,9 +60,12 @@ Key architectural decisions:
   layout migration after the legacy schema loop. PostgreSQL deferred triggers
   enforce bounds, membership/owner identity and copy counts without rewriting
   existing memberships. See `services/binder_layouts.py` and `api/binder_layouts.py`.
-- **Auth.** JWT bearer tokens (python-jose + bcrypt) via
-  `OAuth2PasswordBearer(tokenUrl="/api/auth/login")` in `api/auth.py`. The
-  shared dependencies are `get_current_user` (401 on missing/invalid token) and
+- **Auth.** JWT bearer tokens (joserfc + bcrypt) via
+  `OAuth2PasswordBearer(tokenUrl="/api/auth/login")` in `api/auth.py`. Native
+  OIDC (`AUTH_MODE=mixed|oidc-only`) is upstream-owned: provider discovery and
+  ID-token validation live in `services/oidc_provider.py`, and login/link
+  handoffs use one-use browser-bound transactions (`services/oidc_transactions.py`).
+  The shared dependencies are `get_current_user` (401 on missing/invalid token) and
   `get_optional_user` (public-vs-private branching). A `USER_MODE` env var can
   force single- or multi-user mode (`env_user_mode` / `mode_is_env_locked`).
 - **Rate limiting.** `slowapi` (`Limiter`, `SlowAPIMiddleware`) at 60 req/min/IP,
