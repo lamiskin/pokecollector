@@ -14,13 +14,13 @@ vi.mock('../contexts/AuthContext', () => ({
   useAuth: () => ({
     user: null,
     loading: false,
-    connectionError: null,
-    loginUser: () => {},
     multiUser: true,
+    loginUser: () => {},
+    // Password-only capability so the forms this test asserts on are the ones
+    // rendered; the OIDC button paths are covered by the Playwright spec.
     passwordLoginEnabled: true,
     oidcEnabled: false,
     oidcDisplayName: '',
-    retryConnection: () => {},
   }),
 }))
 vi.mock('../contexts/SettingsContext', () => ({ useSettings: () => ({ t: (key) => key }) }))

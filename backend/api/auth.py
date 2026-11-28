@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from jose import JWTError
+from joserfc.errors import JoseError
 from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -211,7 +211,7 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
         user_id = payload.get("sub")
         if user_id is None:
             raise HTTPException(status_code=401, detail="Invalid token")
-    except JWTError:
+    except (JoseError, TypeError, ValueError):
         raise HTTPException(status_code=401, detail="Invalid token")
     user = db.query(User).filter(User.id == int(user_id), User.is_active == True).first()
     if not user:
@@ -423,7 +423,7 @@ def _consume_oidc_rate_limit(request: Request, bucket: str) -> bool:
     now = time.monotonic()
     key = _oidc_rate_limit_key(request, bucket)
     with _oidc_rate_lock:
-        if len(_oidc_rate_state) > _OIDC_RATE_LIMIT_MAX_BUCKETS:
+        if len(_oidc_rate_state) >= _OIDC_RATE_LIMIT_MAX_BUCKETS:
             cutoff = now - _OIDC_RATE_LIMIT_WINDOW_SECONDS
             # Bounded sweep: at most a fixed slice of keys is inspected per
             # request, never the whole map, and nothing mutates mid-iteration.
@@ -432,8 +432,13 @@ def _consume_oidc_rate_limit(request: Request, bucket: str) -> bool:
             )
             for existing_key in victims:
                 stamps = _oidc_rate_state.get(existing_key)
-                if not stamps or stamps[-1] < cutoff:
+                if not stamps or stamps[-1] <= cutoff:
                     _oidc_rate_state.pop(existing_key, None)
+        # A client controls its cookie and can present arbitrarily many keys.
+        # Reclaim only expired entries, then fail closed for a new key if full.
+        # Evicting live entries would let cookie churn reset existing budgets.
+        if key not in _oidc_rate_state and len(_oidc_rate_state) >= _OIDC_RATE_LIMIT_MAX_BUCKETS:
+            return False
         stamps = [
             stamp
             for stamp in _oidc_rate_state.get(key, [])
@@ -624,7 +629,7 @@ def _bearer_user_for_completion(db: Session, token: str | None) -> User | None:
     try:
         payload = decode_token(token)
         user_id = int(payload.get("sub"))
-    except (JWTError, TypeError, ValueError):
+    except (JoseError, TypeError, ValueError):
         return None
     return (
         db.query(User)

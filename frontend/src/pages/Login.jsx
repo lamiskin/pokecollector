@@ -132,9 +132,9 @@ export default function Login() {
           {t('auth.password')}
         </label>
         <input
+          name="password"
           id="login-password-saved"
           type="password"
-          name="password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
           className="input w-full"
@@ -167,9 +167,9 @@ export default function Login() {
           {t('auth.username')}
         </label>
         <input
+          name="username"
           id="login-username"
           type="text"
-          name="username"
           value={username}
           onChange={(e) => setUsername(e.target.value)}
           className="input w-full"
@@ -187,9 +187,9 @@ export default function Login() {
           {t('auth.password')}
         </label>
         <input
+          name="password"
           id="login-password"
           type="password"
-          name="password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
           className="input w-full"

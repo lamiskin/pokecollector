@@ -27,6 +27,12 @@ FastAPI app entry point: `backend/main.py`.
 | PUT | `/api/auth/me/avatar` | Update current user's avatar |
 | PUT | `/api/auth/me/username` | Update current user's profile name |
 
+Password-login request bodies are limited to 8 KiB before form parsing. The
+limit applies to both URL-encoded and multipart forms, including streamed
+requests. Oversized requests return HTTP `413` with a JSON `detail` and
+`Cache-Control: no-store`; ordinary login forms and other upload endpoints are
+unchanged.
+
 OIDC behavior, configuration, rollout and host-only identity recovery are
 documented in [OpenID Connect Authentication](OIDC_AUTHENTICATION.md). OIDC
 identity resolution uses exact `(issuer, subject)` pairs; email is not an
@@ -38,6 +44,7 @@ never performs implicit admin bootstrap.
 | Method | Path | Notes |
 |--------|------|-------|
 | GET | `/api/cards/search` | Local card search |
+| POST | `/api/cards/pricing-warnings` | Read-only batch check for possible Cardmarket product collisions |
 | GET | `/api/cards/artist-checklist` | Every catalogue card by an artist with per-printing ownership and progress |
 | GET | `/api/cards/artists` | Artist directory with per-artist owned counts and missing value |
 | GET | `/api/cards/custom` | List the current user's custom cards and shared templates |
@@ -61,9 +68,27 @@ never performs implicit admin bootstrap.
 | GET | `/api/cards/recognize/jobs/{job_id}/items/{item_id}/candidates/{index}/image` | A candidate's full-resolution artwork, served from the shared image cache |
 | POST | `/api/cards/recognize/jobs/{job_id}/items/{item_id}/resolve` | Confirm/dismiss an item and delete its queued photo |
 | POST | `/api/cards/recognize/jobs/{job_id}/items/{item_id}/resolve-and-add` | Atomically add the selected card and resolve the queued item |
-| POST | `/api/cards/recognize/jobs/{job_id}/items/{item_id}/create-custom` | Create a custom card from an unmatched scan, add one owned copy (filed into the job's destination when set) and resolve the item |
 | POST | `/api/cards/recognize/jobs/{job_id}/items/{item_id}/retry` | Retry one reviewable item individually |
 | DELETE | `/api/cards/recognize/jobs/{job_id}` | Delete a job and its queued photos |
+
+`POST /api/cards/pricing-warnings` accepts a JSON body such as
+`{"card_ids": ["me06-136_en", "me06-033_en"]}` with 1 to 500 local card IDs
+(each 1 to 200 characters). It follows the normal card API authentication and
+catalogue-visibility rules and returns `{"warnings": {"<card_id>": [...]}}`.
+Each warning has `code: "shared_cardmarket_product"`,
+`severity: "possible_mismatch"`, the numeric `product_id`, and `other_cards`
+with `id`, `name`, `number`, `rarity`, `set_id` and `lang`.
+
+The check compares different card numbers within the same set and language.
+Repeated finishes and zero-padding differences in the same number do not count.
+Every requested ID has a result; missing, invisible, custom, unnumbered and
+unaffected cards have empty lists. Detection uses only the currently synced local
+catalogue, so an empty list is not independent verification of a price, and an
+unsynced other printing cannot be detected. Shared products can be legitimate.
+The endpoint performs no provider calls and changes no prices, product links or
+collection data. Its SQL reads are batched by localized set, not per requested
+card. Clients can use it without the frontend; response models are also available
+in the generated OpenAPI documentation.
 
 `GET /api/cards/search` accepts `q` (with `name` as a compatibility alias),
 `number`, `set_id`, `type`, `category`, `subtype`, `rarity`, `artist`,
@@ -132,7 +157,7 @@ Preview entries include `id`, `tcg_card_id`, `name`, `lang`, `images_small`,
 Artwork can be requested through `/api/images/card/{id}/small`. Ranking uses
 locally synchronized prices and does not trigger provider requests or updates.
 
-Custom cards belong to exactly one user. Owners may publish a card as a shared template, but other users must clone it before using it in collections, wishlists, binders, products, or trades. Clones have independent IDs, metadata, images, and prices. Manual image URLs must use public HTTPS destinations and are fetched through the size-limited image proxy. Migrating a custom card to its API card keeps the manual image as `custom_image_url` when the official card has no artwork yet (real API art always wins); `upsert_card` clears that fallback once TCGdex publishes art. During upgrade, existing custom cards become shared templates owned by the first-created admin account, while each other referencing user receives one private clone and keeps their existing references.
+Custom cards belong to exactly one user. Owners may publish a card as a shared template, but other users must clone it before using it in collections, wishlists, binders, products, or trades. Clones have independent IDs, metadata, images, and prices. Manual image URLs must use public HTTPS destinations and are fetched through the size-limited image proxy. During upgrade, existing custom cards become shared templates owned by the first-created admin account, while each other referencing user receives one private clone and keeps their existing references.
 
 #### Card valuation
 
@@ -345,26 +370,15 @@ artwork and set logos/symbols also use the frontend's bounded Nginx disk cache
 (up to 1 GiB, discarded with the frontend container). Repeated requests can be
 served without transferring the image from the backend again.
 
-These routes are mutable, not content-addressed assets. Catalogue **card**
-artwork uses `public, max-age=3600, s-maxage=60, must-revalidate`: a browser may
-reuse its copy for up to an hour, while shared caches (the Nginx proxy)
-revalidate every 60 seconds. The cache key embeds a hash of the source URL, so a
-changed artwork URL busts the entry immediately; only refilling the same key in
-place can stay stale in a browser for at most that hour. **Set** logos/symbols
-keep `public, max-age=0, s-maxage=60, must-revalidate`. Existing browser entries
-created by older releases retain their original expiry. ETags are SHA-256 hashes
-of the actual image bytes, so clearing/refilling the database image cache cannot
-incorrectly validate changed bytes just because the source URL stayed the same.
-Set image cache keys include the selected source URL, including English fallback
-URLs.
-
-A first view of uncached artwork blocks on the upstream TCGdex transfer, which
-is seconds rather than milliseconds, so the collection keeps its artwork warm:
-`services/card_artwork.py` owns the shared key/fetch/store path (used by the
-proxy and the warmer), adding a card to the collection queues a background warm
-of its large artwork, and `python -m scripts.warm_collection_artwork` pre-fills
-every distinct card in the collection (re-runnable, bounded concurrency,
-`--dry-run`).
+These routes are mutable, not content-addressed assets. New public responses use
+`public, max-age=0, s-maxage=60, must-revalidate`: browsers revalidate their copy,
+while shared caches may reuse it for at most 60 seconds. Changes to artwork,
+visibility or fallback settings can therefore take up to that interval to reach
+a shared-cache hit. Existing browser entries created by older releases retain
+their original expiry. ETags are SHA-256 hashes of the actual image bytes, so
+clearing/refilling the database image cache cannot incorrectly validate changed
+bytes just because the source URL stayed the same. Set image cache keys include
+the selected source URL, including English fallback URLs.
 
 Manual cards and custom fallback artwork use `private, no-store`. Missing card
 redirects and set placeholders use `no-store`, so a temporary failure does not
@@ -550,8 +564,6 @@ The API in `backend/api/settings.py` routes `ADMIN_ONLY_KEYS` to the global stor
 - `ADMIN_ONLY_KEYS`
   - `full_sync_interval_days`
   - `price_sync_interval_minutes`
-  - `artwork_sweep_interval_hours`
-  - `artwork_sweep_batch_size`
   - `multi_user_mode`
   - `tcgdex_sync_languages`
   - `debug_mode`
@@ -565,9 +577,6 @@ Important behavior:
 - Each user only reads and writes their own `UserSetting` rows
 - Admin-only settings are stored globally in `settings`
 - Recurring automatic syncs include a full sync cadence and a separate small price sync cadence
-- The full sync's startup time is derived from the last successful run in `sync_log`, not from process start, so restarts cannot postpone it. Runs coalesce with a one-hour misfire grace, and rows a previous process left `running` are failed at startup.
-- A full sync that discovers sets it had not seen before messages every user with a complete per-user Telegram configuration (falling back to the global chat). First syncs and digital sets never notify.
-- Card artwork TCGdex publishes after a card was synced is recovered by a separate set-level sweep (`services/artwork_backfill.py`), not by the set sync: a set's card briefs carry no `image`. The sweep checks one set per request via `/cards?set=`, fills only cards with no artwork at all, prioritises sets the user collects or wishes for, and revisits each set on a 3/7/14/30/90-day backoff.
 - `tcgdex_sync_languages` is seeded from `TCGDEX_SYNC_LANGUAGES` only when the row does not exist yet; afterward the DB value is authoritative. Empty or invalid env values safely fall back to `en,de`. The env value `all` expands to every supported TCGdex language during first bootstrap.
 - Supported TCGdex sync language codes are centralized in `services/tcgdex_languages.py`. Optional extra languages are `fr`, `es`, `es-mx`, `it`, `pt`, `pt-br`, `pt-pt`, `nl`, `pl`, `ru`, `ja`, `ko`, `zh-tw`, `id`, `th`, and `zh-cn` in addition to the default `en,de`.
 - English is the preferred cross-language fallback source for missing data, images, and prices by exact TCGdex ID. The backend does not guess English replacements by card name for regional-only cards.
@@ -583,9 +592,6 @@ Important behavior:
 - `/api/sync/` runs the full TCGdex set/card sync using the configured `tcgdex_sync_languages`
 - `/api/sync/prices` runs the small tracked-card price sync
 - `/api/sync/prices/all` force-refreshes prices for all tracked cards
-- `/api/sync/artwork-status` reports the artwork gap, due sets and the last sweep
-- `/api/sync/artwork-recheck` starts a background artwork sweep, optionally limited to `setIds`/`limit`
-- The admin "Clear image cache" action (`POST /api/backup/clear-image-cache`) deletes the `image_cache` rows and reports rows removed and bytes freed
 - Sync status returns current flags plus the last 10 sync log rows
 - Full sync and price sync can be rescheduled through dedicated endpoints
 
@@ -664,7 +670,7 @@ Environment controls:
 `backend/api/recognize.py`, `backend/api/scan_jobs.py`, and `backend/services/scan_queue.py` implement the persistent background queue used by the unified scanner. The direct single-card recognition endpoint remains available for API compatibility:
 
 1. Uploads are bounded, sanitized, orientation-normalized JPEGs with metadata removed.
-2. Two-to-four batch-eligible photos share one indexed composite provider request. Any missing or uncertain position is retried from its original individual photo. A keyless self-hosted endpoint reverses the default: staged photos start as individual scans and grouping is opt-in, because a downscaled grid is where small local models lose small print. `GET /api/settings/scanner` reports the policy as `default_grouping` (`individual` or `automatic`).
+2. Two-to-four batch-eligible photos share one indexed composite provider request. Any missing or uncertain position is retried from its original individual photo.
 3. The selected provider extracts name, split local/total collector number, printed set code, regulation mark, type, HP, language, and artist; uncertain small text stays `null`.
 4. Candidates are found by querying the locally synced `cards` table and ranked deterministically by local number, language, printed total, set code, regulation mark, artist, and HP. Missing evidence is neutral and contradictions are negative. Broad substring rows from either the local catalogue or live TCGdex are retained only when their complete names match after accent, case, and whitespace normalization, so an unrelated containing name or different card suffix cannot become a confident number match. A (language, name) search pair falls back to one live TCGdex call (`_api_search_fallback` in `backend/api/recognize.py`) when it has no name-compatible local rows, or when a collector number was recognized but none of those rows has that number. The second condition matters when a newly released printing reuses an existing card name before the local sync reaches it. The fallback result is used for that one scan only and is never persisted to `cards`. When every required live fallback is unavailable and no local candidate exists, the scan reports a transient catalogue outage instead of a false "no matches" result. Queued scans save the parsed vision result before matching and reuse it for catalogue-outage retries, so recovery does not repeat the paid extraction. Scan traces tag each search-pair result's `source` as `local` or `api_fallback`, and cached retries mark the extraction source as `queue_cache`.
 5. If metadata is inconclusive, conservative pHash can accept a close, clearly separated visual winner without another provider call. It never overrides known contradictions.
@@ -708,70 +714,6 @@ For opted-in attempts, one user-scoped JSON trace and sanitized JPEG are stored.
 When a queued candidate is confirmed, its TCGdex card id labels all stored attempts for that job item as ground truth. `backend/scripts/analyse_scan_traces.py` reports top-1 accuracy, retrieval/ranking misses, decision-mechanism performance, pHash outcomes, and optional field-null/failure details.
 
 Turning consent off stops future capture and leaves existing traces unchanged. There is no automatic retention limit. `DELETE /api/settings/scan-diagnostics` is the explicit per-user deletion action; deleting an account revokes in-flight writes and removes its trace subtree as well. Trace directories use mode `0700` and JSON/JPEG files use `0600`. Diagnostics are not included in SQL backups because they are filesystem analysis data.
-
-## Physical binder pages and slots
-
-Collection binders can optionally have 1–500 numbered visible sides, each with
-three rows and three or four columns. Page count is **not** physical sheet count.
-`BinderPlacement` stores one owned copy per `(binder_id, page, slot)` and references
-the existing reserved `BinderCard` membership. Unplaced quantity is membership
-quantity minus placement count; enabling a layout never infers gallery order or
-changes collection inventory. Planned binders, Planned Decks and Real Decks keep
-their existing semantics. Scan-to-binder continues adding unplaced copies.
-
-Owner endpoints:
-
-- `GET /api/binders/{id}/layout`: layout, placements, grouped tray entries and revision.
-- `POST /api/binders/{id}/layout/preview`: `{page_count, rows: 3, columns: 3|4}`;
-  returns the current revision and exact affected locations. Null page count disables.
-- `PUT /api/binders/{id}/layout`: the same configuration plus `expected_revision`
-  and `confirmed_unplace_ids`. Shrinking returns only out-of-bounds copies to the
-  tray; changing grid geometry returns **all** placed copies, without renumbering.
-- `POST /api/binders/{id}/placements`: `{binder_card_id, placement_id, page, slot,
-  expected_revision, confirm_occupied}`. Null placement ID consumes one tray copy.
-  A placed source swaps with an occupied destination; a tray source returns the
-  displaced copy to the tray. Both require occupied-slot confirmation. Null page
-  **and** slot return the chosen placed copy to the tray, retaining its allocation.
-- `POST /api/binders/{id}/copies/remove`: `{binder_card_id, placement_id,
-  remove_owned_copy, expected_revision}` removes exactly one chosen copy — the
-  placed copy when a placement ID is given, otherwise one tray copy — and with
-  `remove_owned_copy` also deletes one owned collection copy in the same
-  transaction. The owned row disappears only with the last binder copy, and a
-  product-linked final copy is refused unchanged. This is the explicit removal
-  route: it needs no prior return to Not placed, and it clears the layout undo
-  token because membership cannot be replayed. `expected_revision` may be omitted
-  only for a named copy (the card dialog's location row); a moved placement still
-  409s and the locked quantity is read as-is, so it cannot overwrite another move.
-- `POST /api/binders/{id}/layout/undo`: `{expected_revision}` restores the last
-  server-held layout/placement snapshot only if no relevant state changed.
-- `GET /api/cards/{card_id}/locations?collection_item_id=...`: every applicable
-  placed location plus grouped unplaced quantities, owner-scoped.
-
-Writes take the existing user-allocation lock before binder/collection locks.
-Revisions include a monotonic counter and a membership/inventory snapshot. Stale
-requests return 409, never an overwrite. Moves, swaps, layout changes and undo are
-single transactions; failed saves roll back. Membership deletions, quantity
-reductions below placed count, print switches/merges, conversions and allocation
-release identify affected locations and return 409 until the owner explicitly
-returns the chosen copies to Not placed. Reducing unplaced quantities alone is safe.
-Legacy unresolved memberships remain visible in the tray but cannot be placed:
-remove the unresolved membership and re-add an exact owned collection row first.
-
-Public `GET /api/public/profiles/{handle}/binders/{id}/layout` and
-`GET /api/public/profiles/{handle}/cards/{card_id}/locations` enforce the existing
-global/profile/binder sharing gates. They have no mutation counterpart and expose
-only shared binder information, proxy card images and no collection IDs, private
-photos, conditions, purchase data, revisions or undo state. Failed reads are not cached.
-
-Startup uses `services/binder_layout_schema.py`, outside the best-effort legacy
-migration loop. It preserves legacy memberships, verifies constraints and fails
-closed on invalid placement data. PostgreSQL deferred triggers enforce matching
-membership/binder/owner/card, bounds and reserved/owned quantity limits; immediate
-unique/FK constraints prevent duplicate pockets and accidental occupied-parent
-deletion. SQLite unit tests cover service behavior; isolated PostgreSQL tests cover
-deferred integrity, upgrade/rerun preservation and real concurrent writes. Run
-`test_binder_layouts.py`; enable `BINDER_LAYOUTS_POSTGRES_TEST=1` with a disposable
-`DATABASE_URL` for `test_binder_layouts_postgres.py` (unique schemas per test).
 
 ## Bulk removal
 

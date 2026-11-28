@@ -1607,7 +1607,6 @@ def init_db(*, enable_oidc_schema: bool | None = None):
     # cleanup. Never serve writes if their schema/constraints failed to upgrade.
     from services.binder_layout_schema import migrate_binder_layout_schema
     migrate_binder_layout_schema(engine)
-
     # Migrate card IDs to composite format (idempotent)
     try:
         migrate_card_ids()

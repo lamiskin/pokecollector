@@ -1376,11 +1376,24 @@ class ServingConfigurationTests(unittest.TestCase):
         # The backend's no-store and no-referrer reach the browser: the location
         # hides neither and declares no add_header. A path-scoped map suppresses
         # the duplicated server-level policy for OIDC only.
-        self.assertNotIn("proxy_hide_header Referrer-Policy;", oidc_block)
+        # nginx answers 413/502/504 itself with no upstream headers, so the map
+        # supplies no-referrer for every OIDC path and the proxied copy is
+        # hidden to keep exactly one policy on backend responses.
+        self.assertIn("proxy_hide_header Referrer-Policy;", oidc_block)
         self.assertNotIn("proxy_hide_header Cache-Control;", oidc_block)
         self.assertIn("map $uri $referrer_policy", nginx)
-        self.assertIn('~^/api/auth/oidc(/|$) "";', nginx)
-        self.assertIn("add_header Referrer-Policy $referrer_policy always;", nginx)
+        self.assertIn('~^/api/auth/oidc(/|$) "no-referrer";', nginx)
+        # Since 1.58 the server-level headers live in a snippet that every
+        # location includes, so the policy has to be applied there: an inline
+        # add_header in nginx.conf alone would no longer reach real pages.
+        self.assertIn(
+            "include /etc/nginx/snippets/pc-security-headers.conf;", nginx
+        )
+        headers = (self.repo_root / "frontend" / "nginx-security-headers.conf").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("add_header Referrer-Policy $referrer_policy always;", headers)
+        self.assertNotIn("add_header Referrer-Policy \"strict-origin-when-cross-origin\"", headers)
         # No location-level add_header: it would suppress the inherited
         # server-level CSP/frame/permissions headers.
         self.assertEqual(
@@ -1492,9 +1505,39 @@ class ServingConfigurationTests(unittest.TestCase):
             try:
                 with urllib.request.urlopen(url, timeout=10) as response:
                     status = response.status
+                    headers = response.headers
             except urllib.error.HTTPError as exc:
                 status = exc.code
+                headers = exc.headers
             self.assertIn(status, (500, 502, 503, 504))
+            # nginx answered this one itself (the backend is not listening), so
+            # it is the case where the proxy, not the backend, must supply the
+            # policy. Without the map this response carried no policy at all.
+            self.assertEqual(headers.get("Referrer-Policy"), "no-referrer")
+            self.assertIn("default-src 'self'", headers.get("Content-Security-Policy", ""))
+            self.assertIn("camera=(self)", headers.get("Permissions-Policy", ""))
+
+            # A body over the OIDC location's 16k cap is rejected by nginx with
+            # 413 before the request ever reaches the backend.
+            oversized = urllib.request.Request(
+                f"http://127.0.0.1:{port}/api/auth/oidc/start",
+                data=b"x" * (20 * 1024),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(oversized, timeout=10) as response:
+                    oversized_status = response.status
+                    oversized_headers = response.headers
+            except urllib.error.HTTPError as exc:
+                oversized_status = exc.code
+                oversized_headers = exc.headers
+            self.assertEqual(oversized_status, 413)
+            self.assertEqual(oversized_headers.get("Referrer-Policy"), "no-referrer")
+            self.assertIn(
+                "default-src 'self'",
+                oversized_headers.get("Content-Security-Policy", ""),
+            )
 
             time.sleep(0.2)
             logs = subprocess.run(
@@ -1579,13 +1622,14 @@ class OidcRateLimitBucketTests(unittest.TestCase):
         self.assertTrue(keys[0][1].startswith("browser:"))
 
     def test_prune_is_bounded_per_request(self):
-        # An over-full map must not be swept wholesale on the request path.
+        # Sweep only a bounded slice, and fail closed while the remaining
+        # over-capacity map still has no room for another browser bucket.
         auth_api._oidc_rate_state.clear()
         for index in range(auth_api._OIDC_RATE_LIMIT_MAX_BUCKETS + 200):
             auth_api._oidc_rate_state[("start", f"ip:192.0.2.{index}")] = [0.0]
         before = len(auth_api._oidc_rate_state)
 
-        self.assertTrue(
+        self.assertFalse(
             auth_api._consume_oidc_rate_limit(
                 self._request(cookie="prune-cookie"), "start"
             )
@@ -1594,6 +1638,38 @@ class OidcRateLimitBucketTests(unittest.TestCase):
         removed = before - len(auth_api._oidc_rate_state)
         self.assertGreater(removed, 0)
         self.assertLessEqual(removed, auth_api._OIDC_RATE_LIMIT_PRUNE_BATCH)
+
+    def test_active_cookie_churn_cannot_grow_limiter_past_capacity(self):
+        with patch.object(auth_api, "_OIDC_RATE_LIMIT_MAX_BUCKETS", 8), patch.object(
+            auth_api.time, "monotonic", return_value=100.0
+        ):
+            for index in range(8):
+                self.assertTrue(auth_api._consume_oidc_rate_limit(
+                    self._request(cookie=f"active-browser-{index}"), "start"
+                ))
+            for index in range(64):
+                self.assertFalse(auth_api._consume_oidc_rate_limit(
+                    self._request(cookie=f"new-browser-{index}"), "start"
+                ))
+                self.assertLessEqual(len(auth_api._oidc_rate_state), 8)
+            # Saturation must not discard existing clients' request budgets.
+            request = self._request(cookie="active-browser-0")
+            self.assertTrue(all(self._consume(request, auth_api._OIDC_RATE_LIMIT_MAX - 1)))
+            self.assertFalse(auth_api._consume_oidc_rate_limit(request, "start"))
+
+    def test_expired_capacity_can_be_reused_without_evicting_active_budgets(self):
+        with patch.object(auth_api, "_OIDC_RATE_LIMIT_MAX_BUCKETS", 8), patch.object(
+            auth_api.time, "monotonic", return_value=100.0
+        ):
+            active = self._request(cookie="active-browser")
+            self._consume(active, auth_api._OIDC_RATE_LIMIT_MAX)
+            for index in range(7):
+                auth_api._oidc_rate_state[("start", f"expired-{index}")] = [40.0]
+            self.assertTrue(auth_api._consume_oidc_rate_limit(
+                self._request(cookie="new-browser"), "start"
+            ))
+            self.assertLessEqual(len(auth_api._oidc_rate_state), 8)
+            self.assertFalse(auth_api._consume_oidc_rate_limit(active, "start"))
 
     def test_buckets_are_separate_per_endpoint(self):
         request = self._request(cookie="browser-secret-four")
@@ -1684,6 +1760,33 @@ class ProductionStackMiddlewareTests(unittest.TestCase):
         self.assertEqual(response.status_code, 403)
         self.assertNotIn("access-control-allow-origin", response.headers)
         self.assert_security_headers(response)
+
+    def test_oidc_preflight_scope_is_not_changed_by_host_header(self):
+        for host in ("testserver/#", "testserver/?", "testserver/decoy#"):
+            for origin, expected_status in (
+                ("https://evil.example.test", 403),
+                (APP_ORIGIN, 204),
+            ):
+                with self.subTest(host=host, origin=origin):
+                    response = self.client.options(
+                        "/api/auth/oidc/complete",
+                        headers={
+                            "Host": host,
+                            "Origin": origin,
+                            "Access-Control-Request-Method": "POST",
+                        },
+                    )
+                    self.assertEqual(response.status_code, expected_status)
+                    self.assert_security_headers(response)
+                    if expected_status == 403:
+                        self.assertNotIn(
+                            "access-control-allow-origin", response.headers
+                        )
+                    else:
+                        self.assertEqual(
+                            response.headers.get("access-control-allow-origin"),
+                            APP_ORIGIN,
+                        )
 
     def test_oidc_preflight_allows_exact_origin_only(self):
         response = self.client.options(
